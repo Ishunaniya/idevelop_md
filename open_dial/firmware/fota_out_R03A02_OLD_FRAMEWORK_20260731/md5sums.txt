@@ -1,0 +1,14 @@
+e2ee0ae7d560dcc6a02b7a1144606084  ./MANIFEST.md
+a519cd4b52af0db441081d0a2b10fd15  ./README.md
+27b0620352fc1be8559fe3b4ac3ff912  ./TEST_ABSYS_GUIDE.md
+944f5177cda86d059096fbf43f939e32  ./logs/dm_hash.bin
+437965a1022334cddeeb45c4d4d22b96  ./logs/gen_fota.log
+4d243ccded7335ac314ec50adf33742f  ./logs/gen_obm.log
+3bc990e06f516e2c605f56b092c92b4b  ./logs/repack_rootfs.log
+3275b50cdc32051df728051b9a221225  ./logs/unsquashfs_clean.log
+55915d28399f7220127e17d0a11ffa62  ./obm/quectel_obm.md5
+77d3688cbc93c9728715f28a88219e04  ./obm/quectel_obm.size
+9e94f2ace033943236077a9d0ae4e5ac  ./obm/quectel_obm_ota.img
+1cae3817a6e84db3fcfb00173ca4fc04  ./quectel_AB_OTA.img
+3bb7c7fd30f9220018c754c2ae663794  ./root.squashfs
+4e51ce8968441a25e9834678dc010116  ./test_absys

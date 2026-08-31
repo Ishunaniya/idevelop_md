@@ -1,0 +1,3 @@
+. /home/gzw/code/ec200acntar03a02m2g/ql-ol-rootfs/etc/selinux/config
+/home/gzw/code/ec200acntar03a02m2g/tools/bin/setfiles -r /home/gzw/code/ec200acntar03a02m2g/ql-ol-rootfs /home/gzw/code/ec200acntar03a02m2g/ql-ol-rootfs/etc/selinux/quectel/contexts/files/file_contexts /home/gzw/code/ec200acntar03a02m2g/ql-ol-rootfs
+/home/gzw/code/ec200acntar03a02m2g/tools/bin/mksquashfs4 /home/gzw/code/ec200acntar03a02m2g/ql-ol-rootfs /home/gzw/code/ec200acntar03a02m2g/target/root.squashfs -no-exports -noappend -root-owned -comp xz -Xpreset 8 -Xe -Xlc 0 -Xlp 2 -Xpb 2 -Xbcj arm -b 64k -p '/dev d 755 0 0' -p '/dev/console c 600 0 0 5 1' -processors 1

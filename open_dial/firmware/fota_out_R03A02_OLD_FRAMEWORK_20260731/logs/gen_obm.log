@@ -1,0 +1,250 @@
++ chmod +x tim_builder
++ chmod +x mkotafbf
++ obm_fota
++ ./tim_builder -r quectel_skylark_pm802_standard_AB.blf
+Using temporary directories under /tmp/SWD-tGmkMa
+
+TimBuild tool Version: 5.0.0.3
+TimBuild tool Date: 2024-10-31
+
+
+ProcessBLF.....
+ASR1803 platform type
+
+Parsing Blf file: /tmp/ec200a_fota_build.Zug7Bh/fota/quectel_skylark_pm802_standard_AB.blf
+ASR1803 platform type
+Parsing Reserved data.....
+complete to parsing reserved data
+Parsing ExtendedReservedData
+
+complete to parse ExtendedReservedData
+begin to parsing Erase Only Area
+
+begin to parsing image
+Number of images in blf file is 18
+Complete to parsing image info in blf file
+complete to parsing blf file
+
+
+ProcessBLF return.....
+
+ProcessBLF return.....
+Platform is FALCON.....
+
+Preparing FALCON DKBlist
+
+complete to prepare FALCON DKBlist
+
+Tim file name is /tmp/SWD-tGmkMa/temp/DKB_timheader.bin
+
+GenerateTim.....
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+
+GenerateTim  Successfully.....
+
+Successfully encrypted Public Key modulus with DS!
+
+Successfully encrypted Public Key modulus with DS!
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DTim.Primary
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DTim.PPsetting
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+Tim file name is /tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-tGmkMa/temp/DKB_timheader.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DKB_timheader.bin
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DTim.Primary
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Primary
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DTim.Recovery
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Recovery
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DTim.PPsetting2
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting2
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-tGmkMa/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+
+TimBuilder  Successfully.....
+TimBuild successfully...
+++ cat mversion
++ VERSION=OW21.02_asr1803p401_rls988_1.057.067_20251120_13_59_bld1547
++ ./mkotafbf -f quectel_obm_ota.blf -o quectel_obm_ota.img -v OW21.02_asr1803p401_rls988_1.057.067_20251120_13_59_bld1547
+Using temporary directories under /tmp/SWD-Q7zdem
+
+
+ MakeFOTAImage for WEBUI software upgrade Version: 5.0.0.3
+MakeFOTAImage for WEBUI software upgrade Date: 2025-04-16
+
+Usage:  MakeFOTAImage.exe -f BlfFile -o FbfFile -v version
+
+Command line description:
+	-f:Input blf file name
+	-o:output fbf file name
+	-v:FOTA image version number
+	-d:Differential Upgrading Sign
+	-a:After upgrading image's floder name for differential upgrading
+	-b:Before upgrading image's floder name for differential upgrading
+
+ProcessBLF.....
+ASR1803 platform type
+
+Parsing Blf file: /tmp/ec200a_fota_build.Zug7Bh/fota/quectel_obm_ota.blf
+ASR1803 platform type
+Parsing Reserved data.....
+complete to parsing reserved data
+Parsing ExtendedReservedData
+
+complete to parse ExtendedReservedData
+begin to parsing Erase Only Area
+
+begin to parsing image
+Number of images in blf file is 2
+Complete to parsing image info in blf file
+complete to parsing blf file
+
+
+ProcessBLF return.....
+
+ProcessBLF return.....
+Platform is FALCON.....
+
+Preparing FALCON DKBlist
+
+complete to prepare FALCON DKBlist
+
+Tim file name is /tmp/SWD-Q7zdem/temp/DKB_timheader.bin
+
+GenerateTim.....
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+
+GenerateTim  Successfully.....
+
+Successfully encrypted Public Key modulus with DS!
+
+Successfully encrypted Public Key modulus with DS!
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DTim.Primary
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DTim.PPsetting
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+Tim file name is /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-Q7zdem/temp/DKB_timheader.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DKB_timheader.bin
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DTim.Primary
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Primary
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DTim.Recovery
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Recovery
+Error: Fail to open the source file. /tmp/SWD-Q7zdem/AbsBlfTemp/DTim.Recovery
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DTim.PPsetting2
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting2
+Error: Fail to open the source file. /tmp/SWD-Q7zdem/AbsBlfTemp/DTim.PPsetting2
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+
+TimBuilder  Successfully.....
+
+DoFBFMakefileforWebUpgrade....
+
+
+ProcessBLF.....
+ASR1803 platform type
+
+Parsing Blf file: /tmp/ec200a_fota_build.Zug7Bh/fota/quectel_obm_ota.blf
+ASR1803 platform type
+Parsing Reserved data.....
+complete to parsing reserved data
+Parsing ExtendedReservedData
+
+complete to parse ExtendedReservedData
+begin to parsing Erase Only Area
+
+begin to parsing image
+Number of images in blf file is 2
+Complete to parsing image info in blf file
+complete to parsing blf file
+
+
+ProcessBLF return.....
+
+ProcessBLF return.....
+Merging /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin to /tmp/SWD-Q7zdem/AbsBlfTemp/tim_falcon_qspinand.bin
+Merging /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin to /tmp/SWD-Q7zdem/AbsBlfTemp/tim_falcon_qspinand.bin
+Merging /tmp/SWD-Q7zdem/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin to /tmp/SWD-Q7zdem/AbsBlfTemp/tim_falcon_qspinand.bin
+
+Writing Device Header:
+m_dev.nOfImages = 2
+m_dev.DeviceFlags = 0
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/TLoader_QSPINAND.bin
+image header:
+image->Image_ID = 0x4f424d49 
+image->Image_In_TIM = 0x1 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x0001b78c 
+image->commands = 0x3 
+image->First_Sector = 0x1 
+image->length = 0x0001b78c 
+image->Flash_Start_Address = 0x00020000 
+image->ChecksumFormatVersion2 = 0x826d7c24 
+
+Image file name:/tmp/SWD-Q7zdem/AbsBlfTemp/tim_falcon_qspinand.bin
+image header:
+image->Image_ID = 0x54494d48 
+image->Image_In_TIM = 0x1 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x00004038 
+image->commands = 0x3 
+image->First_Sector = 0xf 
+image->length = 0x00004038 
+image->Flash_Start_Address = 0x00000000 
+image->ChecksumFormatVersion2 = 0x3f68d76a 
+
+dump to fbf file
+Finish to dump to fbf file
+OTA Image Path:/tmp/ec200a_fota_build.Zug7Bh/fota/quectel_obm_ota.img
+MakeFOTAImage for WEB successfully....
++ md5sum TLoader_QSPINAND.bin
++ cut -d ' ' -f 1
++ stat -c %s TLoader_QSPINAND.bin

@@ -1,0 +1,14 @@
+
+create_inode: could not create character device /tmp/ec200a_fota_build.Zug7Bh/rootfs_clean/dev/console, because you're not superuser!
+Parallel unsquashfs: Using 8 processors
+1689 inodes (1731 blocks) to write
+
+[=================================================|            ] 2759/3420  80%[============================================================/ ] 3419/3420  99%
+
+created 1158 files
+created 162 directories
+created 530 symlinks
+created 0 devices
+created 0 fifos
+created 0 sockets
+created 0 hardlinks

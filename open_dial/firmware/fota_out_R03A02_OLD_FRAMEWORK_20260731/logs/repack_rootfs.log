@@ -1,0 +1,33 @@
+Pseudo file "dev" exists in source filesystem "/tmp/ec200a_fota_build.Zug7Bh/rootfs_clean/dev".
+Ignoring, exclude it (-e/-ef) to override.
+Parallel mksquashfs: Using 1 processor
+Creating 4.0 filesystem on /tmp/ec200a_fota_build.Zug7Bh/root.squashfs.base, block size 65536.
+[|                                                             ]    0/1736   0%[===================================\                          ] 1000/1736  57%[==========================================|                   ] 1200/1736  69%[=============================================================\] 1736/1736 100%
+
+Squashfs 4.0 filesystem, xz compressed, data block size 65536
+	compressed data, compressed metadata, compressed fragments,
+	compressed xattrs, compressed ids
+	duplicates are removed
+Filesystem size 17240.39 Kbytes (16.84 Mbytes)
+	35.10% of uncompressed filesystem size (49122.63 Kbytes)
+Inode table size 18336 bytes (17.91 Kbytes)
+	18.81% of uncompressed inode table size (97458 bytes)
+Directory table size 19390 bytes (18.94 Kbytes)
+	52.42% of uncompressed directory table size (36992 bytes)
+Xattr table size 386 bytes (0.38 Kbytes)
+	29.31% of uncompressed xattr table size (1317 bytes)
+Number of duplicate files found 14
+Number of inodes 1854
+Number of files 1161
+Number of fragments 159
+Number of symbolic links 530
+Number of device nodes 1
+Number of fifo nodes 0
+Number of socket nodes 0
+Number of directories 162
+Number of hard-links 0
+Number of ids (unique uids + gids) 1
+Number of uids 1
+	root (0)
+Number of gids 1
+	root (0)

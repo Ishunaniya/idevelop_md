@@ -1,0 +1,284 @@
++ chmod +x tim_builder
++ chmod +x mkotafbf
++ '[' '' ']'
++ full_fota
++ ./tim_builder -r quectel_skylark_pm802_standard_AB.blf
+Using temporary directories under /tmp/SWD-rqgqqn
+
+TimBuild tool Version: 5.0.0.3
+TimBuild tool Date: 2024-10-31
+
+
+ProcessBLF.....
+ASR1803 platform type
+
+Parsing Blf file: /tmp/ec200a_fota_build.Zug7Bh/fota/quectel_skylark_pm802_standard_AB.blf
+ASR1803 platform type
+Parsing Reserved data.....
+complete to parsing reserved data
+Parsing ExtendedReservedData
+
+complete to parse ExtendedReservedData
+begin to parsing Erase Only Area
+
+begin to parsing image
+Number of images in blf file is 18
+Complete to parsing image info in blf file
+complete to parsing blf file
+
+
+ProcessBLF return.....
+
+ProcessBLF return.....
+Platform is FALCON.....
+
+Preparing FALCON DKBlist
+
+complete to prepare FALCON DKBlist
+
+Tim file name is /tmp/SWD-rqgqqn/temp/DKB_timheader.bin
+
+GenerateTim.....
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+
+GenerateTim  Successfully.....
+
+Successfully encrypted Public Key modulus with DS!
+
+Successfully encrypted Public Key modulus with DS!
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DTim.Primary
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DTim.PPsetting
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+Tim file name is /tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-rqgqqn/temp/DKB_timheader.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DKB_timheader.bin
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DTim.Primary
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Primary
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DTim.Recovery
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Recovery
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DTim.PPsetting2
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting2
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_WINBOND_128M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_WINBOND_128M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ESMT_64M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ESMT_64M0xFFFF_DTim.PPsetting
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ZMOS_64M0xFFFF_tim_falcon_qspinand.bin
+pSourceFile:/tmp/SWD-rqgqqn/AbsBlfTemp/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DDR_ZMOS_64M0xFFFF_DTim.PPsetting
+
+TimBuilder  Successfully.....
+TimBuild successfully...
+++ cat mversion
++ VERSION=OW21.02_asr1803p401_rls988_1.057.067_20251120_13_59_bld1547
++ ./mkotafbf -f quectel_AB_OTA.blf -o quectel_AB_OTA.img -v OW21.02_asr1803p401_rls988_1.057.067_20251120_13_59_bld1547
+Using temporary directories under /tmp/SWD-LaWk5z
+
+
+ MakeFOTAImage for WEBUI software upgrade Version: 5.0.0.3
+MakeFOTAImage for WEBUI software upgrade Date: 2025-04-16
+
+Usage:  MakeFOTAImage.exe -f BlfFile -o FbfFile -v version
+
+Command line description:
+	-f:Input blf file name
+	-o:output fbf file name
+	-v:FOTA image version number
+	-d:Differential Upgrading Sign
+	-a:After upgrading image's floder name for differential upgrading
+	-b:Before upgrading image's floder name for differential upgrading
+
+ProcessBLF.....
+ASR1803 platform type
+
+Parsing Blf file: /tmp/ec200a_fota_build.Zug7Bh/fota/quectel_AB_OTA.blf
+ASR1803 platform type
+Parsing Reserved data.....
+complete to parsing reserved data
+Parsing ExtendedReservedData
+
+complete to parse ExtendedReservedData
+begin to parsing Erase Only Area
+
+begin to parsing image
+Number of images in blf file is 16
+Complete to parsing image info in blf file
+complete to parsing blf file
+
+
+ProcessBLF return.....
+
+ProcessBLF return.....
+
+GenerateTim.....
+
+GenerateTim  Successfully.....
+
+Successfully encrypted Public Key modulus with DS!
+
+Successfully encrypted Public Key modulus with DS!
+
+Generating DTIM image bin ....
+
+Tim file name is /tmp/SWD-LaWk5z/AbsBlfTemp/DTim.Primary
+
+Generating DTIM image bin ....
+
+pSourceFile:/tmp/SWD-LaWk5z/AbsBlfTemp/DTim.Primary
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Primary
+pSourceFile:/tmp/SWD-LaWk5z/AbsBlfTemp/DTim.PPsetting
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting
+pSourceFile:/tmp/SWD-LaWk5z/AbsBlfTemp/DTim.Recovery
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.Recovery
+pSourceFile:/tmp/SWD-LaWk5z/AbsBlfTemp/DTim.PPsetting2
+pDstFile:/tmp/ec200a_fota_build.Zug7Bh/fota/DTim.PPsetting2
+
+TimBuilder  Successfully.....
+
+DoFBFMakefileforWebUpgrade....
+
+
+ProcessBLF.....
+ASR1803 platform type
+
+Parsing Blf file: /tmp/ec200a_fota_build.Zug7Bh/fota/quectel_AB_OTA.blf
+ASR1803 platform type
+Parsing Reserved data.....
+complete to parsing reserved data
+Parsing ExtendedReservedData
+
+complete to parse ExtendedReservedData
+begin to parsing Erase Only Area
+
+begin to parsing image
+Number of images in blf file is 16
+Complete to parsing image info in blf file
+complete to parsing blf file
+
+
+ProcessBLF return.....
+
+ProcessBLF return.....
+
+Writing Device Header:
+m_dev.nOfImages = 8
+m_dev.DeviceFlags = 0
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/oem_data.squashfs
+image header:
+image->Image_ID = 0x4f454d44 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x01400000 
+image->commands = 0x3 
+image->First_Sector = 0x1 
+image->length = 0x00000138 
+image->Flash_Start_Address = 0x02d00000 
+image->ChecksumFormatVersion2 = 0xb72c8001 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/tos.bin
+image header:
+image->Image_ID = 0x545a5349 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x00069218 
+image->commands = 0x3 
+image->First_Sector = 0x2 
+image->length = 0x00069218 
+image->Flash_Start_Address = 0x02c80000 
+image->ChecksumFormatVersion2 = 0xcdf356c0 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/root.squashfs
+image header:
+image->Image_ID = 0x5359534a 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x01380000 
+image->commands = 0x3 
+image->First_Sector = 0x37 
+image->length = 0x010fb128 
+image->Flash_Start_Address = 0x01900000 
+image->ChecksumFormatVersion2 = 0x21f57dbe 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/zImage
+image header:
+image->Image_ID = 0x5a494d47 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x0043a7c9 
+image->commands = 0x3 
+image->First_Sector = 0x8b5 
+image->length = 0x0043a7cc 
+image->Flash_Start_Address = 0x01100000 
+image->ChecksumFormatVersion2 = 0xe7865f07 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/u-boot.bin
+image header:
+image->Image_ID = 0x4f534c4f 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x000753ec 
+image->commands = 0x3 
+image->First_Sector = 0xad3 
+image->length = 0x000753ec 
+image->Flash_Start_Address = 0x01040000 
+image->ChecksumFormatVersion2 = 0x41630034 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/RFPLUGIN.bin
+image header:
+image->Image_ID = 0x52464249 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x00008000 
+image->commands = 0x3 
+image->First_Sector = 0xb0e 
+image->length = 0x00008000 
+image->Flash_Start_Address = 0x00140000 
+image->ChecksumFormatVersion2 = 0x829fe64b 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/MSA.bin
+image header:
+image->Image_ID = 0x47524249 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x00280000 
+image->commands = 0x3 
+image->First_Sector = 0xb12 
+image->length = 0x00280000 
+image->Flash_Start_Address = 0x00180000 
+image->ChecksumFormatVersion2 = 0xe5a450b2 
+
+Image file name:/tmp/ec200a_fota_build.Zug7Bh/fota/ARBEL.bin
+image header:
+image->Image_ID = 0x41524249 
+image->Image_In_TIM = 0x2 
+image->Flash_partition = 0x00000000 
+image->Flash_erase_size = 0x0075c9dd 
+image->commands = 0x3 
+image->First_Sector = 0xc52 
+image->length = 0x0075c9e0 
+image->Flash_Start_Address = 0x00580000 
+image->ChecksumFormatVersion2 = 0x1cf9b331 
+
+dump to fbf file
+Finish to dump to fbf file
+OTA Image Path:/tmp/ec200a_fota_build.Zug7Bh/fota/quectel_AB_OTA.img
+MakeFOTAImage for WEB successfully....
