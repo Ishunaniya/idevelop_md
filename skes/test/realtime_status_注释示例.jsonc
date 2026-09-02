@@ -1,0 +1,867 @@
+{
+    // ============================================================
+    // chache — 核心运行时数据
+    // ============================================================
+    "chache": {
+
+        // ============================================================
+        // system — 系统信息
+        // ============================================================
+        "system": {
+            // 来源：程序内部，每秒由 setupDateTimeMileageTimer 更新 （暂不推送给 Qt，已注释）
+            "systemDate": "2026-01-01",  // 系统日期，格式 YYYY-MM-DD
+
+            // 来源：程序内部，每秒由 setupDateTimeMileageTimer 更新 （暂不推送给 Qt，已注释）
+            "systemTime": "00:00:00",    // 系统时间，格式 HH:MM:SS
+
+            // 来源：后台线程 networkProbeThread，每5秒 ping 8.8.8.8
+            // 含义：1=网络可达，3=网络不可达
+            "networkSignal": 0,
+
+            // 屏幕亮度（掉电保持）
+            // 来源：Qt下发 cmd_control screenBrightness → updateField("system","screenBrightness")
+            // 处理：立即写 sysfs 背光节点（0%→硬件最低/不黑屏，100%→最亮），并持久化 /data/forklift_persistent.json
+            // 范围：0~100
+            "screenBrightness": 50,
+
+            // 语言（掉电保持）
+            // 来源：Qt下发 cmd_control language → updateField("system","language")，持久化
+            // 含义：0=中文，1=英文
+            "language": 0
+        },
+
+        // ============================================================
+        // mainScreen — 主界面数据
+        // ============================================================
+        "mainScreen": {
+
+            // Seq4 READY指示灯
+            // 来源：CAN0 0x31A BYTE1 Bit0
+            // 含义：1=车辆就绪可行驶，0=未就绪
+            "ready": 0,
+
+            // Seq10 维修扳手图标
+            // 来源：CAN0 0x31A BYTE1 Bit1
+            // 含义：1=需要维护/保养，0=正常
+            "wrench": 0,
+
+            // Seq7 安全带警告图标（反逻辑！）
+            // 来源：CAN0 0x31A BYTE1 Bit2
+            // 处理：CAN bit=0 → seatBeltWarning=1（显示警告）；CAN bit=1 → 0（不显示）
+            // 含义：1=安全带未系，0=已系好
+            "seatBeltWarning": 0,
+
+            // Seq5 脚制动指示灯
+            // 来源：CAN0 0x31A BYTE1 Bit3
+            // 含义：1=脚刹已踩，0=未踩
+            "footBrake": 0,
+
+            // Seq8 坐椅警告图标（反逻辑！）
+            // 来源：CAN0 0x31A BYTE1 Bit4
+            // 处理：CAN bit=0 → seatWarning=1（显示警告）；CAN bit=1 → 0（不显示）
+            // 含义：1=无人坐椅，0=有人坐椅
+            "seatWarning": 0,
+
+            // Seq6 手刹指示灯
+            // 来源：CAN0 0x31A BYTE1 Bit5
+            // 含义：1=手刹已拉，0=未拉
+            "handBrake": 0,
+
+            // Seq9 大灯指示灯（来自VCU反馈，不是仪表下发的控制位）
+            // 来源：CAN0 0x18FD0291 BYTE3 Bit0（DO1输出状态）
+            // 含义：1=大灯已点亮，0=未点亮
+            "headLightStatus": 0,
+
+            // Seq11 故障计数
+            // 来源：CAN0 0x31A BYTE6
+            // 含义：当前活跃故障总数，等于 faultInfo.faultList 的长度
+            "faultCount": 0,
+
+            // 驾驶室风扇控制状态
+            // 来源：Qt下发 cmd_control cabinFan → 写此字段 + 0x31D BYTE0 Bit2
+            // 含义：1=风扇开，0=风扇关
+            "cabinFan": 0,
+
+            // 前大灯控制状态
+            // 来源：Qt下发 cmd_control headLight → 写此字段 + 0x31D BYTE0 Bit4
+            // 含义：1=前大灯开，0=关（注意：实际反馈看 headLightStatus）
+            "headLight": 0,
+
+            // 后大灯控制状态
+            // 来源：Qt下发 cmd_control rearLight → 写此字段 + 0x31D BYTE0 Bit5
+            // 含义：1=后大灯开，0=关
+            "rearLight": 0,
+
+            // 货叉监控控制状态
+            // 来源：Qt下发 cmd_control forkMonitor → 写此字段 + 0x31D BYTE0 Bit6
+            // 含义：1=货叉监控开，0=关
+            "forkMonitor": 0,
+
+            // 一键水平控制状态
+            // 来源：Qt下发 cmd_control oneTouchLeveling → 写此字段 + 0x31D BYTE1 Bit5
+            // 含义：1=一键水平激活，0=关闭；无记忆，重启后需Qt重新下发
+            "oneTouchLeveling": 0,
+
+            // Seq18/19 车速
+            // 来源：CAN0 0x31A BYTE0
+            // 换算：raw × 0.1 = 实际速度 km/h
+            // 范围：0.0 ~ 25.5 km/h
+            "vehicleSpeed": 0.0,
+
+            // Seq20 速度模式
+            // 来源：CAN0 0x31A BYTE1 Bit6~7（2位）
+            // 含义：0=E低速/节能，1=P高速，2=S标准
+            // 注：Qt下发 cmd_control speedMode 也会写此字段
+            "speedMode": 0,
+
+            // Seq21/22 电池电量
+            // 来源：CAN0 0x31A BYTE7
+            // 范围：0~100（%）
+            "batteryLevel": 0,
+
+            // Seq23 行车方向
+            // 来源：CAN1 0x0CFF0008 BYTE4~5（U16小端序，原始值需+10000偏移存储）
+            // 含义：<9990=后退，9990~10010=停止/N档，>10010=前进
+            // 默认值1000：程序初始化值，表示停止
+            "driveDirection": 1000,
+
+            // Seq24 货叉称重
+            // 来源：CAN0 0x31A BYTE2~3（U16小端序）
+            // 范围：0~2000 KG
+            "forkWeight": 0,
+
+            // Seq25 货叉倾角
+            // 来源：CAN0 0x585 BYTE0（int8_t 有符号字节）
+            // 范围：-90° ~ +90°，正=前倾，负=后倾
+            "forkTiltAngle": 0,
+
+            // 货叉高度
+            // 来源：CAN1 0x32B BYTE6~7（U16小端序，单位 mm）
+            // 换算：mm ÷ 1000 = 实际高度 m（如 0x0BB8=3000 → 3.0m）
+            "forkHeight": 0.0,
+
+            // Seq27/28 驱动轮转向角
+            // 来源：CAN0 0x360 BYTE2~3（U16小端序）
+            // 换算：(raw - 1200) × 0.1 = 实际角度（°）
+            // 范围：-120.0° ~ +120.0°，0=正前方
+            "steeringAngle": 0.0,
+
+            // Seq29/30 总里程
+            // 来源：程序内部累计，每秒根据 vehicleSpeed 积分
+            // 持久化：每60秒写入 /data/forklift_persistent.json
+            // 单位：km，精度 0.001 km
+            "totalMileage": 0.0,
+
+            // 单次里程（开机后累计，重启清零）
+            // 来源：程序内部累计，同 totalMileage 逻辑，但不持久化
+            "singleMileage": 0.0,
+
+            // Seq33/34 总工时
+            // 来源：程序内部累计，条件：钥匙ON=1 且 充电中=false
+            // 持久化：每60秒写入 /data/forklift_persistent.json
+            // 单位：小时（h），精度 1/3600 h
+            "totalWorkHours": 0.0,
+
+            // 单次工时（开机后累计，重启清零）
+            // 来源：程序内部累计，同 totalWorkHours 逻辑，但不持久化
+            "singleWorkHours": 0.0
+
+            // 注：heightPositioning / horizontalStopSetting 不在 chache 内。
+            //     它们由 SkesQtBridge 维护在持久化设置 s_settings（/data/forklift_persistent.json），
+            //     推送 Qt 时作为独立 property（SkesQtBridge.cpp:1062-1063，源 s_settings，非 chache.mainScreen），
+            //     写入时落 0x31D BYTE1 Bit6/Bit7。详见 realtime_status_字段说明.md「持久化文件字段」表。
+        },
+
+        // ============================================================
+        // ioStatus — IO状态界面（需求文档 IO状态界面/IO输出界面）
+        // ============================================================
+        "ioStatus": {
+
+            // ── IO输入界面 Seq1.1 油门采样值1
+            // 来源：CAN1 0x32A BYTE1，范围 0~255
+            "accelPedalAi1": 0,
+
+            // ── IO输入界面 Seq1.2 方向盘转向角度采样值1
+            // 来源：CAN1 0x32A BYTE2，范围 0~255
+            "angleSensorAi1": 0,
+
+            // ── IO输入界面 Seq1.3 刹车踏板采样值1
+            // 来源：CAN1 0x32A BYTE3，范围 0~255
+            "brakePedalAi1": 0,
+
+            // ── IO输入界面 Seq1.4 前后移采样值（拇指操纵杆）
+            // 来源：CAN1 0x32A BYTE4，范围 0~255
+            "thumbTelescopicAi": 0,
+
+            // ── IO输入界面 Seq1.5 升降采样值（拇指操纵杆）
+            // 来源：CAN1 0x32A BYTE5，范围 0~255
+            "thumbUpDAi": 0,
+
+            // ── IO输入界面 Seq1.6 倾斜采样值（拇指操纵杆）
+            // 来源：CAN1 0x32A BYTE6，范围 0~255
+            "thumbTiltAi": 0,
+
+            // ── IO输入界面 Seq1.7 侧移采样值（拇指操纵杆）
+            // 来源：CAN1 0x32A BYTE7，范围 0~255
+            "thumbShiftAi": 0,
+
+            // ── IO输入界面 Seq1.8 前后移编码器
+            // 来源：CAN1 0x32B BYTE4，范围 0~255
+            "telescopicPosAi": 0,
+
+            // ── IO输入界面 Seq1.9 油门采样值2
+            // 来源：CAN1 0x32B BYTE1，范围 0~255
+            "accelPedalAi2": 0,
+
+            // ── IO输入界面 Seq1.10 方向盘转向角度采样值2
+            // 来源：CAN1 0x32B BYTE2，范围 0~255
+            "angleSensorAi2": 0,
+
+            // ── IO输入界面 Seq1.11 刹车踏板采样值2
+            // 来源：CAN1 0x32B BYTE3，范围 0~255
+            "brakePedalAi2": 0,
+
+            // ── IO输入界面 Seq1.12 液压压力传感器
+            // 来源：CAN1 0x32B BYTE5，范围 0~255
+            "pressureValveAi": 0,
+
+            // ── IO输入界面 Seq1.13 驻车开关
+            // 来源：CAN1 0x32C BYTE1 Bit6，1=驻车，0=未驻车
+            "brakeSwitch": 0,
+
+            // ── IO输入界面 Seq1.14 门架上升到位开关
+            // 来源：CAN1 0x32C BYTE1 Bit0，1=到位，0=未到位
+            "mastRaiseSwitch": 0,
+
+            // ── IO输入界面 Seq1.15 门架下降到位开关
+            // 来源：CAN1 0x32C BYTE1 Bit1，1=到位，0=未到位
+            "mastLowerSwitch": 0,
+
+            // ── IO输入界面 Seq1.16 属具左移到位开关
+            // 来源：CAN1 0x32C BYTE1 Bit2，1=到位，0=未到位
+            "attachmentLeftSwitch": 0,
+
+            // ── IO输入界面 Seq1.17 属具右移到位开关
+            // 来源：CAN1 0x32C BYTE1 Bit3，1=到位，0=未到位
+            "attachmentRightSwitch": 0,
+
+            // ── IO输入界面 Seq1.18 安全带开关（原始CAN值，非反逻辑处理后的）
+            // 来源：CAN1 0x32C BYTE1 Bit4，1=已系，0=未系
+            "seatBeltSwitch": 0,
+
+            // ── IO输入界面 Seq1.19 座椅开关
+            // 来源：CAN1 0x32C BYTE1 Bit5，1=有人，0=无人
+            "opsSeatSwitch": 0,
+
+
+            // ── IO输出界面 Seq2.13 侧移/倾斜控制输出
+            // 来源：CAN1 0x32C BYTE3 Bit0，1=输出中，0=未输出
+            "attachmentTiltShiftDO": 0,
+
+            // ── IO输出界面 Seq2.10 起升开关控制输出
+            // 来源：CAN1 0x32C BYTE3 Bit1，1=输出中，0=未输出
+            "liftDO": 0,
+
+            // ── IO输出界面 Seq2.14 散热风扇控制输出
+            // 来源：CAN1 0x32C BYTE3 Bit2，1=风扇运行，0=停止
+            "fanDO": 0,
+
+            // ── IO输出界面 Seq2.11 左移/前倾控制输出
+            // 来源：CAN1 0x32C BYTE3 Bit3，1=输出中，0=未输出
+            "attachmentDO1": 0,
+
+            // ── IO输出界面 Seq2.12 右移/后倾控制输出
+            // 来源：CAN1 0x32C BYTE3 Bit4，1=输出中，0=未输出
+            "attachmentDO2": 0,
+
+            // ── IO输出界面 Seq2.4 转向阻尼PWM
+            // 来源：CAN1 0x32C BYTE4，范围 0~255
+            "strPWM": 0,
+
+            // ── IO输出界面 Seq2.2 前移比例阀PWM
+            // 来源：CAN1 0x32C BYTE5，范围 0~255
+            "teleFPWM": 0,
+
+            // ── IO输出界面 Seq2.3 后移比例阀PWM
+            // 来源：CAN1 0x32C BYTE6，范围 0~255
+            "teleRPWM": 0,
+
+            // ── IO输出界面 Seq2.1 下降比例阀PWM
+            // 来源：CAN1 0x32C BYTE7，范围 0~255
+            "downPWM": 0,
+
+            // ── IO输出界面 Seq2.5 转向电机状态机
+            // 来源：CAN0 0x360 BYTE0（Bit0=HMOE回中成功，Bit1=中位信号）
+            // 含义：0x01=HMOE，0x02=中位，0x03=HMOE+中位
+            "strMotorState": 0,
+
+            // ── IO输出界面 Seq2.6 行走电机状态机
+            // 来源：CAN1 0x0CFF0008 BYTE6 Bit0~3
+            // 含义：0=Idle，1=PreCharge，2=Fault，3=SpeedControl（正常运行）
+            "driveMotorState": 0,
+
+            // ── IO输出界面 Seq2.7 油泵电机状态机
+            // 来源：CAN0 0x0CFF0009 BYTE6 Bit0~3
+            // 含义：同行走电机，3=SpeedControl（正常运行）
+            "pumpMotorState": 0,
+
+            // ── IO输出界面 Seq2.8 左承载轮PWM
+            // 来源：CAN0 0x18FF6E17 BYTE5，范围 0~255
+            "leftLoadWheelPWM": 0,
+
+            // ── IO输出界面 Seq2.9 右承载轮PWM
+            // 来源：CAN0 0x18FF6E17 BYTE6，范围 0~255
+            "rightLoadWheelPWM": 0
+        },
+
+        // ============================================================
+        // runStatus — 运行状态界面
+        // ============================================================
+        "runStatus": {
+
+            // 3.1 行走电机目标速度
+            // 来源：CAN0 0x0CFF08EF BYTE3~4（U16小端序，偏移-10000）
+            // 换算：raw - 10000 = 实际转速 RPM
+            "driveMotorTargetSpeed": 0,
+
+            // 3.2 转向电机目标速度
+            // 来源：CAN0 0x359 BYTE4~5（U16小端序，偏移-5000）
+            // 换算：raw - 5000 = 实际转速 RPM
+            "strMotorTargetSpeed": 0,
+
+            // 3.3 油泵电机目标速度
+            // 来源：CAN0 0x0CFF09EF BYTE3~4（U16小端序，偏移-10000）
+            // 换算：raw - 10000 = 实际转速 RPM
+            "pumpMotorTargetSpeed": 0,
+
+            // 3.4 行走电机扭矩
+            // 来源：CAN1 0x0CFF0008 BYTE2~3（U16小端序，偏移-1023）
+            // 换算：raw - 1023 = 实际扭矩 NM
+            "driveMotorTorque": 0,
+
+            // 3.5 行走电机转速
+            // 来源：CAN1 0x0CFF0008 BYTE4~5（U16小端序，偏移-32767）
+            // 换算：raw - 32767 = 实际转速 rpm
+            "driveMotorSpeed": 0,
+
+            // 3.6 行走电机温度
+            // 来源：CAN0 0x0CFF0108 BYTE4（偏移-40）
+            // 换算：raw - 40 = 实际温度 ℃
+            "driveMotorTemp": 0,
+
+            // 3.7 行走IGBT温度
+            // 来源：CAN0 0x0CFF0108 BYTE5（偏移-40）
+            // 换算：raw - 40 = 实际温度 ℃
+            "driveIGBTTemp": 0,
+
+            // 3.8 转向电机电流
+            // 来源：CAN0 0x359 BYTE0~1（U16小端序，分辨率0.1，偏移-500）
+            // 换算：(raw - 500) × 0.1 = 实际电流 A，有符号
+            "strMotorCurrent": 0.0,
+
+            // 3.9 转向电机转速
+            // 来源：CAN0 0x360 BYTE4~5（U16小端序，偏移-5000）
+            // 换算：raw - 5000 = 实际转速 RPM
+            "strMotorSpeed": 0,
+
+            // 3.10 转向电机温度
+            // 来源：CAN0 0x0CFF030A BYTE5（偏移-40）
+            // 换算：raw - 40 = 实际温度 ℃
+            "strMotorTemp": 0,
+
+            // 3.11 转向IGBT温度
+            // 来源：CAN0 0x0CFF030A BYTE6（偏移-40）
+            // 换算：raw - 40 = 实际温度 ℃
+            "strIGBTTemp": 0,
+
+            // 3.12 油泵电机扭矩
+            // 来源：CAN0 0x0CFF0009 BYTE2~3（U16小端序，偏移-1023）
+            // 换算：raw - 1023 = 实际扭矩 NM
+            "pumpMotorTorque": 0,
+
+            // 3.13 油泵电机转速
+            // 来源：CAN0 0x0CFF0009 BYTE4~5（U16小端序，偏移-32767）
+            // 换算：raw - 32767 = 实际转速 rpm
+            "pumpMotorSpeed": 0,
+
+            // 3.14 油泵电机温度
+            // 来源：CAN0 0x0CFF0109 BYTE4（偏移-40）
+            // 换算：raw - 40 = 实际温度 ℃
+            "pumpMotorTemp": 0,
+
+            // 3.15 油泵IGBT温度
+            // 来源：CAN0 0x0CFF0109 BYTE5（偏移-40）
+            // 换算：raw - 40 = 实际温度 ℃
+            "pumpIGBTTemp": 0
+        },
+
+        // ============================================================
+        // versionInfo — 版本信息界面
+        // ============================================================
+        "versionInfo": {
+
+            // 4.1 仪表软件版本（程序内部硬编码，非CAN来源）
+            "meterSoftVersion": "V1.00",
+
+            // 4.2 仪表硬件版本（程序内部硬编码，非CAN来源）
+            "meterHardVersion": "V1.00",
+
+            // 4.3 仪表工作时间（等于 mainScreen.totalWorkHours）
+            // 来源：程序内部累计，每秒同步更新
+            // 单位：小时（h）
+            "meterWorkHours": 0.0,
+
+            // 4.4 总行驶里程（等于 mainScreen.totalMileage）
+            // 来源：程序内部累计，每秒同步更新
+            // 单位：km
+            "meterTotalMileage": 0.0,
+
+            // 4.5 行走MCU软件版本
+            // 来源：CAN1 0x0CFF0308 BYTE2（U8整数）
+            "driveMcuSoftVersion": 0,
+
+            // 4.6 行走MCU工作时间
+            // 来源：程序内部累计，条件：ioStatus.driveMotorState == 3（SpeedControl）
+            // 单位：小时（h）
+            "driveMcuWorkHours": 0.0,
+
+            // 4.7 转向MCU软件版本
+            // 来源：CAN1 0x0CFF030A BYTE2（U8整数）
+            "steerMcuSoftVersion": 0,
+
+            // 4.8 转向MCU工作时间
+            // 来源：程序内部累计，条件：CAN0 0x360 BYTE0 Bit0（HMOE回中成功）= 1
+            // 单位：小时（h）
+            "steerMcuWorkHours": 0.0,
+
+            // 4.9 油泵MCU软件版本
+            // 来源：CAN1 0x0CFF0309 BYTE2（U8整数）
+            "pumpMcuSoftVersion": 0,
+
+            // 4.10 油泵MCU工作时间
+            // 来源：程序内部累计，条件：ioStatus.pumpMotorState == 3（SpeedControl）
+            // 单位：小时（h）
+            "pumpMcuWorkHours": 0.0,
+
+            // 4.11 BMS软件版本
+            // 来源：CAN1 0x0CFF8203 BYTE4（U8整数）
+            "bmsSoftVersion": 0,
+
+            // 4.12 车辆VIN码（17位ASCII字符串）
+            // 来源：CAN1 三帧拼合（100ms周期）:
+            //   0x33B BYTE0=7, BYTE1~7 → VIN第1~7位
+            //   0x33C BYTE0=8, BYTE1~7 → VIN第8~14位
+            //   0x33D BYTE0=9, BYTE1~3 → VIN第15~17位
+            // 每帧到达时写入对应位置，最终拼成完整17位字符串
+            // 默认值 "-----------------" 表示尚未收到VIN
+            "vehicleVin": "-----------------",
+
+            // 4.13 VCU软件版本（7字节ASCII字符串）
+            // 来源：CAN1 0x33A BYTE1~7
+            "vcuSoftVersion": "---",
+
+            // 4.14 仪表编码（仪表自身回显，暂未实现）
+            // 字段暂缺，待实现
+
+            // 4.15 BCM软件版本
+            // 来源：CAN0 0x18FD0291 BYTE7（U8整数，表示版本号）
+            "bcmSoftVersion": 0,
+
+            // VCU工作时间（来自 0x33D BYTE6，与4.12 VIN码帧同帧）
+            // 来源：CAN1 0x33D BYTE6（U8，分辨率1，偏移0）
+            // 单位：小时（h）
+            "vcuWorktime": 0
+        },
+
+        // ============================================================
+        // faultInfo — 故障信息
+        // ============================================================
+        "faultInfo": {
+
+            // 当前活跃故障总数（等于 faultList 数组长度）
+            // 来源：程序内部维护，updateFaultEntry() 自动同步
+            "faultCount": 0,
+
+            // 故障列表（JSON 数组，推送给 Qt 时序列化为字符串）
+            // 每条故障格式：
+            // { "seq": 1, "type": 1, "type_name": "用户提醒", "code": 5, "time": "14:23:01" }
+            // type含义：1=用户提醒，2=VCU故障，3=行走MCU故障，4=转向MCU故障，5=油泵MCU故障，6=BMS故障，7=BCM故障
+            "faultList": [],
+
+            // 用户提醒故障码（故障类型1）
+            // 来源：CAN1 0x32D BYTE1
+            // 含义：0=无故障，非0=故障码（自动写入/移出 faultList）
+            "userErr": 0,
+
+            // VCU故障码（故障类型2）
+            // 来源：CAN1 0x32E BYTE1
+            // 含义：0=无故障，非0=故障码
+            "vcuErr": 0,
+
+            // 行走MCU故障码（故障类型3）
+            // 来源：CAN0 0x0CFF0208 BYTE4~5（U16小端序）
+            // 含义：0=无故障，非0=故障码
+            "driveMcuErr": 0,
+
+            // 转向MCU故障码（故障类型4）
+            // 来源：CAN0 0x360 BYTE1
+            // 含义：0=无故障，非0=故障码
+            "steerMcuErr": 0,
+
+            // 油泵MCU故障码（故障类型5）
+            // 来源：CAN0 0x0CFF0209 BYTE4~5（U16小端序）
+            // 含义：0=无故障，非0=故障码
+            "pumpMcuErr": 0,
+
+            // BMS故障严重等级（故障类型6）
+            // 来源：CAN0 0x0CFF8003（BYTE3 Bit0~1=总故障状态 0正常/1预警/2一级/3二级）
+            // 含义：0=无故障；有故障位时取严重等级（severity≠0 取 severity，否则=1）
+            "bmsErr": 0,
+
+            // BCM故障码（故障类型7）
+            // 现状：尚未解析，保持默认 0（预留字段，无 CAN 写入；故障类型名见 case 7="BCM故障"）
+            // 注：BCM 当前仅解析软件版本 versionInfo.bcmSoftVersion（0x18FD0291 BYTE7），故障码未接入
+            "bcmErr": 0,
+
+            // 保养提示标志
+            // 来源：程序内部，首次300h触发，后续每1200h触发
+            // 含义：true=需要保养，false=正常
+            "maintenanceAlert": false
+        },
+
+        // ============================================================
+        // driveSettings — 行走参数（PDO参数，addr 1~14）
+        // 读写协议：CAN0 0x111（写/读请求）↔ 0x222（VCU应答）
+        // 上电后由 VcuPdoManager 批量后台读，Qt可通过 cmd_control 修改
+        // ============================================================
+        "driveSettings": {
+
+            // PDO addr=1  高速档最大速度
+            "highSpeedMax":     0,
+
+            // PDO addr=2  高速档加速度
+            "highSpeedAccel":   0,
+
+            // PDO addr=3  高速档减速度
+            "highSpeedDecel":   0,
+
+            // PDO addr=4  标准档最大速度
+            "stdSpeedMax":      0,
+
+            // PDO addr=5  标准档加速度
+            "stdSpeedAccel":    0,
+
+            // PDO addr=6  标准档减速度
+            "stdSpeedDecel":    0,
+
+            // PDO addr=7  低速档最大速度
+            "lowSpeedMax":      0,
+
+            // PDO addr=8  低速档加速度
+            "lowSpeedAccel":    0,
+
+            // PDO addr=9  低速档减速度
+            "lowSpeedDecel":    0,
+
+            // PDO addr=10 方向盘电位器左限位
+            "steerPotLeft":     0,
+
+            // PDO addr=11 方向盘电位器中位
+            "steerPotMid":      0,
+
+            // PDO addr=12 方向盘电位器右限位
+            "steerPotRight":    0,
+
+            // PDO addr=13 承载轮制动使能（0=禁用，1=启用）
+            "loadWheelBrakeEn": 0,
+
+            // PDO addr=14 承载轮制动力比例（%）
+            "loadWheelBrakePct":0
+        },
+
+        // ============================================================
+        // pumpSettings — 油泵参数（PDO参数，addr 15~30）
+        // 读写协议同 driveSettings
+        // ============================================================
+        "pumpSettings": {
+
+            // PDO addr=15 起升最大速度
+            "liftMaxSpeed":   0,
+
+            // PDO addr=16 倾斜最大速度
+            "tiltMaxSpeed":   0,
+
+            // PDO addr=17 侧移最大速度
+            "sideMaxSpeed":   0,
+
+            // PDO addr=18 属具最大速度
+            "attachMaxSpeed": 0,
+
+            // PDO addr=19 起升最大高度（mm）
+            "liftMaxHeight":  0,
+
+            // PDO addr=20 货叉水平角度（°）
+            "forkLevelAngle": 0,
+
+            // PDO addr=21 高度定址1目标高度（mm）
+            "heightAddr1":    0,
+
+            // PDO addr=22 高度定址2目标高度（mm）
+            "heightAddr2":    0,
+
+            // PDO addr=23 高度定址3目标高度（mm）
+            "heightAddr3":    0,
+
+            // PDO addr=24 高度定址4目标高度（mm）
+            "heightAddr4":    0,
+
+            // PDO addr=25 高度定址5目标高度（mm）
+            "heightAddr5":    0,
+
+            // PDO addr=26 称重标定指令（写1触发标定，写后自动清零）
+            "weighCalibCmd":  0,
+
+            // PDO addr=27 重量设定值（kg）
+            "weightSet":      0,
+
+            // PDO addr=28 压力标定值
+            "pressureCalib":  0,
+
+            // PDO addr=29 起升缓冲高度（mm，接近最大高度时减速缓冲）
+            "liftBufHeight":  0,
+
+            // PDO addr=30 下降缓冲高度（mm，接近最低位时减速缓冲）
+            "dropBufHeight":  0
+        },
+
+        // ============================================================
+        // bmsData — 电池管理系统（BMS）数据
+        // 来源：CAN0 0x0CFF7C03（主帧）/ 0x0CFF7D03（单体）/ 0x0CFF7F03（绝缘）
+        // ============================================================
+        "bmsData": {
+
+            // BMS-1 总电压
+            // 来源：CAN0 0x0CFF7C03 BYTE0~1（U16小端序，×0.1 V）
+            // 注：存储值已 ×10（整数），Qt端除以10得实际V
+            "voltage": 0,
+
+            // BMS-2 工作电流（有符号）
+            // 来源：CAN0 0x0CFF7C03 BYTE2~3（S16小端序，×0.1 A）
+            // 注：存储值已 ×10（整数），正=放电，负=充电
+            "current": 0,
+
+            // BMS-3 SOC（电量百分比）
+            // 来源：CAN0 0x0CFF7C03 BYTE4
+            // 范围：0~100（%）
+            "soc": 0,
+
+            // BMS-4 绝缘阻值
+            // 来源：CAN0 0x0CFF7F03 BYTE6~7（U16小端序）
+            // 单位：KΩ
+            "insulation": 0,
+
+            // BMS-5 最高单体电压
+            // 来源：CAN0 0x0CFF7D03 BYTE0~1（U16小端序，×0.1 V）
+            // 注：存储值为原始值，Qt端 ×0.1 得实际V
+            "cellVoltMax": 0,
+
+            // BMS-6 最低单体电压
+            // 来源：CAN0 0x0CFF7D03 BYTE2~3（U16小端序，×0.1 V）
+            "cellVoltMin": 0,
+
+            // BMS-7 最高单体温度
+            // 来源：CAN0 0x0CFF7D03 BYTE4（×0.1 ℃）
+            "cellTempMax": 0,
+
+            // BMS-8 最低单体温度
+            // 来源：CAN0 0x0CFF7D03 BYTE5（×0.1 ℃）
+            "cellTempMin": 0,
+
+            // BMS-9 主正继电器状态
+            // 来源：CAN0 0x0CFF7C03 BYTE6 Bit4~5
+            // 含义：0=断开，1=闭合，2=故障
+            "relayMainPos": 0,
+
+            // BMS-10 主负继电器状态
+            // 来源：CAN0 0x0CFF7C03 BYTE6 Bit6~7
+            // 含义：0=断开，1=闭合，2=故障
+            "relayMainNeg": 0,
+
+            // BMS-11 预充继电器状态
+            // 来源：CAN0 0x0CFF7C03 BYTE7 Bit4~5
+            // 含义：0=断开，1=闭合，2=故障
+            "relayPrecharge": 0,
+
+            // BMS-12 DC继电器状态
+            // 来源：CAN0 0x0CFF7C03 BYTE7 Bit0~1
+            // 含义：0=断开，1=闭合，2=故障
+            "relayDC": 0,
+
+            // BMS-13 加热继电器状态
+            // 来源：CAN0 0x0CFF7C03 BYTE6 Bit0~1
+            // 含义：0=断开，1=闭合，2=故障
+            "relayHeat": 0,
+
+            // BMS-14 充电继电器状态
+            // 来源：CAN0 0x0CFF7C03 BYTE6 Bit2~3
+            // 含义：0=断开，1=闭合，2=故障
+            "relayCharge": 0,
+
+            // BMS-15 BMS请求下高压
+            // 来源：CAN0 0x0CFF7C03 BYTE5 Bit7
+            // 含义：0=不请求，1=请求切断高压
+            "bmsHvOff": 0,
+
+            // BMS-16 充电激活信号
+            // 来源：CAN0 0x0CFF7C03 BYTE5 Bit6
+            // 含义：0=无A+信号，1=有A+信号
+            "chargeActivate": 0,
+
+            // BMS-17 充电连接状态
+            // 来源：CAN0 0x0CFF7C03 BYTE5 Bit4~5
+            // 含义：0=未连接，1=直流充电，2=交流充电
+            "chargeConnection": 0,
+
+            // BMS-18 充电模式（工时计时用：!=0 时停止工时计时）
+            // 来源：CAN0 0x0CFF7C03 BYTE5 Bit2~3
+            // 含义：0=未充电，1=充电中，2=充电结束
+            "chargingMode": 0,
+
+            // BMS-19 BMS自检状态
+            // 来源：CAN0 0x0CFF7C03 BYTE5 Bit0~1
+            // 含义：0=自检中，1=自检完成，2=自检失败
+            "bmsSelfCheck": 0,
+
+            // VCU上电指令（来自独立帧，非BMS帧）
+            // 来源：CAN0 0x18FE7C03 BYTE0 Bit0
+            // 含义：0=下电请求，1=上电请求
+            "vcuPowerCmd": 0,
+
+            // BMS-21 ON档唤醒信号
+            // 来源：CAN0 0x0CFF7C03 BYTE7 Bit6
+            // 含义：1=有唤醒信号，0=无
+            "onWakeup": 0
+        },
+
+        "testCalibration": {
+            // Seq9.1 软件使能（Qt下发，无记忆，重启恢复0）
+            // 来源：CAN0 0x31D BYTE7 Bit0
+            // 含义：1=打开，0=关闭
+            "softwareEnable": 0,
+
+            // 禁用刷卡（Qt下发 cmd_control disableCardSwipe，掉电保持）
+            // 含义：1=禁用RFID刷卡弹窗，0=允许
+            // 仪表自身逻辑，无CAN帧
+            "disableCardSwipe": 0,
+
+            // 显示LOGO（Qt下发 cmd_control displayLogo，掉电保持）
+            // 含义：1=显示SANY LOGO，0=隐藏
+            // 仪表自身逻辑，无CAN帧
+            "displayLogo": 0,
+
+            // 临时刷卡（Qt下发 cmd_control tempCardSwipe，掉电保持）
+            // 含义：1=CAN0 0x4D1 byte0 bit1 置1（模拟刷卡），0=清0
+            // 触发式发送，非周期
+            "tempCardSwipe": 0
+        },
+
+        // ============================================================
+        // rfidData — RFID刷卡数据
+        // 来源：CAN1 0x4D1（状态/卡号）+ CAN1 0x4D2（解锁时长）
+        // ============================================================
+        "rfidData": {
+
+            // 心跳状态
+            // 来源：CAN1 0x4D1 BYTE0 Bit0
+            // 含义：0=灯灭，1=灯亮
+            "heartbeatStatus": 0,
+
+            // 工作状态
+            // 来源：CAN1 0x4D1 BYTE0 Bit1
+            // 含义：0=待机，1=工作
+            "workStatus": 0,
+
+            // 故障状态
+            // 来源：CAN1 0x4D1 BYTE0 Bit2~4（0x07）
+            // 含义：0=正常，1=解卡失败/IC卡未录入，2=加卡错误/已达最大数
+            "faultStatus": 0,
+
+            // 帧序号（每收到一帧 0x4D1 自增1）
+            // 来源：程序内部计数
+            "sequence": 0,
+
+            // 解锁卡号（4字节 UID，十六进制字符串）
+            // 来源：CAN1 0x4D1 BYTE1~4，格式 "%02X%02X%02X%02X"
+            "unlockCardId": "",
+
+            // 解卡时间（工作状态 0→1 跳变时记录，格式同 faultNowStr）
+            // 来源：程序内部，工作状态上升沿写入
+            "unlockTime": "",
+
+            // 上一次解卡时长
+            // 来源：CAN1 0x4D2 BYTE4~5（小端序）
+            "unlockDuration": 0
+        },
+
+        // ============================================================
+        // fuseBoxStatus — 保险盒状态
+        // 来源：CAN0 0x18FD0291
+        // 说明：BYTE0 循环发送故障码（多个故障时轮流发送），BYTE0=0 表示全部恢复
+        // ============================================================
+        "fuseBoxStatus": {
+
+            // 当前循环发来的保险盒故障码（原始值，0=全部正常）
+            // 来源：CAN0 0x18FD0291 BYTE0
+            "fuseFaultCode": 0,
+
+            // 当前所有活跃故障码的列表（JSON 数组）
+            // 例：K9和K12同时故障 → [9, 12]
+            "activeFaultCodes": [],
+
+            // K5继电器故障状态
+            // 含义：true=K5故障（指示灯灭），false=正常
+            "k5":  false,
+
+            // K7继电器故障状态
+            "k7":  false,
+
+            // K9继电器故障状态
+            "k9":  false,
+
+            // K10继电器故障状态
+            "k10": false,
+
+            // K11继电器故障状态
+            "k11": false,
+
+            // K12继电器故障状态
+            "k12": false,
+
+            // F5~F24 保险丝故障状态
+            // 含义：true=该保险丝故障（指示灯灭），false=正常
+            "f5":  false, "f6":  false, "f7":  false, "f8":  false,
+            "f9":  false, "f10": false, "f11": false, "f12": false,
+            "f13": false, "f14": false, "f15": false, "f16": false,
+            "f17": false, "f18": false, "f19": false, "f20": false,
+            "f21": false, "f22": false, "f23": false, "f24": false,
+
+            // DI1~DI7 数字输入状态（来自 BYTE2 Bit0~6）
+            // di1 = Bit0 钥匙ON；其余 di2~di7 为通用DI
+            "di1": 0, "di2": 0, "di3": 0, "di4": 0,
+            "di5": 0, "di6": 0, "di7": 0,
+
+            // 心跳位（来自 BYTE2 Bit7，BCM与VCU通信正常时交替翻转）
+            "heartbeat": 0,
+
+            // DO1~DO6 数字输出状态（来自 BYTE3 Bit0~5）
+            "do1": 0, "do2": 0, "do3": 0,
+            "do4": 0, "do5": 0, "do6": 0,
+
+            // C11输出比例（来自 BYTE5，范围 0~255）
+            "c11Ratio": 0,
+
+            // C12输出比例（来自 BYTE6，范围 0~255）
+            "c12Ratio": 0
+        }
+    }
+}
