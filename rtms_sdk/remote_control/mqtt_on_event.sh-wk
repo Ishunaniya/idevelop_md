@@ -1,0 +1,2293 @@
+#!/bin/bash
+# 监听 nanocat 事件：
+#   event_code==11 -> 杀掉 erk*，AT 连接 MQTT 并订阅下行主题
+#   event_code==13 -> 读 MQTT：WAKEUP 后持续监听；CUSTOM 各模块 ACK→发 CAN→结果
+#   其它 event_code -> 后台拉起 modem_test / erk-daemon.sh（各类型仅处理一次）
+# CUSTOM 模块（新C协议）：
+#   AcControl / WindowControl / LockControl / LightControl / Location /
+#   BatteryWarmControl / RemoteCtrlParamSet
+# 需求见 AT/TBOX远程控制需求文档*.pdf 、AT/新C纯电氢燃料自卸车远控协议*.docx
+# EC200A / Quectel MQTT：recv/mode=1 进 buffer；qos=0 时 PUB msgId 必须为 0
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ---------- 可配置参数（可用环境变量覆盖）----------
+NANOCAT_CMD="${NANOCAT_CMD:-nanocat --sub -l 48000 -A}"
+EVENT_CODE_SLEEP="${EVENT_CODE_SLEEP:-11}"
+EVENT_CODE_WAKEUP="${EVENT_CODE_WAKEUP:-13}"
+ERK_PATTERN="${ERK_PATTERN:-erk}"
+STUB_PATTERN="${STUB_PATTERN:-stub}"
+SERIAL_PORT="${SERIAL_PORT:-/dev/ttyUSB2}"
+SERIAL_BAUD="${SERIAL_BAUD:-115200}"
+MQTT_HOST="${MQTT_HOST:-120.76.240.167}"
+MQTT_PORT="${MQTT_PORT:-63728}"
+MQTT_TOPIC="${MQTT_TOPIC:-v4/s/post/device/cmd/json/1.0}"
+MQTT_RESP_TOPIC="${MQTT_RESP_TOPIC:-v4/p/resp/post/device/cmd/json/1.0}"
+MQTT_CLIENT_ID="${MQTT_CLIENT_ID:-test0903}"
+MQTT_USER="${MQTT_USER:-test0903}"
+MQTT_PASS="${MQTT_PASS:-test0903}"
+MQTT_CLIENT_IDX="${MQTT_CLIENT_IDX:-0}"
+# recv/mode: 0=URC直出payload；1=进buffer需QMTRECV
+MQTT_RECV_MODE="${MQTT_RECV_MODE:-1}"
+# MQTT 心跳 keepalive（秒），默认 5 分钟
+MQTT_KEEPALIVE_SEC="${MQTT_KEEPALIVE_SEC:-300}"
+MQTT_RECV_ROUNDS="${MQTT_RECV_ROUNDS:-5}"
+MQTT_RECV_INTERVAL="${MQTT_RECV_INTERVAL:-1}"
+# 持续监听轮询间隔（秒）；读到命令后立即处理，无数据时休眠
+MQTT_CMD_POLL_SEC="${MQTT_CMD_POLL_SEC:-0.2}"
+# 单次 QMTRECV 串口等待上限（秒）；须覆盖整包 payload，不能过短
+MQTT_RECV_WAIT_SEC="${MQTT_RECV_WAIT_SEC:-2}"
+# 见到 OK 后再多等一会，收尾部异步 URC（+QMTRECV: idx,recv_id）
+MQTT_RECV_OK_GRACE_SEC="${MQTT_RECV_OK_GRACE_SEC:-0.35}"
+MQTT_URC_TIMEOUT="${MQTT_URC_TIMEOUT:-15}"
+MODEM_TEST_BIN="${MODEM_TEST_BIN:-/usr/bin/modem_test}"
+ERK_DAEMON_SH="${ERK_DAEMON_SH:-/media/sdcard/erk-root/erk-daemon.sh}"
+LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/mqtt_on_event.log}"
+# CAN nanomsg：PUB=下发（connect），SUB=收反馈（listen）
+CAN_PUB_PORT="${CAN_PUB_PORT:-26002}"
+CAN_PUB_ADDR="${CAN_PUB_ADDR:-tcp://0.0.0.0:${CAN_PUB_PORT}}"
+CAN_PUB_FILE="${CAN_PUB_FILE:-${SCRIPT_DIR}/cmd_can_data}"
+CAN_PUB_DELAY_SEC="${CAN_PUB_DELAY_SEC:-1}"
+# CAN 反馈：nanocat --sub -l <port> --hex
+CAN_SUB_PORT="${CAN_SUB_PORT:-16002}"
+# 兼容旧环境变量 CAN_SUB_ADDR（若仍设置 tcp://host:port，则只取端口）
+if [ -n "${CAN_SUB_ADDR:-}" ]; then
+  CAN_SUB_PORT="$(printf '%s' "$CAN_SUB_ADDR" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+  CAN_SUB_PORT="${CAN_SUB_PORT:-16002}"
+fi
+# 空调 TBOX_P2_ACCtrl / AC_P2_RemoteACSt
+AC_CAN_ID="${AC_CAN_ID:-0x1ACDEF4A}"
+AC_FB_CAN_ID="${AC_FB_CAN_ID:-0x1AD99219}"
+# 门锁车窗大灯寻车 TBOX_B_RemoteDoorWindowCmd / DCM_B_RemoteDoorWindowAck / CCM_B_LightSt
+DOOR_CAN_ID="${DOOR_CAN_ID:-0x1ACDEB4A}"
+DOOR_FB_CAN_ID="${DOOR_FB_CAN_ID:-0x1ACDDCEC}"
+LIGHT_FB_CAN_ID="${LIGHT_FB_CAN_ID:-0x1ACDD91E}"
+# 电池加热 TBOX_P2_RemoteBatteryHeatReq / BMS_P2_RemoteBatteryHeatSt
+BATT_CAN_ID="${BATT_CAN_ID:-0x1ACDE94A}"
+BATT_FB_CAN_ID="${BATT_FB_CAN_ID:-0x1ACE0CF3}"
+AC_CAN_INTERVAL_SEC="${AC_CAN_INTERVAL_SEC:-0.1}"
+AC_FB_TIMEOUT_SEC="${AC_FB_TIMEOUT_SEC:-3}"
+# 门锁/车窗/大灯/寻车：统一发 3s 后停止（V1.1）
+DOOR_SEND_SEC="${DOOR_SEND_SEC:-3}"
+BATT_FB_TIMEOUT_SEC="${BATT_FB_TIMEOUT_SEC:-3}"
+# 远控默认参数（RemoteCtrlParamSet）持久化
+RC_PARAM_FILE="${RC_PARAM_FILE:-${SCRIPT_DIR}/.rc_param.json}"
+NANOCAT_BIN="${NANOCAT_BIN:-nanocat}"
+
+HANDLED_EVENT_11=0
+HANDLED_EVENT_12=0
+HANDLED_EVENT_OTHER=0
+LAST_AT_RESP=""
+MQTT_AT_ACTIVE=0
+MQTT_LISTEN_PID=""
+AC_SEND_PID=""
+BATT_SEND_PID=""
+DOOR_SEND_PID=""
+AC_MONITOR_PID=""
+
+log() {
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+  echo "$msg" | tee -a "$LOG_FILE"
+}
+
+# 毫秒时间戳（busybox/旧 date 无 %3N，统一用 python）
+now_ms() {
+  python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo "$(date +%s)000"
+}
+
+BG_PID_FILE="${BG_PID_FILE:-${SCRIPT_DIR}/.bg_pids}"
+NANOCAT_FIFO="${NANOCAT_FIFO:-${SCRIPT_DIR}/.nanocat.fifo}"
+CLEANING_UP=0
+
+# 记录后台 pid，供退出时统一清理（监听循环子 shell 里启动的也能被主进程杀掉）
+record_bg_pid() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  echo "$pid" >>"$BG_PID_FILE" 2>/dev/null || true
+}
+
+list_child_pids() {
+  local parent="$1"
+  ps -eo pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2==p {print $1}'
+  # 兼容部分 busybox
+  ps -o pid= --ppid "$parent" 2>/dev/null || true
+}
+
+# 递归杀掉进程树（先子后父）
+kill_pid_tree() {
+  local pid="$1"
+  local sig="${2:-TERM}"
+  local c
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  for c in $(list_child_pids "$pid" | sort -u); do
+    [ -n "$c" ] || continue
+    [ "$c" = "$pid" ] && continue
+    kill_pid_tree "$c" "$sig"
+  done
+  kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+kill_recorded_bg_pids() {
+  local sig="${1:-TERM}"
+  local pid
+  if [ -f "$BG_PID_FILE" ]; then
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      kill_pid_tree "$pid" "$sig"
+    done <"$BG_PID_FILE"
+  fi
+  if [ -f "${SCRIPT_DIR}/.mqtt_listen.pid" ]; then
+    pid="$(cat "${SCRIPT_DIR}/.mqtt_listen.pid" 2>/dev/null || true)"
+    kill_pid_tree "$pid" "$sig"
+  fi
+  if [ -f "${SCRIPT_DIR}/.nanocat_evt.pid" ]; then
+    pid="$(cat "${SCRIPT_DIR}/.nanocat_evt.pid" 2>/dev/null || true)"
+    kill_pid_tree "$pid" "$sig"
+  fi
+}
+
+# 按命令行特征补杀本脚本相关残留（CAN 反馈 nanocat / 串口 cat）
+kill_stray_helpers() {
+  local sig="${1:-TERM}"
+  local pid cmd
+  ps -eo pid=,args= 2>/dev/null | while read -r pid cmd; do
+    [ -n "$pid" ] || continue
+    [ "$pid" = "$$" ] && continue
+    case "$cmd" in
+      *"${NANOCAT_BIN} --pub --connect"*|*"nanocat --pub --connect"*| \
+      *"${NANOCAT_BIN} --pub -l ${CAN_PUB_PORT}"*|*"nanocat --pub -l ${CAN_PUB_PORT}"*| \
+      *"${NANOCAT_BIN} --sub -l ${CAN_SUB_PORT}"*|*"nanocat --sub -l ${CAN_SUB_PORT}"*)
+        kill "-$sig" "$pid" 2>/dev/null || true
+        ;;
+      *"cat ${SERIAL_PORT}"*)
+        case "$cmd" in
+          *timeout*|*cat*)
+            kill "-$sig" "$pid" 2>/dev/null || true
+            ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+# 从一行 JSON 中取出 event.all.data 里第一条记录的 event_code（第二个字段）
+extract_event_code() {
+  local line="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json,sys
+try:
+    o=json.loads(sys.argv[1])
+    data=o.get("event",{}).get("all",{}).get("data")
+    if isinstance(data,list) and data and isinstance(data[0],list) and len(data[0])>=2:
+        print(data[0][1])
+except Exception:
+    pass
+' "$line" 2>/dev/null
+    return
+  fi
+  echo "$line" | sed -n 's/.*"data"[[:space:]]*:[[:space:]]*\[\[[0-9][0-9]*[[:space:]]*,[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1
+}
+
+# 按进程名前缀匹配 pid（comm 以 pattern 开头）
+list_pattern_pids() {
+  local pattern="$1"
+  ps -eo pid=,comm= 2>/dev/null | awk -v p="$pattern" '$2 ~ ("^" p) { print $1 }'
+}
+
+# 按 cmdline 模糊匹配 pid
+list_pattern_script_pids() {
+  local pattern="$1"
+  pgrep -f "${pattern}" 2>/dev/null | while read -r pid; do
+    [ -r "/proc/${pid}/cmdline" ] || continue
+    tr '\0' ' ' <"/proc/${pid}/cmdline" | grep -q "${pattern}" || continue
+    echo "$pid"
+  done
+}
+
+list_erk_pids() {
+  list_pattern_pids "$ERK_PATTERN"
+}
+
+list_erk_script_pids() {
+  list_pattern_script_pids "$ERK_PATTERN"
+}
+
+# 杀掉匹配某一前缀的进程（先 TERM，再 KILL）
+kill_pattern_processes() {
+  local pattern="$1"
+  local label="${2:-$pattern}"
+  local pids
+  log "杀掉匹配 '${pattern}*' 的进程..."
+  pids="$(list_pattern_pids "$pattern"; list_pattern_script_pids "$pattern")"
+  pids="$(echo "$pids" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  if [ -z "$pids" ]; then
+    log "未找到 ${pattern}* 相关进程"
+    return 0
+  fi
+  log "找到 ${label} 进程: $pids"
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+  sleep 1
+  pids="$(list_pattern_pids "$pattern"; list_pattern_script_pids "$pattern")"
+  pids="$(echo "$pids" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  if [ -n "$pids" ]; then
+    log "仍存活，发送 SIGKILL: $pids"
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+  fi
+  log "${label} 相关进程已处理完毕"
+}
+
+kill_erk_processes() {
+  kill_pattern_processes "$ERK_PATTERN" "erk"
+  kill_pattern_processes "$STUB_PATTERN" "stub"
+}
+
+serial_ready() {
+  [ -c "$SERIAL_PORT" ] && [ "$SERIAL_PORT" != "/dev/null" ]
+}
+
+serial_setup() {
+  return 
+  stty -F "$SERIAL_PORT" "$SERIAL_BAUD" raw -echo -echoe -echok 2>/dev/null || true
+}
+
+# 向串口发送一条 AT 指令并读回显；结果写入 LAST_AT_RESP
+# flush_first=1 会丢弃串口已有数据（读 MQTT / 等 URC 前必须用 0）
+at_send() {
+  local cmd="$1"
+  local wait_sec="${2:-2}"
+  local flush_first="${3:-1}"
+  LAST_AT_RESP=""
+  log "AT >>> $cmd"
+  if ! serial_ready; then
+    log "警告: 串口 $SERIAL_PORT 不可用，仅打印指令（dry-run）"
+    return 1
+  fi
+  serial_setup
+  if [ "$flush_first" = "1" ]; then
+    timeout 0.2 cat "$SERIAL_PORT" >/dev/null 2>&1 || true
+  fi
+  # shellcheck disable=SC2039
+  if ! echo -e "${cmd}\r\n" >"$SERIAL_PORT" 2>/dev/null; then
+    log "警告: 写入 $SERIAL_PORT 失败"
+    return 1
+  fi
+  LAST_AT_RESP="$(timeout "$wait_sec" cat "$SERIAL_PORT" 2>/dev/null | tr -d '\r' || true)"
+  if [ -n "$LAST_AT_RESP" ]; then
+    printf '%s\n' "$LAST_AT_RESP" | tee -a "$LOG_FILE"
+  fi
+  echo >>"$LOG_FILE"
+}
+
+# 读 MQTT 时禁止 flush，避免丢掉 +QMTRECV URC
+at_send_no_flush() {
+  at_send "$1" "$2" 0
+}
+
+# 读串口上已到达的数据（不清空丢弃）
+serial_collect() {
+  local max_sec="${1:-2}"
+  local buf="" chunk
+  local start end now
+  if ! serial_ready; then
+    return 1
+  fi
+  serial_setup
+  start="$(date +%s)"
+  end=$((start + max_sec))
+  while true; do
+    now="$(date +%s)"
+    if [ "$now" -ge "$end" ]; then
+      break
+    fi
+    chunk="$(timeout 0.2 cat "$SERIAL_PORT" 2>/dev/null | tr -d '\r' || true)"
+    if [ -n "$chunk" ]; then
+      buf="${buf}${chunk}"
+      end=$((now + 1))
+    fi
+  done
+  if [ -n "$buf" ]; then
+    LAST_AT_RESP="${buf}"
+    printf '%s\n' "$buf" | tee -a "$LOG_FILE"
+    echo >>"$LOG_FILE"
+  fi
+}
+
+# 短轮询等待串口出现指定标记
+at_wait_for() {
+  local needle="$1"
+  local max_sec="${2:-3}"
+  local buf="" chunk
+  local start end now
+  start="$(date +%s)"
+  end=$((start + max_sec))
+  LAST_AT_RESP=""
+  while true; do
+    now="$(date +%s)"
+    if [ "$now" -ge "$end" ]; then
+      break
+    fi
+    chunk="$(timeout 0.15 cat "$SERIAL_PORT" 2>/dev/null | tr -d '\r' || true)"
+    if [ -n "$chunk" ]; then
+      buf="${buf}${chunk}"
+      case "$buf" in
+        *"${needle}"*)
+          LAST_AT_RESP="$buf"
+          printf '%s\n' "$LAST_AT_RESP" | tee -a "$LOG_FILE"
+          echo >>"$LOG_FILE"
+          return 0
+          ;;
+        *ERROR*)
+          LAST_AT_RESP="$buf"
+          printf '%s\n' "$LAST_AT_RESP" | tee -a "$LOG_FILE"
+          echo >>"$LOG_FILE"
+          return 1
+          ;;
+      esac
+    fi
+  done
+  LAST_AT_RESP="$buf"
+  if [ -n "$LAST_AT_RESP" ]; then
+    printf '%s\n' "$LAST_AT_RESP" | tee -a "$LOG_FILE"
+    echo >>"$LOG_FILE"
+  fi
+  return 1
+}
+
+# 发送 AT 后等待异步 URC（如 +QMTOPEN: 0,0）
+# 成功条件：needle 出现且不含 ERROR
+at_send_wait_urc() {
+  local cmd="$1"
+  local needle="$2"
+  local max_sec="${3:-$MQTT_URC_TIMEOUT}"
+  local wait_after="${4:-2}"
+  local buf=""
+
+  at_send_no_flush "$cmd" "$wait_after" || return 1
+  buf="${LAST_AT_RESP}"
+  case "$buf" in
+    *"${needle}"*)
+      log "已收到 URC: ${needle}"
+      return 0
+      ;;
+    *ERROR*)
+      log "警告: 指令失败 ERROR，回显=[${buf}]"
+      return 1
+      ;;
+  esac
+
+  log "等待 URC 含 '${needle}'（最多 ${max_sec}s）..."
+  if at_wait_for "$needle" "$max_sec"; then
+    LAST_AT_RESP="${buf}"$'\n'"${LAST_AT_RESP}"
+    log "已收到 URC: ${needle}"
+    return 0
+  fi
+  LAST_AT_RESP="${buf}"$'\n'"${LAST_AT_RESP}"
+  log "警告: 超时未收到 '${needle}'，回显=[${LAST_AT_RESP}]"
+  return 1
+}
+
+# 发送原始字节（QMTPUB '>' 后写 payload 时可用）
+at_write_raw() {
+  local data="$1"
+  if ! serial_ready; then
+    log "警告: 串口不可用，跳过 raw 写入（dry-run） len=${#data}"
+    return 1
+  fi
+  serial_setup
+  if ! printf '%s' "$data" | dd of="$SERIAL_PORT" bs=4096 conv=notrunc status=none 2>/dev/null; then
+    if ! printf '%s' "$data" >"$SERIAL_PORT" 2>/dev/null; then
+      log "警告: raw 写入 $SERIAL_PORT 失败"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# 读发布结果
+at_read_for() {
+  local max_sec="${1:-8}"
+  local buf="" chunk
+  local start end now
+  start="$(date +%s)"
+  end=$((start + max_sec))
+  LAST_AT_RESP=""
+  while true; do
+    now="$(date +%s)"
+    if [ "$now" -ge "$end" ]; then
+      break
+    fi
+    chunk="$(timeout 0.3 cat "$SERIAL_PORT" 2>/dev/null | tr -d '\r' || true)"
+    if [ -n "$chunk" ]; then
+      buf="${buf}${chunk}"
+      case "$buf" in
+        *"+QMTPUB"*|*"+QMTPUBEX"*|*ERROR*)
+          break
+          ;;
+      esac
+    fi
+  done
+  LAST_AT_RESP="$buf"
+  if [ -n "$LAST_AT_RESP" ]; then
+    printf '%s\n' "$LAST_AT_RESP" | tee -a "$LOG_FILE"
+    echo >>"$LOG_FILE"
+  fi
+}
+
+connect_mqtt_via_at() {
+  log "开始 AT 连接 MQTT ${MQTT_HOST}:${MQTT_PORT} topic=${MQTT_TOPIC} recv/mode=${MQTT_RECV_MODE} keepalive=${MQTT_KEEPALIVE_SEC}s"
+  local idx="$MQTT_CLIENT_IDX"
+
+  at_send "AT" 1 || true
+  at_send "ATE0" 1 || true
+  # MQTT 3.1.1
+  at_send "AT+QMTCFG=\"version\",${idx},4" 2 || true
+  # 心跳 keepalive（秒），默认 300=5 分钟
+  at_send "AT+QMTCFG=\"keepalive\",${idx},${MQTT_KEEPALIVE_SEC}" 2 || true
+  # msg_recv_mode: 1=进 buffer；msg_len_enable=1
+  at_send "AT+QMTCFG=\"recv/mode\",${idx},${MQTT_RECV_MODE},1" 2 || true
+
+  at_send "AT+QMTCLOSE=${idx}" 2 || true
+  sleep 1
+
+  # 异步：OK 后还需 +QMTOPEN: <idx>,0
+  if ! at_send_wait_urc "AT+QMTOPEN=${idx},\"${MQTT_HOST}\",${MQTT_PORT}" "+QMTOPEN: ${idx},0" "$MQTT_URC_TIMEOUT" 4; then
+    # 允许 result 带空格: +QMTOPEN: 0,0
+    if ! printf '%s' "$LAST_AT_RESP" | grep -qE "\+QMTOPEN:[[:space:]]*${idx},[[:space:]]*0"; then
+      log "警告: QMTOPEN 可能失败，继续尝试 CONN"
+    fi
+  fi
+  sleep 1
+
+  if ! at_send_wait_urc "AT+QMTCONN=${idx},\"${MQTT_CLIENT_ID}\",\"${MQTT_USER}\",\"${MQTT_PASS}\"" "+QMTCONN: ${idx},0,0" "$MQTT_URC_TIMEOUT" 4; then
+    if ! printf '%s' "$LAST_AT_RESP" | grep -qE "\+QMTCONN:[[:space:]]*${idx},[[:space:]]*0,[[:space:]]*0"; then
+      log "警告: QMTCONN 可能失败，继续尝试 SUB"
+    fi
+  fi
+  sleep 1
+
+  # +QMTSUB: <idx>,<msgid>,<result>[,<qos>]  result=0 成功
+  if ! at_send_wait_urc "AT+QMTSUB=${idx},1,\"${MQTT_TOPIC}\",0" "+QMTSUB: ${idx},1,0" "$MQTT_URC_TIMEOUT" 4; then
+    if ! printf '%s' "$LAST_AT_RESP" | grep -qE "\+QMTSUB:[[:space:]]*${idx},[[:space:]]*1,[[:space:]]*0"; then
+      log "警告: QMTSUB 可能失败"
+      MQTT_AT_ACTIVE=0
+      log "AT MQTT 连接/订阅未确认成功"
+      return 1
+    fi
+  fi
+
+  MQTT_AT_ACTIVE=1
+  log "AT MQTT 连接/订阅已确认"
+  return 0
+}
+
+# 从 AT+QMTRECV 回显中抽出 payload JSON
+# 现场格式示例：
+#   +QMTRECV: 0,0
+#   +QMTRECV: 0,0,"v4/s/post/device/cmd/json/1.0",234,"{   "header": { ... } }"
+#   OK
+# 优先按 payload_len 截取；否则按花括号配对截取（支持带空格/换行的 JSON）
+extract_mqtt_payloads() {
+  local text="$1"
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "警告: 无 python3，无法解析 MQTT payload"
+    return 1
+  fi
+  TEXT="$text" python3 - <<'PY' 2>/dev/null
+import json, os, re
+
+text = os.environ.get("TEXT", "")
+
+def try_emit(s):
+    if not s:
+        return False
+    # 去掉首尾引号
+    s = s.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1]
+    candidates = [s, s.replace('\\"', '"'), re.sub(r"\s+", " ", s)]
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+            # 紧凑输出，便于后续处理
+            print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+            return True
+        except Exception:
+            continue
+    # 仅截取最外层 {}
+    a, b = s.find("{"), s.rfind("}")
+    if a >= 0 and b > a:
+        try:
+            obj = json.loads(s[a : b + 1])
+            print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+            return True
+        except Exception:
+            pass
+    return False
+
+def extract_by_brace(s, start):
+    i = s.find("{", start)
+    if i < 0:
+        return None, start
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(i, len(s)):
+        ch = s[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[i : j + 1], j + 1
+    return None, start
+
+emitted = set()
+
+# 1) 带长度: +QMTRECV: idx,msgid,"topic",len, ...
+pat_len = re.compile(
+    r'\+QMTRECV:\s*\d+\s*,\s*\d+\s*,\s*"[^"]*"\s*,\s*(\d+)\s*,',
+    re.M,
+)
+for m in pat_len.finditer(text):
+    plen = int(m.group(1))
+    pos = m.end()
+    # 跳过空白
+    while pos < len(text) and text[pos] in " \t":
+        pos += 1
+    raw = ""
+    if pos < len(text) and text[pos] == '"':
+        # 引号包裹：按长度取；长度含 JSON 本体时从 " 后取 plen 字节
+        pos += 1
+        raw = text[pos : pos + plen]
+        # 若截断处不在 }，向后补到配对 }
+        if raw.count("{") > raw.count("}"):
+            extra, _ = extract_by_brace(text, pos)
+            if extra:
+                raw = extra
+    else:
+        raw = text[pos : pos + plen]
+    if try_emit(raw):
+        emitted.add(raw)
+        continue
+    # 长度不准时回退花括号
+    blob, _ = extract_by_brace(text, m.start())
+    if blob and try_emit(blob):
+        emitted.add(blob)
+
+# 2) 无长度或上面未命中：凡含 topic 的 +QMTRECV 用花括号提取
+for m in re.finditer(r"\+QMTRECV:\s*\d+\s*,\s*\d+\s*,", text):
+    # 跳过纯通知（后面没有引号/topic）
+    rest = text[m.end() : m.end() + 8]
+    if not rest.lstrip().startswith('"'):
+        # 可能是 +QMTRECV: 0,0\n 通知行
+        line_end = text.find("\n", m.start())
+        chunk = text[m.start() : line_end if line_end >= 0 else m.start() + 40]
+        if '"' not in chunk and "{" not in chunk:
+            continue
+    blob, _ = extract_by_brace(text, m.start())
+    if blob and blob not in emitted:
+        if try_emit(blob):
+            emitted.add(blob)
+PY
+}
+
+# 从串口文本解析有消息的 recv_id（0-4）
+# 支持两种形式：
+#   1) 查询: +QMTRECV: <idx>,s0,s1,s2,s3,s4  (si=1 表示该槽有消息)
+#   2) 唤醒通知 URC: +QMTRECV: <idx>,<recv_id>[,<payload_len>]
+#      （网络数据唤醒时模组常先报这条，需再用 AT+QMTRECV=idx,recv_id 取内容）
+extract_recv_ids() {
+  local text="$1"
+  local idx="$MQTT_CLIENT_IDX"
+  TEXT="$text" IDX="$idx" python3 - <<'PY' 2>/dev/null
+import re, os
+text = os.environ.get("TEXT", "")
+idx = os.environ.get("IDX", "0")
+seen = set()
+
+# 查询缓冲状态（5 个 store_status）
+pat5 = re.compile(
+    r"\+QMTRECV:\s*"
+    + re.escape(idx)
+    + r"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$",
+    re.M,
+)
+for m in pat5.finditer(text):
+    for rid, st in enumerate(m.groups()):
+        if st == "1":
+            seen.add(rid)
+
+# 唤醒/缓存通知: +QMTRECV: idx,recv_id  或 +QMTRECV: idx,recv_id,len
+# 排除已带 topic/payload 的完整行（含引号或花括号）
+pat_notify = re.compile(
+    r"\+QMTRECV:\s*"
+    + re.escape(idx)
+    + r"\s*,\s*(\d+)\s*(?:,\s*\d+)?\s*$",
+    re.M,
+)
+for m in pat_notify.finditer(text):
+    line_start = text.rfind("\n", 0, m.start()) + 1
+    line_end = text.find("\n", m.end())
+    if line_end < 0:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    if '"' in line or "{" in line:
+        continue
+    rid = int(m.group(1))
+    if 0 <= rid <= 4:
+        seen.add(rid)
+
+for rid in sorted(seen):
+    print(rid)
+PY
+}
+
+# 解析 payload 摘要（stdout: cmds 名列表），便于日志
+summarize_mqtt_payload() {
+  local payload="$1"
+  python3 -c '
+import json,sys
+try:
+    o=json.loads(sys.argv[1])
+except Exception as e:
+    print("invalid_json:%s" % e)
+    sys.exit(0)
+hdr=o.get("header") or {}
+cmds=(o.get("body") or {}).get("cmds") or []
+names=[c.get("name","?") for c in cmds if isinstance(c,dict)]
+print("msgId=%s ts=%s cmds=%s" % (hdr.get("msgId",""), hdr.get("ts",""), ",".join(names) or "(none)"))
+' "$payload" 2>/dev/null
+}
+
+parse_wakeup_cmd() {
+  local payload="$1"
+  python3 -c '
+import json,sys,time
+try:
+    o=json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+cmds=(o.get("body") or {}).get("cmds") or []
+if not any(isinstance(c,dict) and c.get("name")=="WAKEUP" for c in cmds):
+    sys.exit(2)
+hdr=o.get("header") or {}
+msg_id=hdr.get("msgId","")
+ts=hdr.get("ts")
+if ts is None:
+    ts=int(time.time()*1000)
+print("%s\t%s" % (msg_id, ts))
+' "$payload" 2>/dev/null
+}
+
+build_wakeup_resp() {
+  local msg_id="$1"
+  local ts="$2"
+  python3 -c '
+import json,sys,time
+msg_id=sys.argv[1]
+try:
+    ts=int(sys.argv[2])
+except Exception:
+    ts=int(time.time()*1000)
+obj={
+  "header": {"msgId": msg_id, "ts": ts},
+  "body": {
+    "hasError": False,
+    "isAck": False,
+    "results": {
+      "id": "",
+      "cmds": [{"name":"WAKEUP","code":0,"desc":"","tips":""}]
+    }
+  }
+}
+print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+' "$msg_id" "$ts"
+}
+
+# CUSTOM 命令 ACK：hasError=0, isAck=true, results={}
+build_ack_resp() {
+  local msg_id="$1"
+  local ts="$2"
+  python3 -c '
+import json,sys,time
+msg_id=sys.argv[1]
+try:
+    ts=int(sys.argv[2]) if sys.argv[2] else 0
+except Exception:
+    ts=0
+if not ts:
+    ts=int(time.time()*1000)
+obj={"header":{"msgId":msg_id,"ts":ts},"body":{"hasError":0,"isAck":True,"results":{}}}
+print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+' "$msg_id" "$ts"
+}
+
+# CUSTOM 结果：isAck=false
+build_custom_result_resp() {
+  local msg_id="$1"
+  local ts="$2"
+  local code="${3:-0}"
+  local name="${4:-CUSTOM}"
+  python3 -c '
+import json,sys,time
+msg_id,ts_s,code,name=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]
+try:
+    ts=int(ts_s) if ts_s else 0
+except Exception:
+    ts=0
+if not ts:
+    ts=int(time.time()*1000)
+obj={
+  "header":{"msgId":msg_id,"ts":ts},
+  "body":{
+    "hasError":0,
+    "isAck":False,
+    "results":{"id":"","cmds":[{"name":name,"code":code,"output":None,"desc":"","tips":""}]}
+  }
+}
+print(json.dumps(obj, separators=(",", ":"), ensure_ascii=False))
+' "$msg_id" "$ts" "$code" "$name"
+}
+
+# 解析 CUSTOM；stdout 一行（字段以 ASCII Unit Separator \x1f 分隔）:
+#   msgId US ts US ptype US mod_type US switch US mode US temp US duration US inner_json
+# 无 CUSTOM 则 exit 2
+parse_custom_cmd() {
+  local payload="$1"
+  python3 -c '
+import json,sys,time
+try:
+    o=json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+hdr=o.get("header") or {}
+msg_id=hdr.get("msgId","")
+ts=hdr.get("ts")
+if ts is None:
+    ts=int(time.time()*1000)
+cmds=(o.get("body") or {}).get("cmds") or []
+custom=None
+for c in cmds:
+    if isinstance(c,dict) and c.get("name")=="CUSTOM":
+        custom=c
+        break
+if not custom:
+    sys.exit(2)
+param=custom.get("param") or {}
+ptype=param.get("type") or ""
+data=param.get("data") or {}
+mod_type=data.get("type") or ""
+inner=data.get("data") or {}
+if not isinstance(inner, dict):
+    inner={}
+sw=str(inner.get("switch","") or "").strip().lower()
+mode=""
+temp=""
+duration=""
+items=inner.get("data") or []
+if isinstance(items,list):
+    for it in items:
+        if not isinstance(it,dict):
+            continue
+        if "mode" in it:
+            mode=str(it.get("mode") or "").strip().lower()
+        if "temp" in it:
+            temp=str(it.get("temp") or "").strip()
+        if "duration" in it:
+            duration=str(it.get("duration") or "").strip()
+# 模块默认时长
+if not duration:
+    mt=mod_type.lower()
+    if mt=="accontrol":
+        duration="900"
+    elif mt=="batterywarmcontrol":
+        duration="3600"
+inner_json=json.dumps(inner, separators=(",", ":"), ensure_ascii=False)
+us="\x1f"
+print(us.join([str(msg_id), str(ts), ptype, mod_type, sw, mode, temp, duration, inner_json]))
+' "$payload" 2>/dev/null
+}
+
+# 将 parse_custom_cmd 输出拆到变量（避免 tab 空字段被 bash 折叠）
+split_custom_fields() {
+  local line="$1"
+  CUSTOM_MSG_ID="$(printf '%s' "$line" | cut -d $'\x1f' -f1)"
+  CUSTOM_TS="$(printf '%s' "$line" | cut -d $'\x1f' -f2)"
+  CUSTOM_PTYPE="$(printf '%s' "$line" | cut -d $'\x1f' -f3)"
+  CUSTOM_MOD="$(printf '%s' "$line" | cut -d $'\x1f' -f4)"
+  CUSTOM_SW="$(printf '%s' "$line" | cut -d $'\x1f' -f5)"
+  CUSTOM_MODE="$(printf '%s' "$line" | cut -d $'\x1f' -f6)"
+  CUSTOM_TEMP="$(printf '%s' "$line" | cut -d $'\x1f' -f7)"
+  CUSTOM_DURATION="$(printf '%s' "$line" | cut -d $'\x1f' -f8)"
+  CUSTOM_INNER="$(printf '%s' "$line" | cut -d $'\x1f' -f9-)"
+}
+
+# ---------- 远控默认参数 ----------
+rc_param_defaults() {
+  python3 -c '
+import json
+print(json.dumps({
+  "batteryWarm":{"temp":"18","tempUnit":"°C","duration":"3600"},
+  "location":{"lightFrequency":"1","speakerFrequency":"1","duration":"5"},
+  "light":{"duration":"30"}
+}, separators=(",", ":"), ensure_ascii=False))
+'
+}
+
+load_rc_params() {
+  if [ -f "$RC_PARAM_FILE" ]; then
+    cat "$RC_PARAM_FILE"
+  else
+    rc_param_defaults
+  fi
+}
+
+# 合并 RemoteCtrlParamSet 下发的配置并落盘；stdout=合并后 JSON
+save_rc_params() {
+  local inner_json="$1"
+  python3 -c '
+import json, sys
+path=sys.argv[1]
+try:
+    inner=json.loads(sys.argv[2] or "{}")
+except Exception:
+    inner={}
+if not isinstance(inner, dict):
+    inner={}
+defaults={
+  "batteryWarm":{"temp":"18","tempUnit":"°C","duration":"3600"},
+  "location":{"lightFrequency":"1","speakerFrequency":"1","duration":"5"},
+  "light":{"duration":"30"}
+}
+try:
+    cur=json.load(open(path)) if __import__("os").path.isfile(path) else {}
+except Exception:
+    cur={}
+if not isinstance(cur, dict):
+    cur={}
+for k,v in defaults.items():
+    if k not in cur or not isinstance(cur.get(k), dict):
+        cur[k]=dict(v)
+
+def merge_list(key):
+    items=inner.get(key)
+    if not isinstance(items, list):
+        return
+    dest=cur.setdefault(key, {})
+    for it in items:
+        if isinstance(it, dict):
+            for kk,vv in it.items():
+                if vv is not None and str(vv)!="":
+                    dest[str(kk)]=str(vv)
+
+merge_list("batteryWarm")
+merge_list("location")
+merge_list("light")
+with open(path,"w") as f:
+    json.dump(cur, f, ensure_ascii=False, separators=(",", ":"))
+print(json.dumps(cur, separators=(",", ":"), ensure_ascii=False))
+' "$RC_PARAM_FILE" "$inner_json"
+}
+
+rc_param_get() {
+  # 用法: rc_param_get <section> <key> [default]
+  local section="$1" key="$2" def="${3:-}"
+  load_rc_params | python3 -c '
+import json,sys
+sec,key,default=sys.argv[1],sys.argv[2],sys.argv[3]
+try:
+    o=json.load(sys.stdin)
+    v=(o.get(sec) or {}).get(key)
+    print(v if v not in (None,"") else default)
+except Exception:
+    print(default)
+' "$section" "$key" "$def"
+}
+
+# ---------- CAN data 组装（未用信号保持 0xFF）----------
+# 组装空调 8 字节 data；stdout: 16 hex chars
+build_ac_can_data_hex() {
+  local switch="$1"
+  local mode="$2"
+  local temp="$3"
+  python3 -c '
+import sys
+sw=(sys.argv[1] or "").strip().lower()
+mode=(sys.argv[2] or "").strip().lower().replace(" ","")
+temp=sys.argv[3]
+data=bytearray([0xFF]*8)
+b0=0
+if sw=="on":
+    b0 |= 0x01          # Bit0-1: 开面板
+    if mode.startswith("cold"):
+        b0 |= 0x04      # Bit2-3: 制冷开
+    elif mode.startswith("heat"):
+        b0 |= 0x10      # Bit4-5: 制热开
+# off: b0 保持 0
+data[0]=b0
+if temp not in ("", None):
+    try:
+        data[3]=int(float(temp)) & 0xFF
+    except Exception:
+        pass
+print(data.hex())
+' "$switch" "$mode" "$temp"
+}
+
+# 门锁/车窗/大灯/寻车共用 0x1ACDEB4A；未请求的信号位保持 0xFF
+# 参数: lock(on/off/"") window(on/off/"") light(on/off/"") location(on/off/"")
+#   lock on=上锁(1) off=解锁(0)
+#   window on=降窗(1) off=升窗(0)
+#   light/location on=开(1) off=关(0)
+build_door_can_data_hex() {
+  local lock="$1"
+  local window="$2"
+  local light="$3"
+  local location="$4"
+  python3 -c '
+import sys
+def set_bits(b, lo, hi, val):
+    width=hi-lo+1
+    mask=((1<<width)-1)<<lo
+    return (b & ~mask) | ((val<<lo) & mask)
+
+lock=(sys.argv[1] or "").strip().lower()
+window=(sys.argv[2] or "").strip().lower()
+light=(sys.argv[3] or "").strip().lower()
+location=(sys.argv[4] or "").strip().lower()
+data=bytearray([0xFF]*8)
+if lock in ("on","off"):
+    data[0]=set_bits(data[0], 0, 2, 1 if lock=="on" else 0)
+if window in ("on","off"):
+    data[0]=set_bits(data[0], 4, 5, 1 if window=="on" else 0)
+if light in ("on","off"):
+    data[1]=set_bits(data[1], 5, 6, 1 if light=="on" else 0)
+if location in ("on","off"):
+    data[3]=set_bits(data[3], 2, 3, 1 if location=="on" else 0)
+print(data.hex())
+' "$lock" "$window" "$light" "$location"
+}
+
+# 电池加热：Byte0 Bit0-3 开/关；Bit4-7 保持默认
+build_batt_can_data_hex() {
+  local switch="$1"
+  python3 -c '
+import sys
+sw=(sys.argv[1] or "").strip().lower()
+data=bytearray([0xFF]*8)
+b0=0xF0  # Bit4-7 保持高半字节默认，Bit0-3 清零
+if sw=="on":
+    b0 |= 0x01
+# off: Bit0-3=0
+data[0]=b0
+print(data.hex())
+' "$switch"
+}
+
+# 打包 can_frame_t 二进制到文件（供 nanocat -F 读取）
+# typedef: can_id u32, can_dlc u16, rsv_ms u16, data[8], timestamp u32  (LE)
+# 兼容旧名：stdout 仍打印 \xNN（仅调试用）
+pack_can_frame_bin() {
+  local can_id="$1"
+  local data_hex="$2"
+  local out_file="${3:-$CAN_PUB_FILE}"
+  python3 -c '
+import struct,sys,time
+can_id=int(sys.argv[1],0)
+raw=bytes.fromhex(sys.argv[2])
+out=sys.argv[3]
+if len(raw)!=8:
+    raise SystemExit("data must be 8 bytes")
+rsv=0
+ts=int(time.time()) & 0xFFFFFFFF
+frame=struct.pack("<IHH8sI", can_id, 8, rsv, raw, ts)
+open(out,"wb").write(frame)
+sys.stdout.write("".join("\\x%02x" % b for b in frame))
+' "$can_id" "$data_hex" "$out_file"
+}
+
+pack_can_frame_esc() {
+  pack_can_frame_bin "$1" "$2" "${3:-$CAN_PUB_FILE}"
+}
+
+# 经 nanocat PUB 发送一帧 CAN：
+#   写二进制到 CAN_PUB_FILE，再
+#   nanocat --pub --connect tcp://0.0.0.0:26002 -F cmd_can_data -d 1
+can_pub_once() {
+  local can_id="$1"
+  local data_hex="$2"
+  local esc
+  if ! command -v "$NANOCAT_BIN" >/dev/null 2>&1; then
+    log "警告: 未找到 ${NANOCAT_BIN}，跳过 CAN 发送 id=${can_id} data=${data_hex}"
+    return 1
+  fi
+  esc="$(pack_can_frame_bin "$can_id" "$data_hex" "$CAN_PUB_FILE")" || return 1
+  log "CAN PUB connect=${CAN_PUB_ADDR} file=${CAN_PUB_FILE} id=${can_id} data=${data_hex} frame=${esc}"
+  # -d 为发送持续时间(秒)；timeout 略大于 delay，防止卡住
+  timeout $((CAN_PUB_DELAY_SEC + 2)) \
+    "$NANOCAT_BIN" --pub --connect "$CAN_PUB_ADDR" -F "$CAN_PUB_FILE" -d "$CAN_PUB_DELAY_SEC" \
+    >>"$LOG_FILE" 2>&1 || {
+    log "警告: nanocat CAN PUB 失败"
+    return 1
+  }
+  return 0
+}
+
+# 订阅 CAN 反馈: nanocat --sub -l "$CAN_SUB_PORT" --hex
+can_sub_hex_stream() {
+  local timeout_sec="$1"
+  timeout "$timeout_sec" "$NANOCAT_BIN" --sub -l "$CAN_SUB_PORT" --hex 2>/dev/null
+}
+
+# 从 --hex 文本流解析 can_frame_t（每行/连续 hex，20 字节一帧）
+# MODE=ac_ok | ac_manual | door | light | batt
+parse_can_hex_feedback() {
+  python3 -c '
+import sys,struct,os,re
+
+def frames():
+    buf=""
+    for line in sys.stdin:
+        buf += re.sub(r"[^0-9a-fA-F]", "", line)
+        while len(buf) >= 40:
+            raw = bytes.fromhex(buf[:40])
+            buf = buf[40:]
+            try:
+                can_id, dlc, rsv, data, ts = struct.unpack("<IHH8sI", raw)
+            except Exception:
+                continue
+            yield can_id, dlc, data
+
+mode=os.environ.get("MODE","")
+want=int(os.environ.get("WANT","0"))
+expect=int(os.environ.get("EXPECT","0") or "0")
+kind=os.environ.get("KIND","")
+mark=os.environ.get("MARK","")
+seen_ok=False
+
+for can_id, dlc, data in frames():
+    if can_id != want:
+        continue
+    if mode=="ac_ok":
+        if dlc < 1:
+            continue
+        b0=data[0]
+        ok=((b0>>4)&0x3)==1
+        sys.stderr.write("ac_fb byte0=0x%02x ok=%s\n" % (b0, ok))
+        sys.exit(0 if ok else 2)
+    if mode=="ac_manual":
+        if dlc < 1:
+            continue
+        b0=data[0]
+        op_ok=((b0>>4)&0x3)==1
+        manual=((b0>>6)&0x3)
+        cool=b0&0x3
+        heat=(b0>>2)&0x3
+        if op_ok:
+            seen_ok=True
+        if seen_ok and manual==0 and cool==0 and heat==0:
+            try:
+                open(mark,"w").write("1")
+            except Exception:
+                pass
+            sys.stderr.write("ac_manual_close byte0=0x%02x\n" % b0)
+            sys.exit(0)
+        continue
+    if mode=="door":
+        if dlc < 3:
+            continue
+        b2=data[2]
+        val=(b2 & 0x7) if kind=="lock" else ((b2>>4)&0x3)
+        sys.stderr.write("door_fb byte2=0x%02x val=%s expect=%s\n" % (b2, val, expect))
+        sys.exit(0 if val==expect else 2)
+    if mode=="light":
+        if dlc < 6:
+            continue
+        if kind=="light":
+            val=(data[0]>>6)&0x3
+            ok=(val==expect)
+        else:
+            haz=(data[4]>>4)&0x3
+            horn=data[5]&0x3
+            ok=(haz==expect or horn==expect)
+        sys.stderr.write("ccm_fb d0=0x%02x d4=0x%02x d5=0x%02x ok=%s\n" % (data[0], data[4], data[5], ok))
+        sys.exit(0 if ok else 2)
+    if mode=="batt":
+        if dlc < 7:
+            continue
+        val=data[6]
+        sys.stderr.write("batt_fb byte6=%s expect=%s\n" % (val, expect))
+        sys.exit(0 if val==expect else 2)
+sys.exit(1)
+'
+}
+
+# 周期发送 CAN，持续 send_sec 秒后结束（不发关闭帧）
+start_burst_can_sender() {
+  local can_id="$1"
+  local data_hex="$2"
+  local send_sec="$3"
+  local pid_var="${4:-DOOR_SEND_PID}"
+  local old_pid
+  eval "old_pid=\${$pid_var:-}"
+  if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+    log "停止上一轮 CAN burst pid=${old_pid}"
+    kill "$old_pid" 2>/dev/null || true
+    wait "$old_pid" 2>/dev/null || true
+  fi
+  (
+    local end
+    end=$(($(date +%s) + ${send_sec:-3}))
+    can_pub_once "$can_id" "$data_hex" || true
+    while [ "$(date +%s)" -lt "$end" ]; do
+      can_pub_once "$can_id" "$data_hex" || true
+      sleep "$AC_CAN_INTERVAL_SEC"
+    done
+    log "CAN burst 结束 id=${can_id} sec=${send_sec}"
+  ) &
+  eval "$pid_var=$!"
+  eval "record_bg_pid \"\${$pid_var}\""
+  eval "log \"CAN burst 已启动 pid=\${$pid_var} id=${can_id} sec=${send_sec}\""
+}
+
+# 后台周期发送（开启持续 duration，到时发 10s 关闭；off 则直接 10s 关闭）
+start_timed_can_sender() {
+  local can_id="$1"
+  local data_hex="$2"
+  local close_hex="$3"
+  local switch="$4"
+  local duration="$5"
+  local pid_var="${6:-AC_SEND_PID}"
+  local old_pid
+  eval "old_pid=\${$pid_var:-}"
+  if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+    log "停止上一轮定时 CAN 发送 pid=${old_pid}"
+    kill "$old_pid" 2>/dev/null || true
+    wait "$old_pid" 2>/dev/null || true
+  fi
+  (
+    local end
+    duration="${duration:-900}"
+    can_pub_once "$can_id" "$data_hex" || true
+    if [ "$switch" = "off" ]; then
+      end=$(($(date +%s) + 10))
+      while [ "$(date +%s)" -lt "$end" ]; do
+        can_pub_once "$can_id" "$close_hex" || true
+        sleep "$AC_CAN_INTERVAL_SEC"
+      done
+      exit 0
+    fi
+    end=$(($(date +%s) + duration))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      # 外部可写 stop 标记提前结束（空调人为关闭）
+      if [ -f "${SCRIPT_DIR}/.ac_manual_close" ] && [ "$pid_var" = "AC_SEND_PID" ]; then
+        log "检测到人为关闭标记，提前发关闭帧"
+        break
+      fi
+      can_pub_once "$can_id" "$data_hex" || true
+      sleep "$AC_CAN_INTERVAL_SEC"
+    done
+    log "设定时长到/提前结束，发送 10s 关闭帧 id=${can_id}"
+    end=$(($(date +%s) + 10))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      can_pub_once "$can_id" "$close_hex" || true
+      sleep "$AC_CAN_INTERVAL_SEC"
+    done
+    rm -f "${SCRIPT_DIR}/.ac_manual_close" 2>/dev/null || true
+  ) &
+  eval "$pid_var=$!"
+  eval "record_bg_pid \"\${$pid_var}\""
+  eval "log \"定时 CAN 发送已启动 pid=\${$pid_var} id=${can_id} duration=${duration}s switch=${switch}\""
+}
+
+# 后台周期发送空调 CAN；duration 秒后发 10s 关闭帧
+start_ac_can_sender() {
+  local switch="$1"
+  local mode="$2"
+  local temp="$3"
+  local duration="$4"
+  local data_hex close_hex
+  rm -f "${SCRIPT_DIR}/.ac_manual_close" 2>/dev/null || true
+  data_hex="$(build_ac_can_data_hex "$switch" "$mode" "$temp")"
+  close_hex="$(build_ac_can_data_hex "off" "" "")"
+  start_timed_can_sender "$AC_CAN_ID" "$data_hex" "$close_hex" "$switch" "$duration" "AC_SEND_PID"
+}
+
+start_batt_can_sender() {
+  local switch="$1"
+  local duration="$2"
+  local data_hex close_hex
+  data_hex="$(build_batt_can_data_hex "$switch")"
+  close_hex="$(build_batt_can_data_hex "off")"
+  start_timed_can_sender "$BATT_CAN_ID" "$data_hex" "$close_hex" "$switch" "$duration" "BATT_SEND_PID"
+}
+
+# 监听空调反馈：成功后若 Bit6-7==0（人工关闭）则写标记，触发主发送任务发关闭帧
+start_ac_manual_close_monitor() {
+  local timeout_sec="${1:-900}"
+  if [ -n "${AC_MONITOR_PID:-}" ] && kill -0 "$AC_MONITOR_PID" 2>/dev/null; then
+    kill "$AC_MONITOR_PID" 2>/dev/null || true
+    wait "$AC_MONITOR_PID" 2>/dev/null || true
+  fi
+  if ! command -v "$NANOCAT_BIN" >/dev/null 2>&1; then
+    return 0
+  fi
+  (
+    can_sub_hex_stream "$timeout_sec" | \
+      MODE=ac_manual WANT=$((AC_FB_CAN_ID)) MARK="${SCRIPT_DIR}/.ac_manual_close" \
+      parse_can_hex_feedback 2>>"$LOG_FILE" || true
+  ) &
+  AC_MONITOR_PID=$!
+  record_bg_pid "$AC_MONITOR_PID"
+  log "空调人为关闭监听已启动 pid=${AC_MONITOR_PID} via --sub -l ${CAN_SUB_PORT} --hex"
+}
+
+# 等待空调反馈 CAN：Byte0 Bit4-5==1 表示操作成功（超时则失败）
+wait_ac_feedback() {
+  local timeout_sec="${1:-$AC_FB_TIMEOUT_SEC}"
+  if ! command -v "$NANOCAT_BIN" >/dev/null 2>&1; then
+    log "警告: 无 nanocat，跳过反馈检测，按成功处理"
+    return 0
+  fi
+  log "等待空调反馈 CAN id=${AC_FB_CAN_ID} timeout=${timeout_sec}s via --sub -l ${CAN_SUB_PORT} --hex"
+  can_sub_hex_stream "$timeout_sec" | \
+    MODE=ac_ok WANT=$((AC_FB_CAN_ID)) parse_can_hex_feedback 2>>"$LOG_FILE"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "收到空调成功反馈"
+    return 0
+  fi
+  log "警告: 未在 ${timeout_sec}s 内收到成功反馈(rc=${rc})，仍回结果 code=0"
+  return 0
+}
+
+# 门锁/车窗反馈：0x1ACDDCEC Byte2
+# kind=lock: Bit0-2 期望值；kind=window: Bit4-5 期望值
+wait_door_feedback() {
+  local kind="$1"
+  local expect="$2"
+  local timeout_sec="${3:-$AC_FB_TIMEOUT_SEC}"
+  if ! command -v "$NANOCAT_BIN" >/dev/null 2>&1; then
+    log "警告: 无 nanocat，跳过门窗反馈"
+    return 0
+  fi
+  log "等待门窗反馈 CAN id=${DOOR_FB_CAN_ID} kind=${kind} expect=${expect} timeout=${timeout_sec}s via --sub -l ${CAN_SUB_PORT} --hex"
+  can_sub_hex_stream "$timeout_sec" | \
+    MODE=door WANT=$((DOOR_FB_CAN_ID)) KIND="$kind" EXPECT="$expect" \
+    parse_can_hex_feedback 2>>"$LOG_FILE"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "收到门窗成功反馈 kind=${kind}"
+    return 0
+  fi
+  log "警告: 门窗反馈超时/不匹配(rc=${rc})，仍回结果"
+  return 0
+}
+
+# 大灯/寻车 CCM 反馈 0x1ACDD91E
+# kind=light: Byte0 Bit6-7；kind=location: Byte4 Bit4-5 且/或 Byte5 Bit0-1
+wait_light_feedback() {
+  local kind="$1"
+  local expect="$2"
+  local timeout_sec="${3:-$AC_FB_TIMEOUT_SEC}"
+  if ! command -v "$NANOCAT_BIN" >/dev/null 2>&1; then
+    log "警告: 无 nanocat，跳过灯光反馈"
+    return 0
+  fi
+  log "等待 CCM 反馈 CAN id=${LIGHT_FB_CAN_ID} kind=${kind} expect=${expect} timeout=${timeout_sec}s via --sub -l ${CAN_SUB_PORT} --hex"
+  can_sub_hex_stream "$timeout_sec" | \
+    MODE=light WANT=$((LIGHT_FB_CAN_ID)) KIND="$kind" EXPECT="$expect" \
+    parse_can_hex_feedback 2>>"$LOG_FILE"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "收到 CCM 成功反馈 kind=${kind}"
+    return 0
+  fi
+  log "警告: CCM 反馈超时/不匹配(rc=${rc})，仍回结果"
+  return 0
+}
+
+# 电池加热反馈：Byte6 开时期望 2(制热)，关时期望 0
+wait_batt_feedback() {
+  local switch="$1"
+  local timeout_sec="${2:-$BATT_FB_TIMEOUT_SEC}"
+  local expect
+  if [ "$switch" = "on" ]; then
+    expect=2
+  else
+    expect=0
+  fi
+  if ! command -v "$NANOCAT_BIN" >/dev/null 2>&1; then
+    log "警告: 无 nanocat，跳过电池加热反馈"
+    return 0
+  fi
+  log "等待电池加热反馈 CAN id=${BATT_FB_CAN_ID} expect=${expect} timeout=${timeout_sec}s via --sub -l ${CAN_SUB_PORT} --hex"
+  can_sub_hex_stream "$timeout_sec" | \
+    MODE=batt WANT=$((BATT_FB_CAN_ID)) EXPECT="$expect" \
+    parse_can_hex_feedback 2>>"$LOG_FILE"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "收到电池加热成功反馈"
+    return 0
+  fi
+  log "警告: 电池加热反馈超时/不匹配(rc=${rc})，仍回结果"
+  return 0
+}
+
+# 通用：ACK → 业务 → 结果
+custom_ack_and_result() {
+  local msg_id="$1"
+  local ts="$2"
+  local code="${3:-0}"
+  local ack
+  ack="$(build_ack_resp "$msg_id" "$(now_ms)")"
+  if [ -z "$ack" ]; then
+    log "警告: 构造 CUSTOM ACK 失败"
+    return 1
+  fi
+  if ! mqtt_pub_via_at "$MQTT_RESP_TOPIC" "$ack"; then
+    log "警告: CUSTOM ACK 发送失败"
+    return 1
+  fi
+  log "CUSTOM ACK 已发送"
+  return 0
+}
+
+custom_send_result() {
+  local msg_id="$1"
+  local code="${2:-0}"
+  local result
+  result="$(build_custom_result_resp "$msg_id" "$(now_ms)" "$code" "CUSTOM")"
+  if [ -z "$result" ]; then
+    log "警告: 构造 CUSTOM 结果失败"
+    return 1
+  fi
+  if mqtt_pub_via_at "$MQTT_RESP_TOPIC" "$result"; then
+    log "CUSTOM 结果已发送 code=${code}"
+    return 0
+  fi
+  log "警告: CUSTOM 结果发送失败"
+  return 1
+}
+
+handle_ac_control() {
+  local msg_id="$1"
+  local ts="$2"
+  local switch="$3"
+  local mode="$4"
+  local temp="$5"
+  local duration="$6"
+
+  log "处理 AcControl switch=${switch} mode=${mode} temp=${temp} duration=${duration}"
+  custom_ack_and_result "$msg_id" "$ts" || return 1
+
+  start_ac_can_sender "$switch" "$mode" "$temp" "$duration"
+  if [ "$switch" = "on" ]; then
+    start_ac_manual_close_monitor "$((duration + 15))"
+  fi
+  wait_ac_feedback "$AC_FB_TIMEOUT_SEC" || true
+  custom_send_result "$msg_id" 0
+}
+
+handle_window_control() {
+  local msg_id="$1" switch="$2"
+  local hex expect
+  log "处理 WindowControl switch=${switch}"
+  custom_ack_and_result "$msg_id" "" || return 1
+  hex="$(build_door_can_data_hex "" "$switch" "" "")"
+  start_burst_can_sender "$DOOR_CAN_ID" "$hex" "$DOOR_SEND_SEC" "DOOR_SEND_PID"
+  # on=降窗(1) off=升窗(0)
+  if [ "$switch" = "on" ]; then expect=1; else expect=0; fi
+  wait_door_feedback "window" "$expect" "$AC_FB_TIMEOUT_SEC" || true
+  custom_send_result "$msg_id" 0
+}
+
+handle_lock_control() {
+  local msg_id="$1" switch="$2"
+  local hex expect
+  log "处理 LockControl switch=${switch}"
+  custom_ack_and_result "$msg_id" "" || return 1
+  hex="$(build_door_can_data_hex "$switch" "" "" "")"
+  start_burst_can_sender "$DOOR_CAN_ID" "$hex" "$DOOR_SEND_SEC" "DOOR_SEND_PID"
+  # on=上锁(1) off=解锁(0)
+  if [ "$switch" = "on" ]; then expect=1; else expect=0; fi
+  wait_door_feedback "lock" "$expect" "$AC_FB_TIMEOUT_SEC" || true
+  custom_send_result "$msg_id" 0
+}
+
+handle_light_control() {
+  local msg_id="$1" switch="$2"
+  local hex expect
+  log "处理 LightControl switch=${switch}"
+  custom_ack_and_result "$msg_id" "" || return 1
+  hex="$(build_door_can_data_hex "" "" "$switch" "")"
+  start_burst_can_sender "$DOOR_CAN_ID" "$hex" "$DOOR_SEND_SEC" "DOOR_SEND_PID"
+  if [ "$switch" = "on" ]; then expect=1; else expect=0; fi
+  wait_light_feedback "light" "$expect" "$AC_FB_TIMEOUT_SEC" || true
+  custom_send_result "$msg_id" 0
+}
+
+handle_location_control() {
+  local msg_id="$1" switch="$2"
+  local hex expect
+  log "处理 Location(寻车) switch=${switch}"
+  custom_ack_and_result "$msg_id" "" || return 1
+  hex="$(build_door_can_data_hex "" "" "" "$switch")"
+  start_burst_can_sender "$DOOR_CAN_ID" "$hex" "$DOOR_SEND_SEC" "DOOR_SEND_PID"
+  if [ "$switch" = "on" ]; then expect=1; else expect=0; fi
+  wait_light_feedback "location" "$expect" "$AC_FB_TIMEOUT_SEC" || true
+  custom_send_result "$msg_id" 0
+}
+
+handle_battery_warm_control() {
+  local msg_id="$1" switch="$2" duration="$3"
+  if [ -z "$duration" ]; then
+    duration="$(rc_param_get batteryWarm duration 3600)"
+  fi
+  log "处理 BatteryWarmControl switch=${switch} duration=${duration}"
+  custom_ack_and_result "$msg_id" "" || return 1
+  start_batt_can_sender "$switch" "$duration"
+  wait_batt_feedback "$switch" "$BATT_FB_TIMEOUT_SEC" || true
+  custom_send_result "$msg_id" 0
+}
+
+handle_remote_ctrl_param_set() {
+  local msg_id="$1" inner_json="$2"
+  local merged
+  log "处理 RemoteCtrlParamSet"
+  custom_ack_and_result "$msg_id" "" || return 1
+  merged="$(save_rc_params "$inner_json")"
+  log "远控参数已保存: $merged"
+  custom_send_result "$msg_id" 0
+}
+
+# AT+QMTPUBEX=<client_idx>,<msg_id>,<qos>,<retain>,"<topic>",<payload_len>
+# 整段 PUB 在同一 python 串口会话里完成，避免后台 cat/$() 丢 '>'（'>' 常无换行）
+mqtt_pub_via_at() {
+  local topic="$1"
+  local payload="$2"
+  local idx="$MQTT_CLIENT_IDX"
+  local msg_id=0
+  local qos=0
+  local retain=0
+  local len cmd
+  local tmp_pay="" resp="" rc=0
+  local prompt_timeout_sec=10
+  local result_timeout_sec=30
+
+  len="$(printf '%s' "$payload" | wc -c | tr -d ' ')"
+  log "MQTT PUBEX topic=${topic} len=${len}"
+  log "MQTT PUBEX payload=${payload}"
+
+  if ! serial_ready; then
+    log "警告: 串口不可用，PUB dry-run"
+    return 1
+  fi
+  if [ "$len" -lt 1 ]; then
+    log "警告: payload 长度为 0，拒绝 PUB"
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "警告: 无 python3，无法可靠 PUBEX"
+    return 1
+  fi
+  serial_setup
+
+  cmd="AT+QMTPUBEX=${idx},${msg_id},${qos},${retain},\"${topic}\",${len}"
+  tmp_pay="$(mktemp 2>/dev/null || echo "${SCRIPT_DIR}/.qmtpub_pay.$$")"
+  tmp_stat="${tmp_pay}.stat"
+  printf '%s' "$payload" >"$tmp_pay"
+  : >"$tmp_stat"
+
+  log "AT >>> $cmd"
+  log "PUBEX 同一会话内等待 '>' 后写入定长 payload (${len} bytes)"
+
+  # stdout=模组回显；exit 0=成功看到结果；1=未明确成功；2=命令 ERROR
+  resp="$(
+    SERIAL_PORT="$SERIAL_PORT" CMD="$cmd" PAY_FILE="$tmp_pay" STAT_FILE="$tmp_stat" \
+    PROMPT_TO="$prompt_timeout_sec" RESULT_TO="$result_timeout_sec" \
+    python3 - <<'PY'
+import os, select, sys, time
+
+port_path = os.environ["SERIAL_PORT"]
+cmd = os.environ["CMD"]
+pay_file = os.environ["PAY_FILE"]
+stat_file = os.environ["STAT_FILE"]
+prompt_to = float(os.environ.get("PROMPT_TO", "10"))
+result_to = float(os.environ.get("RESULT_TO", "30"))
+
+with open(pay_file, "rb") as f:
+    payload = f.read()
+
+def set_stat(msg):
+    try:
+        with open(stat_file, "w") as sf:
+            sf.write(msg + "\n")
+    except Exception:
+        pass
+
+try:
+    port = open(port_path, "r+b", buffering=0)
+except Exception as e:
+    set_stat("OPEN_FAIL:%s" % e)
+    sys.exit(1)
+
+def read_some(timeout):
+    r, _, _ = select.select([port], [], [], timeout)
+    if not r:
+        return b""
+    try:
+        return port.read(256) or b""
+    except Exception:
+        return b""
+
+buf = b""
+try:
+    port.write((cmd + "\r").encode("utf-8", "ignore"))
+    deadline = time.time() + prompt_to
+    saw_prompt = False
+    while time.time() < deadline:
+        chunk = read_some(min(0.1, max(0.0, deadline - time.time())))
+        if not chunk:
+            continue
+        chunk = chunk.replace(b"\r", b"")
+        buf += chunk
+        if b"ERROR" in buf and b">" not in buf:
+            set_stat("CMD_ERROR")
+            sys.stdout.buffer.write(buf)
+            sys.stdout.buffer.flush()
+            sys.exit(2)
+        if b">" in buf:
+            saw_prompt = True
+            break
+
+    if saw_prompt:
+        set_stat("PROMPT_OK")
+    else:
+        set_stat("PROMPT_TIMEOUT buf=%r" % buf[:80])
+
+    port.write(payload)
+
+    deadline = time.time() + result_to
+    while time.time() < deadline:
+        chunk = read_some(min(0.2, max(0.0, deadline - time.time())))
+        if not chunk:
+            continue
+        chunk = chunk.replace(b"\r", b"")
+        buf += chunk
+        if b"+QMTPUBEX:" in buf or b"+QMTPUB:" in buf:
+            time.sleep(0.05)
+            chunk = read_some(0.05)
+            if chunk:
+                buf += chunk.replace(b"\r", b"")
+            break
+        if b"ERROR" in buf:
+            break
+finally:
+    try:
+        port.close()
+    except Exception:
+        pass
+
+sys.stdout.buffer.write(buf)
+sys.stdout.buffer.flush()
+
+text = buf.decode("utf-8", "ignore")
+if "+QMTPUBEX:" in text or "+QMTPUB:" in text:
+    sys.exit(0)
+if "ERROR" in text:
+    sys.exit(2)
+if "OK" in text:
+    sys.exit(0)
+sys.exit(1)
+PY
+  )"
+  rc=$?
+  prompt_stat="$(cat "$tmp_stat" 2>/dev/null | tr -d '\r' || true)"
+  rm -f "$tmp_pay" "$tmp_stat"
+  log "PUBEX prompt状态: ${prompt_stat:-unknown}"
+
+  LAST_AT_RESP="$resp"
+  if [ -n "$resp" ]; then
+    printf '%s\n' "$resp" | tee -a "$LOG_FILE"
+    echo >>"$LOG_FILE"
+  fi
+
+  if printf '%s' "$resp" | grep -qE '\+QMTPUB(EX)?:[[:space:]]*[0-9]+,[[:space:]]*[0-9]+,[[:space:]]*0'; then
+    log "MQTT PUBEX 成功"
+    return 0
+  fi
+  case "$resp" in
+    *"+QMTPUB:"*|*"+QMTPUBEX:"*)
+      log "警告: MQTT PUBEX 返回非成功: ${resp}"
+      return 1
+      ;;
+    *ERROR*)
+      log "警告: MQTT PUBEX ERROR"
+      return 1
+      ;;
+    *OK*)
+      log "MQTT PUBEX 收到 OK（未见 result URC，按成功处理）"
+      return 0
+      ;;
+    *)
+      log "警告: 未明确看到 +QMTPUBEX 结果 rc=${rc} 回显=[${resp}]"
+      return 1
+      ;;
+  esac
+}
+
+# 处理 payloads：WAKEUP / CUSTOM(各远控模块)
+handle_mqtt_payloads() {
+  local payloads="$1"
+  local found=0 payload summary wk custom
+  local msg_id ts ptype mod_type sw mode temp duration inner_json reply
+  local mod_lc ok=0
+
+  while IFS= read -r payload || [ -n "$payload" ]; do
+    [ -z "$payload" ] && continue
+    log "收到 MQTT payload: $payload"
+    summary="$(summarize_mqtt_payload "$payload" || true)"
+    [ -n "$summary" ] && log "解析结果: $summary"
+
+    wk="$(parse_wakeup_cmd "$payload" || true)"
+    if [ -n "$wk" ]; then
+      msg_id="${wk%%$'\t'*}"
+      ts="${wk#*$'\t'}"
+      log "识别到 WAKEUP, msgId=${msg_id}, ts=${ts}"
+      reply="$(build_wakeup_resp "$msg_id" "$ts")"
+      if mqtt_pub_via_at "$MQTT_RESP_TOPIC" "$reply"; then
+        found=1
+      else
+        log "警告: WAKEUP 回复 PUB 失败 msgId=${msg_id}"
+      fi
+      continue
+    fi
+
+    custom="$(parse_custom_cmd "$payload" || true)"
+    if [ -z "$custom" ]; then
+      log "非 WAKEUP/CUSTOM 命令，已记录，跳过"
+      continue
+    fi
+    split_custom_fields "$custom"
+    msg_id="$CUSTOM_MSG_ID"
+    ts="$CUSTOM_TS"
+    ptype="$CUSTOM_PTYPE"
+    mod_type="$CUSTOM_MOD"
+    sw="$CUSTOM_SW"
+    mode="$CUSTOM_MODE"
+    temp="$CUSTOM_TEMP"
+    duration="$CUSTOM_DURATION"
+    inner_json="$CUSTOM_INNER"
+    mod_lc="$(printf '%s' "$mod_type" | tr 'A-Z' 'a-z')"
+    log "识别到 CUSTOM type=${ptype} module=${mod_type} switch=${sw} mode=${mode} temp=${temp} duration=${duration}"
+    ok=0
+    case "$mod_lc" in
+      accontrol)
+        handle_ac_control "$msg_id" "$ts" "$sw" "$mode" "$temp" "$duration" && ok=1
+        ;;
+      windowcontrol)
+        handle_window_control "$msg_id" "$sw" && ok=1
+        ;;
+      lockcontrol)
+        handle_lock_control "$msg_id" "$sw" && ok=1
+        ;;
+      lightcontrol)
+        handle_light_control "$msg_id" "$sw" && ok=1
+        ;;
+      location)
+        handle_location_control "$msg_id" "$sw" && ok=1
+        ;;
+      batterywarmcontrol)
+        handle_battery_warm_control "$msg_id" "$sw" "$duration" && ok=1
+        ;;
+      remotectrlparamset)
+        handle_remote_ctrl_param_set "$msg_id" "$inner_json" && ok=1
+        ;;
+      *)
+        log "未知远控模块 ${mod_type}，仅 ACK+结果"
+        reply="$(build_ack_resp "$msg_id" "$ts")"
+        mqtt_pub_via_at "$MQTT_RESP_TOPIC" "$reply" || true
+        reply="$(build_custom_result_resp "$msg_id" "$ts" 0 "CUSTOM")"
+        mqtt_pub_via_at "$MQTT_RESP_TOPIC" "$reply" && ok=1
+        ;;
+    esac
+    if [ "$ok" -eq 1 ]; then
+      found=1
+    fi
+  done <<EOF
+$payloads
+EOF
+  # 任一命令处理成功则保证持续监听（监听子进程内调用为 no-op）
+  if [ "$found" -eq 1 ]; then
+    ensure_mqtt_listen_loop
+  fi
+  [ "$found" -eq 1 ]
+}
+
+# 发一次 AT+QMTRECV=<idx>,<recv_id>，结果写入全局 QMTRECV_LAST_RESP
+# 禁止用 resp="$(qmtrecv_collect ...)" 包住本函数：`$()` 子壳里后台读串口会丢数据。
+QMTRECV_LAST_RESP=""
+qmtrecv_collect() {
+  local idx="$1"
+  local recv_id="$2"
+  local wait_sec="${3:-${MQTT_RECV_WAIT_SEC:-2}}"
+  local grace_sec="${4:-${MQTT_RECV_OK_GRACE_SEC:-0.35}}"
+  local out_file rc=0
+
+  QMTRECV_LAST_RESP=""
+  if ! serial_ready; then
+    return 1
+  fi
+  serial_setup
+
+  out_file="$(mktemp 2>/dev/null || echo "${SCRIPT_DIR}/.qmtrecv_out.$$")"
+  : >"$out_file"
+
+  if command -v python3 >/dev/null 2>&1; then
+    SERIAL_PORT="$SERIAL_PORT" OUT_FILE="$out_file" \
+    IDX="$idx" RID="$recv_id" WAIT_SEC="$wait_sec" GRACE_SEC="$grace_sec" \
+    python3 - <<'PY'
+import os, select, sys, time
+
+port_path = os.environ["SERIAL_PORT"]
+out_path = os.environ["OUT_FILE"]
+idx = os.environ.get("IDX", "0")
+rid = os.environ.get("RID", "0")
+wait_sec = float(os.environ.get("WAIT_SEC", "2"))
+grace_sec = float(os.environ.get("GRACE_SEC", "0.35"))
+cmd = "AT+QMTRECV=%s,%s\r" % (idx, rid)
+
+try:
+    port = open(port_path, "r+b", buffering=0)
+except Exception:
+    sys.exit(1)
+
+def read_some(timeout):
+    r, _, _ = select.select([port], [], [], timeout)
+    if not r:
+        return b""
+    try:
+        return port.read(512) or b""
+    except Exception:
+        return b""
+
+buf = b""
+try:
+    port.write(cmd.encode("ascii", "ignore"))
+    deadline = time.time() + wait_sec
+    saw_ok = False
+    while time.time() < deadline:
+        chunk = read_some(min(0.1, max(0.0, deadline - time.time())))
+        if not chunk:
+            continue
+        buf += chunk.replace(b"\r", b"")
+        if b"ERROR" in buf:
+            break
+        if b"OK" in buf:
+            saw_ok = True
+            break
+    if saw_ok and grace_sec > 0:
+        gdead = time.time() + grace_sec
+        while time.time() < gdead:
+            chunk = read_some(min(0.05, max(0.0, gdead - time.time())))
+            if not chunk:
+                continue
+            buf += chunk.replace(b"\r", b"")
+            # 已有带 topic/JSON 的包，略再吸一点防截断
+            if b"{\"" in buf or b",\"" in buf:
+                time.sleep(0.05)
+                chunk = read_some(0.05)
+                if chunk:
+                    buf += chunk.replace(b"\r", b"")
+                break
+finally:
+    try:
+        port.close()
+    except Exception:
+        pass
+
+with open(out_path, "wb") as f:
+    f.write(buf)
+sys.exit(0 if buf else 1)
+PY
+    rc=$?
+  else
+    # 无 python3 时回退（勿再包进 $()）
+    local cat_pid="" resp="" i saw_ok=0
+    ( timeout 3 cat "$SERIAL_PORT" 2>/dev/null | tr -d '\r' >"$out_file" ) &
+    cat_pid=$!
+    sleep 0.2
+    # shellcheck disable=SC2039
+    echo -e "AT+QMTRECV=${idx},${recv_id}\r\n" >"$SERIAL_PORT" 2>/dev/null || true
+    for i in $(seq 1 20); do
+      resp="$(cat "$out_file" 2>/dev/null || true)"
+      case "$resp" in *ERROR*|*OK*) saw_ok=1; break ;; esac
+      kill -0 "$cat_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    [ "$saw_ok" = "1" ] && sleep "$grace_sec"
+    kill "$cat_pid" 2>/dev/null || true
+    wait "$cat_pid" 2>/dev/null || true
+    rc=0
+  fi
+
+  QMTRECV_LAST_RESP="$(cat "$out_file" 2>/dev/null | tr -d '\r' || true)"
+  rm -f "$out_file"
+  [ -n "$QMTRECV_LAST_RESP" ]
+}
+
+# 读一次 MQTT 缓冲并处理
+# 偶现：先 OK，再异步 URC「+QMTRECV: 0,0」（仅通知有数据），需再按 recv_id 取内容。
+read_mqtt_once() {
+  local idx="$MQTT_CLIENT_IDX"
+  local resp="" payloads="" more="" rid
+  local wait_sec="${MQTT_RECV_WAIT_SEC:-2}"
+  local ids="" tried=""
+
+  log "AT+QMTRECV=${idx},0 读缓冲"
+  qmtrecv_collect "$idx" 0 "$wait_sec" || true
+  resp="$QMTRECV_LAST_RESP"
+  LAST_AT_RESP="$resp"
+  if [ -n "$resp" ]; then
+    printf '%s\n' "$resp" | tee -a "$LOG_FILE"
+    echo >>"$LOG_FILE"
+  else
+    log "QMTRECV 无回显"
+  fi
+
+  payloads="$(extract_mqtt_payloads "$resp")"
+
+  # 无 payload 但有通知/槽位：+QMTRECV: idx,recv_id  → 再读对应缓冲
+  if [ -z "$payloads" ]; then
+    ids="$(extract_recv_ids "$resp")"
+    if [ -z "$ids" ]; then
+      case "$resp" in
+        *"+QMTRECV:"*)
+          case "$resp" in
+            *",\""*|*"{"*) ;;
+            *) ids=0 ;;
+          esac
+          ;;
+      esac
+    fi
+    if [ -n "$ids" ]; then
+      log "仅收到 QMTRECV 通知/槽状态，补读 recv_id: $(echo "$ids" | tr '\n' ' ')"
+      for rid in $ids; do
+        case " $tried " in
+          *" $rid "*) continue ;;
+        esac
+        tried="$tried $rid"
+        log "AT+QMTRECV=${idx},${rid} 取内容"
+        qmtrecv_collect "$idx" "$rid" "$wait_sec" || true
+        more="$QMTRECV_LAST_RESP"
+        if [ -n "$more" ]; then
+          LAST_AT_RESP="${LAST_AT_RESP}"$'\n'"${more}"
+          printf '%s\n' "$more" | tee -a "$LOG_FILE"
+          echo >>"$LOG_FILE"
+        fi
+      done
+      payloads="$(extract_mqtt_payloads "$LAST_AT_RESP")"
+    fi
+  fi
+
+  if [ -z "$payloads" ]; then
+    return 1
+  fi
+  handle_mqtt_payloads "$payloads"
+}
+
+# 读一次缓冲并处理其中所有命令（WAKEUP / CUSTOM 均可，无先后依赖）
+read_mqtt_and_handle() {
+  read_mqtt_once
+}
+
+# 兼容旧名
+read_mqtt_and_reply_wakeup() {
+  read_mqtt_and_handle
+}
+
+# 持续轮询下行命令（WAKEUP 或 CUSTOM 触发后均可进入）
+mqtt_listen_loop() {
+  _listen_cleanup() {
+    local c
+    touch "${SCRIPT_DIR}/.mqtt_stop" 2>/dev/null || true
+    for c in $(list_child_pids $$ | sort -u); do
+      kill_pid_tree "$c" TERM
+    done
+    sleep 0.1
+    for c in $(list_child_pids $$ | sort -u); do
+      kill_pid_tree "$c" KILL
+    done
+    exit 0
+  }
+  trap '_listen_cleanup' INT TERM
+  log "进入 MQTT 命令持续监听（间隔 ${MQTT_CMD_POLL_SEC}s）..."
+  while [ ! -f "${SCRIPT_DIR}/.mqtt_stop" ]; do
+    read_mqtt_once || true
+    [ -f "${SCRIPT_DIR}/.mqtt_stop" ] && break
+    # sleep 可被 SIGTERM 打断
+    sleep "$MQTT_CMD_POLL_SEC" &
+    wait $! 2>/dev/null || true
+  done
+  log "MQTT 监听循环退出"
+  # 循环结束后清掉残留子进程（sleep/cat/nanocat）
+  for c in $(list_child_pids $$ | sort -u); do
+    kill_pid_tree "$c" TERM
+  done
+  sleep 0.1
+  for c in $(list_child_pids $$ | sort -u); do
+    kill_pid_tree "$c" KILL
+  done
+}
+
+ensure_mqtt_listen_loop() {
+  local old=""
+  if [ -n "${MQTT_LISTEN_PID:-}" ] && kill -0 "$MQTT_LISTEN_PID" 2>/dev/null; then
+    log "MQTT 监听循环已在运行 pid=${MQTT_LISTEN_PID}"
+    return 0
+  fi
+  # 监听循环在子进程内处理 WAKEUP 时也会调到这里：绝不能杀自身/已存活监听
+  if [ -f "${SCRIPT_DIR}/.mqtt_listen.pid" ]; then
+    old="$(cat "${SCRIPT_DIR}/.mqtt_listen.pid" 2>/dev/null || true)"
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+      MQTT_LISTEN_PID="$old"
+      if [ "$old" = "$$" ]; then
+        log "MQTT 监听循环已在运行(本进程) pid=$$"
+      else
+        log "MQTT 监听循环已在运行 pid=${MQTT_LISTEN_PID}"
+      fi
+      return 0
+    fi
+  fi
+  rm -f "${SCRIPT_DIR}/.mqtt_stop"
+  mqtt_listen_loop &
+  MQTT_LISTEN_PID=$!
+  echo "$MQTT_LISTEN_PID" >"${SCRIPT_DIR}/.mqtt_listen.pid"
+  record_bg_pid "$MQTT_LISTEN_PID"
+  log "已启动 MQTT 命令监听循环 pid=${MQTT_LISTEN_PID}"
+}
+
+# 兼容旧名
+handle_payloads_for_wakeup() {
+  handle_mqtt_payloads "$1"
+}
+
+# 每种 event_code 本进程生命周期内只处理一次
+once_ok() {
+  local flag_var="$1"
+  local code="$2"
+  local already
+  eval "already=\${$flag_var}"
+  if [ "$already" = "1" ]; then
+    log "event_code=${code} 已处理过，忽略"
+    return 1
+  fi
+  eval "$flag_var=1"
+  return 0
+}
+
+handle_event_11() {
+  if ! once_ok HANDLED_EVENT_11 "$EVENT_CODE_SLEEP"; then
+    return
+  fi
+  log "========== 触发 event_code=${EVENT_CODE_SLEEP}（仅此一次）=========="
+  kill_erk_processes
+  connect_mqtt_via_at || log "警告: MQTT 连接未完全成功，event_code=${EVENT_CODE_WAKEUP} 时可能读不到消息"
+  log "========== event_code=${EVENT_CODE_SLEEP} 处理结束 =========="
+}
+
+handle_event_12() {
+  if ! once_ok HANDLED_EVENT_12 "$EVENT_CODE_WAKEUP"; then
+    return
+  fi
+  # 触发后立即进入持续读循环：无论本轮有无下行数据都不退出，一直 QMTRECV
+  log "========== 触发 event_code=${EVENT_CODE_WAKEUP}（仅此一次，开始持续读 MQTT）=========="
+  #if [ "$MQTT_AT_ACTIVE" != "1" ]; then
+    #log "MQTT 尚未确认连接，尝试连接后再持续读取"
+    #connect_mqtt_via_at || log "警告: MQTT 连接未确认，仍启动读循环"
+  #fi
+  rm -f "${SCRIPT_DIR}/.mqtt_stop"
+  ensure_mqtt_listen_loop
+  log "========== event_code=${EVENT_CODE_WAKEUP} 已进入持续监听（有无数据均不退出）=========="
+}
+
+# 进程是否已在跑（按路径或进程名匹配）
+is_proc_running() {
+  local path="$1"
+  local base
+  base="$(basename "$path")"
+  if [ -z "$base" ]; then
+    return 1
+  fi
+  if pgrep -f "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+  pgrep -x "$base" >/dev/null 2>&1
+}
+
+# 后台拉起 modem_test 与 erk-daemon（已在跑则跳过）
+start_modem_and_erk() {
+  if [ -x "$MODEM_TEST_BIN" ] || [ -f "$MODEM_TEST_BIN" ]; then
+    if is_proc_running "$MODEM_TEST_BIN"; then
+      log "已在运行，跳过: $MODEM_TEST_BIN"
+    else
+      log "后台启动: $MODEM_TEST_BIN"
+      "$MODEM_TEST_BIN" >/dev/null 2>&1 &
+    fi
+  else
+    log "警告: 不存在 $MODEM_TEST_BIN"
+  fi
+
+  if [ -x "$ERK_DAEMON_SH" ] || [ -f "$ERK_DAEMON_SH" ]; then
+    if is_proc_running "$ERK_DAEMON_SH"; then
+      log "已在运行，跳过: $ERK_DAEMON_SH"
+    else
+      log "后台启动: $ERK_DAEMON_SH"
+      "$ERK_DAEMON_SH" >/dev/null 2>&1 &
+    fi
+  else
+    log "警告: 不存在 $ERK_DAEMON_SH"
+  fi
+}
+
+handle_event_other() {
+  local code="$1"
+  if ! once_ok HANDLED_EVENT_OTHER "$code"; then
+    return
+  fi
+  log "========== 触发 event_code=${code}（非 ${EVENT_CODE_SLEEP}/${EVENT_CODE_WAKEUP}，仅此一次）=========="
+  start_modem_and_erk
+  log "========== event_code=${code} 处理结束 =========="
+}
+
+process_line() {
+  local line="$1"
+  case "$line" in
+    *event_code*|*"\"data\""*|*"data"*) ;;
+    *) return ;;
+  esac
+
+  local code
+  code="$(extract_event_code "$line")"
+  if [ -z "$code" ]; then
+    return
+  fi
+  log "收到事件行 event_code=${code} | ${line}"
+  if [ "$code" = "$EVENT_CODE_SLEEP" ]; then
+    handle_event_11
+  elif [ "$code" = "$EVENT_CODE_WAKEUP" ]; then
+    handle_event_12
+  else
+    handle_event_other "$code"
+  fi
+}
+
+cleanup() {
+  [ "${CLEANING_UP:-0}" = "1" ] && return 0
+  # 非 run 模式（test-*）不杀进程
+  [ "${RUNNING_MAIN:-0}" = "1" ] || return 0
+  CLEANING_UP=1
+  trap - INT TERM EXIT
+  log "脚本退出，清理子进程..."
+  touch "${SCRIPT_DIR}/.mqtt_stop" 2>/dev/null || true
+
+  local p pid c
+  for p in MQTT_LISTEN_PID AC_SEND_PID BATT_SEND_PID DOOR_SEND_PID AC_MONITOR_PID NANOCAT_PID; do
+    eval "pid=\${$p:-}"
+    kill_pid_tree "$pid" TERM
+  done
+  kill_recorded_bg_pids TERM
+  # 本脚本当前直接子进程
+  for c in $(list_child_pids $$ | sort -u); do
+    kill_pid_tree "$c" TERM
+  done
+  kill_stray_helpers TERM
+  sleep 0.3
+  for p in MQTT_LISTEN_PID AC_SEND_PID BATT_SEND_PID DOOR_SEND_PID AC_MONITOR_PID NANOCAT_PID; do
+    eval "pid=\${$p:-}"
+    kill_pid_tree "$pid" KILL
+  done
+  kill_recorded_bg_pids KILL
+  for c in $(list_child_pids $$ | sort -u); do
+    kill_pid_tree "$c" KILL
+  done
+  kill_stray_helpers KILL
+
+  rm -f "${SCRIPT_DIR}/.ac_manual_close" \
+        "${SCRIPT_DIR}/.mqtt_stop" \
+        "${SCRIPT_DIR}/.mqtt_listen.pid" \
+        "${SCRIPT_DIR}/.nanocat_evt.pid" \
+        "$BG_PID_FILE" \
+        "$NANOCAT_FIFO" 2>/dev/null || true
+  exit 0
+}
+
+trap cleanup INT TERM
+
+main() {
+  RUNNING_MAIN=1
+  trap cleanup INT TERM EXIT
+  log "启动监听: $NANOCAT_CMD"
+  log "event_code ${EVENT_CODE_SLEEP}->连MQTT, ${EVENT_CODE_WAKEUP}->读命令(WAKEUP/CUSTOM均可), 其它->${MODEM_TEST_BIN}/${ERK_DAEMON_SH}; 串口=${SERIAL_PORT}"
+  rm -f "${SCRIPT_DIR}/.mqtt_stop" "$BG_PID_FILE"
+  : >"$BG_PID_FILE"
+
+  # FIFO 拉起事件 nanocat，便于记录 PID，Ctrl+C 时可可靠杀掉
+  rm -f "$NANOCAT_FIFO"
+  if ! mkfifo "$NANOCAT_FIFO" 2>/dev/null; then
+    log "警告: mkfifo 失败，回退进程替换（退出时尽量清理子进程）"
+    # shellcheck disable=SC2086
+    while IFS= read -r line || [ -n "$line" ]; do
+      process_line "$line"
+    done < <($NANOCAT_CMD 2>>"$LOG_FILE")
+    return
+  fi
+  # shellcheck disable=SC2086
+  $NANOCAT_CMD >"$NANOCAT_FIFO" 2>>"$LOG_FILE" &
+  NANOCAT_PID=$!
+  echo "$NANOCAT_PID" >"${SCRIPT_DIR}/.nanocat_evt.pid"
+  record_bg_pid "$NANOCAT_PID"
+  log "事件 nanocat 已启动 pid=${NANOCAT_PID}"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    process_line "$line"
+  done <"$NANOCAT_FIFO"
+}
+
+case "${1:-run}" in
+  run)
+    main
+    ;;
+  test-parse)
+    if [ $# -ge 2 ]; then
+      sample="$2"
+    else
+      sample='{"ts":557755,"event":{"all":{"names":["ts","event_code","description"],"data":[[559000,11,"10"]]}}}'
+    fi
+    echo "event_code=$(extract_event_code "$sample")"
+    ;;
+  test-wakeup)
+    if [ $# -ge 2 ]; then
+      sample="$2"
+    else
+      sample='{"header":{"msgId":"e5f7fe4fb342404291b21c576b765750","noReply":false,"ts":1655350730141},"body":{"id":"","cmds":[{"name":"WAKEUP","param":"WAKEUP"}]}}'
+    fi
+    echo "payload=$sample"
+    wk="$(parse_wakeup_cmd "$sample")" && echo "parse_ok msgId/ts=$wk" || echo "parse_fail"
+    if [ -n "${wk:-}" ]; then
+      msg_id="${wk%%$'\t'*}"
+      ts="${wk#*$'\t'}"
+      echo "resp=$(build_wakeup_resp "$msg_id" "$ts")"
+    fi
+    ;;
+  test-ac)
+    if [ $# -ge 2 ]; then
+      sample="$2"
+    else
+      sample='{"header":{"msgId":"3b70390eeadb08d567c363c760d870d3","noReply":false,"ts":1774491082805},"body":{"id":"","cmds":[{"name":"CUSTOM","param":{"data":{"data":{"switch":"on","data":[{"mode":"cold"},{"temp":"16"},{"duration":"900"}]},"type":"AcControl","action":"set"},"type":"vehicleParam"}}]}}'
+    fi
+    echo "payload=$sample"
+    custom="$(parse_custom_cmd "$sample")" && echo "parse_ok $custom" || echo "parse_fail"
+    if [ -n "${custom:-}" ]; then
+      split_custom_fields "$custom"
+      echo "ack=$(build_ack_resp "$CUSTOM_MSG_ID" "$CUSTOM_TS")"
+      echo "result=$(build_custom_result_resp "$CUSTOM_MSG_ID" "$CUSTOM_TS" 0 CUSTOM)"
+      hex="$(build_ac_can_data_hex "$CUSTOM_SW" "$CUSTOM_MODE" "$CUSTOM_TEMP")"
+      echo "ac_data_hex=$hex"
+      echo "can_esc=$(pack_can_frame_esc "$AC_CAN_ID" "$hex")"
+    fi
+    ;;
+  test-cmds)
+    # 各远控模块 CAN data 组装自测
+    echo "=== AcControl on cold 16 ==="
+    echo "hex=$(build_ac_can_data_hex on cold 16)"
+    echo "=== WindowControl on(降窗)/off(升窗) ==="
+    echo "on=$(build_door_can_data_hex "" on "" "")"
+    echo "off=$(build_door_can_data_hex "" off "" "")"
+    echo "=== LockControl on(上锁)/off(解锁) ==="
+    echo "on=$(build_door_can_data_hex on "" "" "")"
+    echo "off=$(build_door_can_data_hex off "" "" "")"
+    echo "=== LightControl on/off ==="
+    echo "on=$(build_door_can_data_hex "" "" on "")"
+    echo "off=$(build_door_can_data_hex "" "" off "")"
+    echo "=== Location on/off ==="
+    echo "on=$(build_door_can_data_hex "" "" "" on)"
+    echo "off=$(build_door_can_data_hex "" "" "" off)"
+    echo "=== BatteryWarm on/off ==="
+    echo "on=$(build_batt_can_data_hex on)"
+    echo "off=$(build_batt_can_data_hex off)"
+    echo "=== RemoteCtrlParamSet ==="
+    sample='{"header":{"msgId":"p1","ts":1},"body":{"cmds":[{"name":"CUSTOM","param":{"type":"vehicleParam","data":{"type":"RemoteCtrlParamSet","action":"SET","data":{"batteryWarm":[{"temp":"20"},{"duration":"7200"}],"location":[{"duration":"8"}],"light":[{"duration":"40"}]}}}}]}}'
+    custom="$(parse_custom_cmd "$sample")" && echo "parse_ok fields_ok" || echo "parse_fail"
+    split_custom_fields "$custom"
+    echo "mod=$CUSTOM_MOD inner=$CUSTOM_INNER"
+    echo "saved=$(save_rc_params "$CUSTOM_INNER")"
+    echo "batt_duration=$(rc_param_get batteryWarm duration 3600)"
+    ;;
+  test-extract)
+    # 用法: ./mqtt_on_event.sh test-extract
+    sample='+QMTRECV: 0,0
+
++QMTRECV: 0,0,"v4/s/post/device/cmd/json/1.0",234,"{   "header": {     "msgId": "e5f7fe4fb342404291b21c576b765750",     "noReply": false,     "ts": 1655350730141   },   "body": {     "id": "",     "cmds": [       {         "name": "WAKEUP",         "param": "WAKEUP"       }     ]  } }"
+
+OK'
+    echo "=== sample ==="
+    printf '%s\n' "$sample"
+    echo "=== payloads ==="
+    extract_mqtt_payloads "$sample"
+    echo "=== parse wakeup ==="
+    payloads="$(extract_mqtt_payloads "$sample")"
+    while IFS= read -r p || [ -n "$p" ]; do
+      [ -z "$p" ] && continue
+      echo "summary=$(summarize_mqtt_payload "$p")"
+      wk="$(parse_wakeup_cmd "$p")" && echo "wakeup_ok $wk" || echo "wakeup_fail"
+    done <<EOF
+$payloads
+EOF
+    ;;
+  kill-erk)
+    kill_erk_processes
+    ;;
+  stop)
+    # 手动清理本脚本残留后台进程
+    RUNNING_MAIN=1
+    CLEANING_UP=0
+    if [ -f "${SCRIPT_DIR}/.mqtt_listen.pid" ]; then
+      MQTT_LISTEN_PID="$(cat "${SCRIPT_DIR}/.mqtt_listen.pid" 2>/dev/null || true)"
+    fi
+    if [ -f "${SCRIPT_DIR}/.nanocat_evt.pid" ]; then
+      NANOCAT_PID="$(cat "${SCRIPT_DIR}/.nanocat_evt.pid" 2>/dev/null || true)"
+    fi
+    cleanup
+    ;;
+  mqtt)
+    connect_mqtt_via_at
+    ;;
+  mqtt-recv)
+    #read_mqtt_and_reply_wakeup
+    ensure_mqtt_listen_loop
+    ;;
+  start-services)
+    start_modem_and_erk
+    ;;
+  *)
+    echo "用法: $0 {run|test-parse|test-wakeup|test-ac|test-cmds|test-extract|kill-erk|stop|mqtt|mqtt-recv|start-services}"
+    exit 1
+    ;;
+esac
