@@ -60,3 +60,7 @@
 ## 五、固件烧录
 
 - [固件烧录指导](EC200A_QuecOpen_固件烧录指导_完整分析.md)
+
+## 六、LTE Standard(A) 系列固件升级
+
+- [LTE Standard(A) 系列 DFOTA 升级指导 V1.5](LTE_StandardA_DFOTA_升级指导_V1.5_完整分析.md)
