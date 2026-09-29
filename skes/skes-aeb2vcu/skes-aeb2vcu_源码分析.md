@@ -1,14 +1,117 @@
 # skes-aeb2vcu 源码逻辑分析
 
-## 1. 分析范围与结论边界
+## 文档目录
+
+专题编号沿用原报告，以保留“§N”和“第 N 节”的交叉引用；阅读顺序按下面的主题排列。
+
+1. [一、项目概述](#overview)
+   - [专题 1：分析范围与结论边界](#detail-1)
+   - [专题 6：配置、端口和构建](#detail-6)
+2. [二、源码目录总览](#source-tree)
+   - [专题 8：源码定位索引](#detail-8)
+3. [三、核心架构设计](#architecture)
+   - [专题 2：入口、线程和数据关系](#detail-2)
+4. [四、核心模块深度分析](#modules)
+   - [专题 3：消息接收与分发](#detail-3)
+   - [专题 4：各类输入怎样改变状态](#detail-4)
+   - [专题 5：CAN 发送线程：三个设备分支](#detail-5)
+5. [五、专题详解与设备排障](#details)
+   - [专题 7：当前源码的边界与核验重点](#detail-7)
+   - [专题 9：设备异常时如何排查本程序](#detail-9)
+
+<a id="overview"></a>
+## 一、项目概述
+
+`skes-aeb2vcu` 是 SKES 事件和车辆控制单元之间的桥接应用。它从本机 SKES 消息接收 AEB 属性、故障、BSD 告警及配重识别信息，查询 DI 方向状态，再按 `wheel_loader`、`crawler_crane` 或 `forklift` 设备类型生成本机 CAN 服务可接收的 `can_frame_t`。它本身不直接调用 SocketCAN，也不能以本地发送成功证明车辆动作。原第 1 节限定了源码和设备验证边界。
+
+<a id="detail-1"></a>
+### 1. 分析范围与结论边界
 
 本文依据 `/home/tronlong/lyp/code/skes` 仓库当前工作树中的 `skes-apps/skes-aeb2vcu/` 编写。2026-09-28 再次复核时分支为 `main_ui`，HEAD 为 `b28d0b8`；本模块的 `main.c`、`skes-aeb2vcu.c/.h`、`di_get.c/.h`、`CMakeLists.txt` 和测试构建文件相对 HEAD 均无本地差异。主要依据还包括三个设备 INI、`sep.ini`；为核对消息回调与消息头行为，阅读了 `skes-core/skes-utils/utils.c` 的 `skes_linker_init`、`skes-3rd-party/skes-linker-git/skes-linker.c` 的接收实现以及同目录 `skes-msg.c` 的消息头解析。下文区分**当前实际执行路径**、**只定义但未调用的代码**与**需目标设备验证的行为**。这里只做静态源码分析，没有在车辆或目标板上执行控制链路。
 
 程序名称表示把 AEB（自动紧急制动）信息送往 VCU（车辆控制单元）的桥接应用；源码还处理 BSD（盲区检测）提示、故障码与履带吊配重识别。程序并不直接操作 CAN 控制器或物理串口：它通过本机 nanomsg 连接把封装好的数据交给其他服务。
 
-## 2. 入口、线程和数据关系
+<a id="detail-6"></a>
+### 6. 配置、端口和构建
 
-### 普通 Markdown 可显示的总流程图
+#### 配置文件
+
+| 文件/字段 | 源码中的作用 |
+| --- | --- |
+| `sep.ini` | `enabled=true`、`name=skes-aeb2vcu`、空 `param`，由安装规则复制到应用目录。 |
+| `skes-aeb2vcu.ini.wheel_loader` | `[dev] type=wheel_loader`，`[log] level=4`。 |
+| `skes-aeb2vcu.ini.crawler_crane` | `[dev] type=crawler_crane`、`score_threshold=0.85`，`[log] level=4`。 |
+| `skes-aeb2vcu.ini.forklift` | `[dev] type=forklift`、`brake_motor_version=2`、前/后一级值 60、前/后二级值 40、`forward_di_level=0`，`[log] level=4`。 |
+| `/tmp/ui_config.json` | 装载机运行时读取 `aebEnabled` 与 `alarm.enabled`；这个绝对路径不由本项目安装规则生成。 |
+
+构建变量 `SKES_AEB2VCU_TYPE` 只决定安装哪份模板，并把它重命名为 `skes-aeb2vcu.ini`；程序运行时仍从 INI 的 `[dev] type` 决定设备类型。变量不匹配三个已知值时，安装规则选装载机模板。运行时若 INI 读取或类型解析失败，初始设备类型保留 `wheel_loader`，但源码会记错误；不能把这理解为可靠的配置校验流程。配置路径及日志文件名都是相对路径，需核对应用实际工作目录。
+
+#### 本机连接与数据形式
+
+| 地址 | 当前用途 |
+| --- | --- |
+| `tcp://127.0.0.1:19226` | SKES 消息 SUB 连接；接收 `filter` 和 `event` 主题。 |
+| `tcp://127.0.0.1:19225` | SKES 消息 PUB 连接；当前活跃路径未见业务发布调用。 |
+| `tcp://127.0.0.1:26002` | CAN0 TX 服务；发送 `can_frame_t` 结构。头文件也定义 CAN1/CAN2 的收发端口，但发送线程当前只连接 CAN0 TX。 |
+| `tcp://127.0.0.1:26006`、`:26007` | RS-485、RS-232 发送连接；初始化会执行，`com_output` 在当前源码没有调用点。 |
+| `tcp://127.0.0.1:38000` | DI 查询连接使用 `NN_REQ` 套接字；请求 `status.io` 中的 DI 数据，接收超时设为 5 秒。服务端具体实现不在本项目源码中。 |
+
+DI 线程对所有设备类型都会启动，循环执行 `di_get(1, ...)`，每轮结束后睡眠 1 秒；其结果只在叉车 CAN 分支使用。`di_get` 先发 JSON 请求，再在响应数组中匹配通道 1。若查询失败，线程只记错误，不把方向状态重置为“未知”。
+
+本目录 CMake 使用 C99，定义 `USE_NEWC_VEHICLE`，查找 cJSON、nanomsg、skes-linker、skes-log、curl、OpenSSL、zlib、collections-c、e2fsprogs 等包；应用由顶层 `skes/CMakeLists.txt` 经 `skes-apps/CMakeLists.txt` 纳入构建。安装规则把可执行文件和两个 INI 放到 `apps/skes-aeb2vcu/`，依赖库放到 `lib/`。实际目标设备绝对路径取决于顶层安装前缀。
+
+<a id="source-tree"></a>
+## 二、源码目录总览
+
+路径相对于 `skes-apps/skes-aeb2vcu/`；本应用主源码位于目录根部，没有 `src/` 子目录。
+
+```text
+skes-aeb2vcu/
+├── CMakeLists.txt、sep.ini                  构建、安装与 SEP 启用
+├── skes-aeb2vcu.ini.wheel_loader           装载机安装模板
+├── skes-aeb2vcu.ini.crawler_crane          履带吊安装模板
+├── skes-aeb2vcu.ini.forklift               叉车安装模板
+├── main.c                                  入口、日志和信号
+├── skes-aeb2vcu.c、skes-aeb2vcu.h          消息解析、设备状态与 CAN 发送
+├── di_get.c、di_get.h                      本机 DI 状态查询
+└── tests/                                  配置测试与事件发送示例
+```
+
+构建变量 `SKES_AEB2VCU_TYPE` 选择安装模板，运行时分支仍由安装后的 INI 中 `[dev] type` 决定。文件与函数位置见原第 6、8 节。
+
+<a id="detail-8"></a>
+### 8. 源码定位索引
+
+| 主题 | 文件与位置 |
+| --- | --- |
+| 进程入口、日志、信号与版本 | `main.c:58-127`：`init_log`、`sig_handler`、`main`；`skes-aeb2vcu.h:17-20`：`SKES_RELAY_VERSION_*`。 |
+| 配置读取与设备实例初始化 | `skes-aeb2vcu.c:125-255`：设备参数读取；`skes-aeb2vcu.c:1122-1175`：`skes_aeb2vcu_new`。 |
+| 消息分发与三类事件 | `skes-aeb2vcu.c:477-1119`：`on_msg_filter`、各类 `on_msg_*_parse`、`on_msg_event`、`on_skes_msg_received`。 |
+| CAN 帧、串口和 UI 配置 | `skes-aeb2vcu.c:1206-1634`：校验、串口连接、UI 文件和 `do_can_msg_sender`；`skes-aeb2vcu.h:22-140`：帧结构及 ID。 |
+| DI 查询与线程生命周期 | `di_get.c:11-152`：初始化、响应解析及查询；`skes-aeb2vcu.c:1638-1719`：`di_loop`、`skes_aeb2vcu_run/stop/release`。 |
+| 上游通信实现 | `skes-core/skes-utils/utils.c:1309-1342`：`skes_linker_init`；`skes-3rd-party/skes-linker-git/skes-linker.c:501-625`：消息接收和轮询。 |
+| 消息头与缺失数字字段 | `skes-3rd-party/skes-linker-git/skes-msg.c:22-58`：头部 `type/data` 检查；`skes-3rd-party/cjson-git/cJSON.c:109-118`：非数字返回 `NAN`。 |
+
+<a id="architecture"></a>
+## 三、核心架构设计
+
+```text
+SKES /skes/filter、/skes/event ──> 消息线程 ──┐
+                                              ├──> 共享设备状态 ──> CAN 发送线程
+DI 服务 127.0.0.1:38000 ────────> DI 线程 ─────┘                    │
+                                                            can_frame_t / nanomsg
+                                                                    │
+                                                     CAN0 TX 服务 127.0.0.1:26002
+                                                                    │
+                                                        物理 CAN/VCU（本程序外）
+```
+
+消息线程和 DI 线程写共享字段，发送线程读取，当前实现未见这些字段使用互斥锁或原子同步。设备类型决定帧编码与发送间隔：装载机使用 AEB/故障/BSD 状态，履带吊使用通道 4/5 配重，叉车使用 AEB 前后触发、等级和 DI 方向。`NN_PUB` 连接或 `nn_send` 调用不能证明下游 CAN 服务及 VCU 已执行。线程、输入和设备分支分别见原第 2～5 节。
+
+<a id="detail-2"></a>
+### 2. 入口、线程和数据关系
+
+#### 普通 Markdown 可显示的总流程图
 
 ```text
 进程启动 main.c
@@ -33,7 +136,20 @@
 
 **共享状态：** `skes_aeb2vcu_entry_t` 保存设备类型、故障列表指针、装载机 AEB/告警开关与 BSD 状态、叉车告警级别和方向、履带吊两路配重等。消息线程与 DI 线程写这些字段，CAN 线程读取；本文件未见这些字段的互斥锁或原子同步。这个事实提示并发审查重点，不能仅凭静态阅读确定某次竞态的实际表现。
 
-## 3. 消息接收与分发
+<a id="modules"></a>
+## 四、核心模块深度分析
+
+| 模块 | 输入与处理 | 输出及当前边界 | 详解 |
+| --- | --- | --- | --- |
+| 初始化与配置 | `main.c` 建实例；`skes-aeb2vcu.c` 读取设备 INI、连接 SKES 与串口服务。 | 运行类型看 `[dev] type`；配置失败可能保留装载机初值，不能以安装变量替代实际 INI。 | 原第 2、6 节 |
+| 消息解析 | `filter/properties` 解析 AEB 属性；`event` 解析故障、AEB/BSD 告警和配重。 | `aeb_enabled` 未开启时属性会被忽略；某些缺字段路径会保留旧状态。 | 原第 3、4 节 |
+| 装载机 CAN | 每轮结合 UI `aebEnabled`、`alarm.enabled`、故障表与 BSD 方位组 8 字节帧。 | 当前 `USE_NEWC_VEHICLE` 决定 CAN ID 和位字段布局；`sizeof==8` 不足以证明目标 ABI 位序。 | 原第 4、5.1 节 |
+| 履带吊 CAN | 通道 4/5 配重按分数阈值累加，发送时求和、乘 10 写入低两字节。 | 非触发事件清对应通道；长期无新事件时保留上次值。 | 原第 4、5.2 节 |
+| 叉车制动 CAN | 前后 AEB 触发、等级与 DI 通道 1 决定制动值，按电机版本选择帧。 | 1 秒保持分支不重新核对方向；未知电机版本不发送。 | 原第 5.3、6 节 |
+| DI 与发送边界 | `di_get.c` 请求本机服务；发送线程将整个 `can_frame_t` 交给 26002。 | DI 失败沿用旧方向；结构体布局依赖 ABI，CAN 发送结果未被完整检查。 | 原第 5、6、7 节 |
+
+<a id="detail-3"></a>
+### 3. 消息接收与分发
 
 ```text
 本机 SKES broker -> 订阅句柄 -> on_skes_msg_received
@@ -58,7 +174,8 @@
 
 `on_msg_filter` 与 `on_msg_event` 在处理结束后仍返回 `-1`，外层回调也转成 `-1`。但当前 `skes-linker.c` 的 `do_skes_recv_msg` 调用回调后没有检查其返回值，故不能把该返回值直接等同于消息重试或丢弃；更换底层实现时应重新核对。
 
-## 4. 各类输入怎样改变状态
+<a id="detail-4"></a>
+### 4. 各类输入怎样改变状态
 
 | 输入 | 实际解析条件与状态变化 |
 | --- | --- |
@@ -69,7 +186,7 @@
 | 配重识别 `event/event` | `source=counterweight-recognition`；只接受 `data.camera.channel` 为 4 或 5。`status=triggered` 时累加 `texts` 中分数达到阈值、`atof(text)>0` 的值；其他状态把该通道配重置 0。两个通道分别保存。 |
 | DI 查询 | 向本机 38000 端口请求 IO 状态，在响应 `status.io[]` 中查找 `dev=di`、`chn=1`，取 `params.level`；与 `forward_di_level` 相等则 `is_driving_forward=true`。查询失败时该方向状态保持上次值。但源码对 `chn` 的空值检查误查了 `dev`，对 `level` 对象也没有空值检查；当前 cJSON 对缺失数字返回 `NAN`，随后转换成整数，不能保证得到可靠方向。匹配到通道和 `params` 后即使 `level` 缺失，解析函数仍可能报告成功。 |
 
-### 故障码表
+#### 故障码表
 
 `fault_code_list` 共 16 项；发送线程逐项扫描，遇到第一个 `code != 0` 的表项就把对应的固定 `fault_code` 填入当前装载机 AEB 帧，并从下一项继续轮询。没有活跃故障时发送 0。代码没有把事件输入的 `code` 数值原样放入 CAN 帧。
 
@@ -94,7 +211,8 @@
 
 `personnel_instrusion` 是源码中的拼写，匹配输入时必须使用相同字符串。`code_name` 保存在静态表中，但当前 CAN 发送逻辑使用的是 `fault_code` 字段。
 
-## 5. CAN 发送线程：三个设备分支
+<a id="detail-5"></a>
+### 5. CAN 发送线程：三个设备分支
 
 ```text
 do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
@@ -112,7 +230,7 @@ do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
 
 `can_frame_t` 的字段依次为 `uint32_t can_id`、`uint16_t can_dlc`、`uint16_t rsv_ms`、`uint8_t data[8]`、`uint32_t timestamp`。发送线程将局部帧初始化为零，之后设置 ID、DLC 和数据；当前函数没有更新 `rsv_ms` 与 `timestamp`。它用 `nn_send(..., &frame, sizeof(can_frame_t), ...)` 发出整个 C 结构，结构布局与目标 ABI 有关，不能把它当作只含 8 字节数据的标准线缆 CAN 帧。
 
-### 5.1 装载机 `wheel_loader`
+#### 5.1 装载机 `wheel_loader`
 
 - 约每 5 秒读一次 `/tmp/ui_config.json`：根对象 `aebEnabled` 控制 AEB 字段，`alarm.enabled` 控制声音提示。文件读取或 JSON 解析失败时保留已有开关值；若 JSON 可解析但缺少某个字段，本轮传入的局部布尔初值为假，对应开关会被写为假。状态对象初始清零，故在首次成功读取前两个开关为假。
 - 故障表按固定顺序找第一个活跃项；故障码字段每帧先清零，找不到活跃项就保持 0。
@@ -122,11 +240,11 @@ do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
 - 当前 CMake 定义 `USE_NEWC_VEHICLE`，协议 CAN ID 为 `0x168B9664`；写入 `can_frame_t.can_id` 时还会或入 `0x80000000` 扩展帧标志。关闭该宏会改用头文件中的 `0x0CFF2003` 和另一种 8 字节字段布局，不能只替换 ID。
 - `aeb_fault_t` 使用 C 位字段并要求 `sizeof(aeb_fault_t)==8`；长度检查只能确认总字节数，不能单独证明各位在目标编译器上的布局与 VCU 协议一致。协议排查需对照目标板实际发出的 8 字节数据。
 
-### 5.2 履带吊 `crawler_crane`
+#### 5.2 履带吊 `crawler_crane`
 
 通道 4 和 5 的识别数值分别存在 `counterweight_value[0/1]`。默认识别分数阈值是 0.85，安装模板也配置为 0.85；低于阈值、文本转数值后不大于 0 的项目不计入。发送时先把两路结果相加，再乘 10 并转为 `uint16_t`，低字节放 `data[0]`、高字节放 `data[1]`，其余数据字节清零，DLC 为 8，CAN ID 为 `0x600`。代码没有对溢出或失效数据设置额外有效位；未收到新事件时保留上次通道值。
 
-### 5.3 叉车 `forklift`
+#### 5.3 叉车 `forklift`
 
 ```text
 每轮先取：前/后 AEB 触发、当前等级、DI 方向、上次等级与时间
@@ -152,35 +270,13 @@ do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
 3. 当前等级 1 或 2 且方向匹配时，分别取 `front_brake_level1/2_value` 或 `rear_brake_level1/2_value`，同时更新上次等级、时间和保持值。未匹配方向或等级时本轮局部制动值默认为 0；短时保持分支除外。`status` 解除告警会把当前触发与等级清零，但发送线程里的 `last_aeb_trigger_level` 只在匹配的触发分支更新。
 4. `brake_motor_version=1`：CAN ID `0x440`，`data[0]` 直接放当前制动值，其余字节清零，约 100 ms 一帧。`brake_motor_version=2`：CAN ID `0x120`，制动值大于 0 时 `data[0..1]=03 84`，否则为 `00 00`；`data[2]` 是不超过 100 的当前制动值，其余字节清零，约 35 ms 一帧。其他版本不发制动帧，只等待约 100 ms。两种有效版本的 DLC 都为 8。
 
-## 6. 配置、端口和构建
+<a id="details"></a>
+## 五、专题详解与设备排障
 
-### 配置文件
+本部分集中实现限制、测试边界和现场排障。专题编号沿用原文，文中的“§N”“第 N 节”仍指本文同编号的专题。
 
-| 文件/字段 | 源码中的作用 |
-| --- | --- |
-| `sep.ini` | `enabled=true`、`name=skes-aeb2vcu`、空 `param`，由安装规则复制到应用目录。 |
-| `skes-aeb2vcu.ini.wheel_loader` | `[dev] type=wheel_loader`，`[log] level=4`。 |
-| `skes-aeb2vcu.ini.crawler_crane` | `[dev] type=crawler_crane`、`score_threshold=0.85`，`[log] level=4`。 |
-| `skes-aeb2vcu.ini.forklift` | `[dev] type=forklift`、`brake_motor_version=2`、前/后一级值 60、前/后二级值 40、`forward_di_level=0`，`[log] level=4`。 |
-| `/tmp/ui_config.json` | 装载机运行时读取 `aebEnabled` 与 `alarm.enabled`；这个绝对路径不由本项目安装规则生成。 |
-
-构建变量 `SKES_AEB2VCU_TYPE` 只决定安装哪份模板，并把它重命名为 `skes-aeb2vcu.ini`；程序运行时仍从 INI 的 `[dev] type` 决定设备类型。变量不匹配三个已知值时，安装规则选装载机模板。运行时若 INI 读取或类型解析失败，初始设备类型保留 `wheel_loader`，但源码会记错误；不能把这理解为可靠的配置校验流程。配置路径及日志文件名都是相对路径，需核对应用实际工作目录。
-
-### 本机连接与数据形式
-
-| 地址 | 当前用途 |
-| --- | --- |
-| `tcp://127.0.0.1:19226` | SKES 消息 SUB 连接；接收 `filter` 和 `event` 主题。 |
-| `tcp://127.0.0.1:19225` | SKES 消息 PUB 连接；当前活跃路径未见业务发布调用。 |
-| `tcp://127.0.0.1:26002` | CAN0 TX 服务；发送 `can_frame_t` 结构。头文件也定义 CAN1/CAN2 的收发端口，但发送线程当前只连接 CAN0 TX。 |
-| `tcp://127.0.0.1:26006`、`:26007` | RS-485、RS-232 发送连接；初始化会执行，`com_output` 在当前源码没有调用点。 |
-| `tcp://127.0.0.1:38000` | DI 查询连接使用 `NN_REQ` 套接字；请求 `status.io` 中的 DI 数据，接收超时设为 5 秒。服务端具体实现不在本项目源码中。 |
-
-DI 线程对所有设备类型都会启动，循环执行 `di_get(1, ...)`，每轮结束后睡眠 1 秒；其结果只在叉车 CAN 分支使用。`di_get` 先发 JSON 请求，再在响应数组中匹配通道 1。若查询失败，线程只记错误，不把方向状态重置为“未知”。
-
-本目录 CMake 使用 C99，定义 `USE_NEWC_VEHICLE`，查找 cJSON、nanomsg、skes-linker、skes-log、curl、OpenSSL、zlib、collections-c、e2fsprogs 等包；应用由顶层 `skes/CMakeLists.txt` 经 `skes-apps/CMakeLists.txt` 纳入构建。安装规则把可执行文件和两个 INI 放到 `apps/skes-aeb2vcu/`，依赖库放到 `lib/`。实际目标设备绝对路径取决于顶层安装前缀。
-
-## 7. 当前源码的边界与核验重点
+<a id="detail-7"></a>
+### 7. 当前源码的边界与核验重点
 
 | 事实 | 对分析或验证的影响 |
 | --- | --- |
@@ -200,21 +296,10 @@ DI 线程对所有设备类型都会启动，循环执行 `di_get(1, ...)`，每
 
 **核验顺序建议：** 先确认安装模板与运行时 INI 的设备类型一致，再确认 19226 消息输入、对应消息头与字段、UI/DI 输入，最后抓取 26002 的 `can_frame_t` 并与车辆协议和实车表现核对。此顺序是针对上述代码依赖关系的排查建议，不等同于已经完成目标设备验证。
 
-## 8. 源码定位索引
+<a id="detail-9"></a>
+### 9. 设备异常时如何排查本程序
 
-| 主题 | 文件与位置 |
-| --- | --- |
-| 进程入口、日志、信号与版本 | `main.c:58-127`：`init_log`、`sig_handler`、`main`；`skes-aeb2vcu.h:17-20`：`SKES_RELAY_VERSION_*`。 |
-| 配置读取与设备实例初始化 | `skes-aeb2vcu.c:125-255`：设备参数读取；`skes-aeb2vcu.c:1122-1175`：`skes_aeb2vcu_new`。 |
-| 消息分发与三类事件 | `skes-aeb2vcu.c:477-1119`：`on_msg_filter`、各类 `on_msg_*_parse`、`on_msg_event`、`on_skes_msg_received`。 |
-| CAN 帧、串口和 UI 配置 | `skes-aeb2vcu.c:1206-1634`：校验、串口连接、UI 文件和 `do_can_msg_sender`；`skes-aeb2vcu.h:22-140`：帧结构及 ID。 |
-| DI 查询与线程生命周期 | `di_get.c:11-152`：初始化、响应解析及查询；`skes-aeb2vcu.c:1638-1719`：`di_loop`、`skes_aeb2vcu_run/stop/release`。 |
-| 上游通信实现 | `skes-core/skes-utils/utils.c:1309-1342`：`skes_linker_init`；`skes-3rd-party/skes-linker-git/skes-linker.c:501-625`：消息接收和轮询。 |
-| 消息头与缺失数字字段 | `skes-3rd-party/skes-linker-git/skes-msg.c:22-58`：头部 `type/data` 检查；`skes-3rd-party/cjson-git/cJSON.c:109-118`：非数字返回 `NAN`。 |
-
-## 9. 设备异常时如何排查本程序
-
-### 9.1 先定位故障落在哪一段
+#### 9.1 先定位故障落在哪一段
 
 ```text
 设备异常
@@ -228,7 +313,7 @@ DI 线程对所有设备类型都会启动，循环执行 `di_get(1, ...)`，每
 
 **文字版流程：** 先确认运行的确实是本程序及其实际配置，再确认消息到达订阅端且满足解析条件；然后核对 UI、DI、阈值和告警状态；接着在本机 CAN 服务接收端查 `can_frame_t`；最后对照物理 CAN 与 VCU 记录。TCP 连接存在不证明应用消息到达或 `nn_send` 成功。这个顺序按源码数据流划分责任边界，实际结论需有同一时间段的设备证据。
 
-### 9.2 先保存现场证据
+#### 9.2 先保存现场证据
 
 记录故障时间、车型、实际运行的二进制、当前行驶方向、告警现象，并保存故障前后的日志与输入/输出样本。优先只读检查；改配置、重启、注入告警或制动指令应放在受控测试流程中。
 
@@ -245,7 +330,7 @@ ss -tnp
 
 **日志级别：** 三份模板均设置 `[log] level=4`。`skes-log.h` 定义 0=DEBUG、1=INFO、2=NOTICE、3=WARNING、4=ERROR；日志宏以 `当前等级 <= 对应等级` 判断，故等级 4 下多数 INFO/NOTICE/DEBUG 诊断行不会出现。`SKES_LOG_ALL` 的条件使用等级 6，等级 4 下仍可能出现 `[ALL]`。部分 `nn_socket`、`nn_connect`、DI 超时提示由 `printf`/`fprintf` 写向标准输出或标准错误，可能不在应用日志中。`SIGUSR1` 每次把内存日志等级加 1，到最大值后回到最小值；发送一次不会直接打开 DEBUG，也不会写回 INI。排查前应记下当前等级，避免把缺日志误判为代码没运行。
 
-### 9.3 按症状查证
+#### 9.3 按症状查证
 
 | 症状 | 核对项目 | 判断边界 |
 | --- | --- | --- |
@@ -260,7 +345,7 @@ ss -tnp
 | DI 报错、查询慢或方向异常 | 查 38000 服务及完整响应，逐项确认 `status.io[]` 的 `dev=di`、`chn=1`、`params.level` 确实存在且是数值。 | 接收超时设为 5 秒，循环末尾再睡 1 秒；显式失败时保留上次方向。连接初始化失败后描述符未重置；畸形数字字段还可能走到不可靠的整数转换。所有设备类型都会运行 DI 线程。 |
 | 26002 上帧正确，车辆仍无动作 | 对照本机 CAN 服务输入、物理总线抓包、VCU 收到的 ID、扩展标志、DLC、8 字节数据。 | 若本机输出与源码和协议一致，下游丢帧或 VCU 条件也可能造成无动作；用同一时间段证据划分责任。 |
 
-### 9.4 关键日志如何解释
+#### 9.4 关键日志如何解释
 
 | 日志或输出片段 | 源码含义与下一步 |
 | --- | --- |
@@ -273,7 +358,7 @@ ss -tnp
 | `aeb keep last trigger` / `aeb front trigger` / `aeb rear trigger` | 叉车保持或重算分支的 INFO 日志；默认等级 4 下不出现，不能以缺日志证明分支未走。 |
 | `nn_connect` / `nn_socket` / `sizeof(aeb_fault_t) != 8` | 初始化或发送线程遇到失败；最后一项会调用 `exit(-1)`。这些提示经 `printf` 输出，应查标准输出的收集位置。 |
 
-### 9.5 用输入、程序输出和下游证据划分责任
+#### 9.5 用输入、程序输出和下游证据划分责任
 
 1. **输入边界：** 从消息生产者和本程序订阅侧记录同一时段的主题、完整 JSON 和时间。`skes_msg_parse` 使用“1 字节主题长度 + 主题 + 4 字节负载长度 + JSON 负载”的封装；只说“上游已经发布”不足以证明本进程收到，原始 TCP 字节也不能直接当纯 JSON。若输入不满足第 4 节条件，先检查消息源、主题和字段。
 2. **程序边界：** 核对实际配置、UI/DI 输入及设备类型，再在 CAN0 TX 服务接收端观察本进程的 `can_frame_t`。输入满足条件却长期没有对应帧，重点查进程内的发送线程与连接；有帧但字段不符合第 5 节编码规则，才有更直接的本程序编码问题证据。

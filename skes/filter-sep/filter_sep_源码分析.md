@@ -1,8 +1,34 @@
 # filter_sep 源码全面分析
 
-> 复核日期：2026-09-28；`skes` 仓库 `main_ui` 分支，当前 HEAD `b28d0b8`（检查时与 `origin/main_ui` 一致）。源码目录为 `/home/tronlong/lyp/code/skes/skes-apps/filter_sep`。已核对 `filter_sep` 文件相对原基线 `6bc22ef` 没有提交差异；上级 `skes-apps/CMakeLists.txt` 在工作区有未提交修改，相关构建描述以本次检查的文件为准。目标设备上的 CAN 单位、实际端口提供者和运行结果，需要协议表及设备联调确认。
+> 复核日期：2026-09-28；`skes` 仓库 `main_ui` 分支，当时 HEAD `b28d0b8`（检查时与 `origin/main_ui` 一致）。源码目录为 `/home/tronlong/lyp/code/skes/skes-apps/filter_sep`。已核对 `filter_sep` 文件相对原基线 `6bc22ef` 没有提交差异；上级 `skes-apps/CMakeLists.txt` 在工作区有未提交修改，相关构建描述以本次检查的文件为准。目标设备上的 CAN 单位、实际端口提供者和运行结果，需要协议表及设备联调确认。
 
-## 1. 分析范围与结论边界
+## 文档目录
+
+专题编号沿用原报告，以保留“§N”和“第 N 节”的交叉引用；阅读顺序按下面的主题排列。
+
+1. [一、项目概述](#overview)
+   - [专题 1：分析范围与结论边界](#detail-1)
+   - [专题 2：文件、构建与运行位置](#detail-2)
+2. [二、源码目录总览](#source-tree)
+3. [三、核心架构设计](#architecture)
+   - [专题 3：完整逻辑流程图（普通 Markdown 可显示）](#detail-3)
+4. [四、核心模块深度分析](#modules)
+   - [专题 4：数据结构与二进制输入](#detail-4)
+   - [专题 5：四个 CAN ID 到五个属性的精确映射](#detail-5)
+   - [专题 6：消息通道与 JSON 契约](#detail-6)
+5. [五、专题详解与设备排障](#details)
+   - [专题 7：线程、状态及失败路径](#detail-7)
+   - [专题 8：外部模块关系与部署条件](#detail-8)
+   - [专题 9：测试覆盖、可核验项与未验证项](#detail-9)
+   - [专题 10：设备故障排查手册](#detail-10)
+
+<a id="overview"></a>
+## 一、项目概述
+
+`filter_sep` 是 SKES 中的 CAN 属性转换应用。它订阅三个本机 CAN 帧地址，识别四个 CAN ID，把档位、车速和三个踏板值保存在进程状态中，并把变化后的五项属性发布到 `/skes/filter`；同一主题的 `properties/query` 请求可查询当前属性。这里的 `filter` 是程序和主题名，主路径没有通用低通或滑动平均算法。具体有效帧条件和静态分析边界见原第 1、5、6 节。
+
+<a id="detail-1"></a>
+### 1. 分析范围与结论边界
 
 本模块的编译入口是 `src/main.cpp`、`src/can_server/can_server.cpp`、`src/filter_pub/filter_pubsub.cpp`，由本目录 `CMakeLists.txt:58-66` 明确列出。本文同时核对 `main.h`、`can_server.h`、`filter_pubsub.h`、`sep.ini`、`tests/`，以及消息封装和排障涉及的 `skes-core/skes-utils/utils.c`、`skes-3rd-party/skes-linker-git/`、`skes-3rd-party/skes-log/`、`skes-scripts/skes-sepd.sh` 中相关代码。关联模块仅用于确认接口方向，不把它们的业务实现归为本模块。
 
@@ -10,7 +36,8 @@
 
 下文的“会调用”“会赋值”表示代码路径；“可能导致”表示由这些代码推导出的风险，不等于已经在目标板复现。没有给出 CAN 协议表的物理单位或现场网络拓扑时，本文不推断它们。
 
-## 2. 文件、构建与运行位置
+<a id="detail-2"></a>
+### 2. 文件、构建与运行位置
 
 | 文件 | 可核对的作用 |
 | --- | --- |
@@ -25,11 +52,45 @@
 
 此项目虽设置 C++11，位提取宏使用 GNU 语句表达式 `({ ... })`，CAN 连接代码使用 `asprintf()`，CMake 也显式定义 `_GNU_SOURCE`；它依赖 GNU 环境扩展，不应仅凭“C++11”假定可用任意标准 C++ 编译器直接编译。证据：`can_server.h:15-44`、`can_server.cpp:123`、`CMakeLists.txt:10`。
 
-## 3. 完整逻辑流程图（普通 Markdown 可显示）
+<a id="source-tree"></a>
+## 二、源码目录总览
+
+路径相对于 `skes-apps/filter_sep/`，只展示当前主目标和验证入口。
+
+```text
+filter_sep/
+├── CMakeLists.txt、sep.ini              构建、安装与 SEP 启动
+├── src/
+│   ├── main.cpp、main.h                 入口、共享状态与线程启动
+│   ├── can_server/                      三路 CAN 订阅、帧结构与位提取
+│   ├── filter_pub/                      SKES 发布、查询与应答
+│   └── log/                             syslog 宏封装
+└── tests/
+    ├── test.cpp                        部分位提取单元测试
+    └── test_request.cpp                持续发送查询的联调程序
+```
+
+当前主目标明确编译 `main.cpp`、`can_server.cpp` 和 `filter_pubsub.cpp`。`tests/` 中只有位提取测试被注册为 CTest 用例；持续查询程序不是单次、只读的现场诊断命令。源文件和构建关系见原第 2、9 节。
+
+<a id="architecture"></a>
+## 三、核心架构设计
+
+```text
+CAN 发布端 16002/16003/16004 ──> CAN 接收线程 ──> curr_dt / valid_dt
+                                                  ├──> 变化发布线程
+                                                  │      └── post/filter_table ──> /skes/filter
+SKES /skes/filter 的 request/query ──> 消息线程 ───┘
+                                                  └── response/query ──> /skes/filter
+```
+
+只有 `0x16D61B96` 档位/车速帧会将 `valid_dt` 置真；发布线程还要求整块状态与 `last_dt` 不同，并在约 200 毫秒循环末尾休眠。查询分支要求主题、外层 `action/type`、内层 `data.type` 和至少一个已知属性名均符合条件。当前 CAN 写侧没有使用读侧所用的 mutex；发送前即更新 `last_dt`，发送失败不会因状态不变而自动重发。流程图、字段映射及消息样例见原第 3～7 节。
+
+<a id="detail-3"></a>
+### 3. 完整逻辑流程图（普通 Markdown 可显示）
 
 以下全部采用等宽文本图，普通 Markdown 查看器只需支持代码块；本节后另有逐步文字版流程。
 
-### 3.1 启动、线程和退出
+#### 3.1 启动、线程和退出
 
 ```text
 main()
@@ -59,7 +120,7 @@ main()
 
 图中顺序严格对应 `src/main.cpp:36-67`，因此上报线程可能在 `filter_mng` 初始化前执行；CAN 线程创建结果未检查。`filter_pubsub_stop()` 虽有定义，入口没有调用它，正常主循环也没有主动把 `running` 置为 false。这里的“退出”只描述源码可见的分支，不表示已有可靠的优雅退出路径。
 
-### 3.2 CAN 接收、解析与上报
+#### 3.2 CAN 接收、解析与上报
 
 ```text
 CAN 接收线程
@@ -95,7 +156,7 @@ CAN 接收线程
 
 接收分支来自 `src/can_server/can_server.cpp:62-140`，上报分支来自 `src/filter_pub/filter_pubsub.cpp:275-420`。图中的“连接”指 `nn_connect()` 调用返回成功，不保证当时已有远端发布者或收到了帧。
 
-### 3.3 `/skes/filter` 查询分支
+#### 3.3 `/skes/filter` 查询分支
 
 ```text
 SKES 接收线程 skes_run()
@@ -115,7 +176,7 @@ SKES 接收线程 skes_run()
 
 对应 `src/filter_pub/filter_pubsub.cpp:42-231,250-273`。该函数末尾无论是否成功发送都返回 `-1`，上层回调也返回 `-1`。当前 `skes-linker` 的 `do_skes_recv_msg()` 调用回调后不使用其返回值，因此这个负值不会在该实现中直接改变接收函数的返回结果；见 `skes-3rd-party/skes-linker-git/skes-linker.c:501-527`。
 
-### 3.4 文字版流程
+#### 3.4 文字版流程
 
 1. 入口先通过 syslog 写调试级编译信息，再设置 `skes-log` 级别，初始化一对 SKES 句柄并启动两个线程：一个接收 SKES 主题消息，一个周期检查数据变化。调试日志是否出现在终端取决于系统日志配置，源码没有直接向标准输出打印它。
 2. 入口随后才清零 `filter_mng`、初始化互斥锁、启动并分离 CAN 接收线程。CAN 线程依次连接三个本机地址，之后持续等待 CAN 帧消息。
@@ -124,7 +185,19 @@ SKES 接收线程 skes_run()
 5. 收到 `/skes/filter` 查询时，回调检查动作、类型和属性名。至少命中一个已知属性才发送响应；响应保留请求其他字段，补充每项结果并将动作改成 `response`。
 6. 主线程每 200 毫秒读运行标志。当前入口没有正常停止动作；CAN 接收线程遇到错误也不会把该标志置为 false。
 
-## 4. 数据结构与二进制输入
+<a id="modules"></a>
+## 四、核心模块深度分析
+
+| 模块 | 输入与处理 | 输出及当前边界 | 详解 |
+| --- | --- | --- | --- |
+| 入口和共享状态 | `main.cpp` 创建发布、CAN 接收线程；`main.h` 定义 `curr_dt/last_dt/valid_dt`。 | 发布线程启动早于共享 mutex 初始化，启动顺序存在静态可见的风险。 | 原第 2、3、7 节 |
+| CAN 帧接收 | `can_server.cpp` 订阅三路 `can_frame_t`，清 CAN ID 最高位再分派。 | 直接按本机 C 结构切帧，依赖收发双方布局相容；线程出错退出不必然使主进程退出。 | 原第 3、4 节 |
+| 位提取与属性 | 四个 CAN ID 更新五个属性，部分字段乘比例系数。 | `0x1AD18096` 穿透下一分支；宏会读临时数组未初始化尾部，物理单位仍须协议表确认。 | 原第 4、5 节 |
+| 主动上报 | 发布线程把五个属性包装为 `post/filter_table` JSON。 | 先更新 `last_dt` 后发送，且未检查发送返回值；静止状态无定时全量重发。 | 原第 6.2、7 节 |
+| 查询应答 | 消息线程解析 `request/query` 并复制改写请求。 | 无有效 CAN 数据时 `value` 来自未初始化局部状态；请求已有同名键可能产生重复键。 | 原第 6.3、7 节 |
+
+<a id="detail-4"></a>
+### 4. 数据结构与二进制输入
 
 `can_frame_t` 字段按定义顺序为：`uint32_t can_id`、`uint16_t can_dlc`、`uint16_t rsv_ms`、`uint8_t data[8]`、`uint32_t timestamp`（`src/can_server/can_server.h:46-53`）。源码注释称 `rsv_ms` 为 MCU 运行时间、`timestamp` 为 RTC 时间戳；本模块解析时只用 `can_id` 和 `data`，没有用这两个时间字段，也没有核验 `can_dlc <= 8`。按 `sizeof(can_frame_t)` 直接切分意味着收发双方要使用相容的结构布局、字节序和对齐方式；源码中没有独立的跨平台解码层。
 
@@ -132,7 +205,8 @@ SKES 接收线程 skes_run()
 
 `EXTRACT_BITS(buffer, offset, width)` 从 `buffer + offset/8` 起固定 `memcpy` 8 字节到 `uint64_t`，右移 `offset%8` 位再按宽度掩码。活跃解析路径只把 8 字节 CAN 负载复制到 `char tmpbuf[16]` 的前 8 字节；例如偏移 48 的提取会读取 `tmpbuf[6..13]`，其中 `[8..13]` 未初始化。偏移 32 的提取也会读到未初始化的 `[8..11]`。这些读取没有越过 16 字节数组，但仍是读取未初始化内容；即使在小端机器上，高位最终被窄宽度掩码丢弃，也不能据此证明实现具有可移植、可靠的行为。位解释本身还依赖编译目标的内存字节序；测试给出的低字节在前的期望见 `tests/test.cpp:8-34`。`EXTRACT_BITS_BIG_ENDIAN` 只在测试中使用，活跃四个 CAN ID 分支均没有调用它。测试中的 8 字节数组与该大端宏某些偏移组合另有**越界读取**风险，应与前述“数组内未初始化读取”区分。证据：`can_server.cpp:17-21,34-55`、`can_server.h:15-44`、`tests/test.cpp:47-58`。
 
-## 5. 四个 CAN ID 到五个属性的精确映射
+<a id="detail-5"></a>
+### 5. 四个 CAN ID 到五个属性的精确映射
 
 当前编译走 `src/can_server/can_server.cpp:33-56` 的 `#else`；`#if 0` 中的 `0x18001701` 不会编入本版本。CAN ID 比较前先执行 `can_id & ~0x80000000`，故这里列的是清位后的 ID。下表位偏移按代码中的 `EXTRACT_BITS` 参数记录，从临时数组起始处算；未给物理单位，因为源码未定义。
 
@@ -145,9 +219,10 @@ SKES 接收线程 skes_run()
 
 档位表是代码的**设计表达式**，不是所有编译目标都已验证的运行结果：变量 `TransGearinfo` 是普通 `char`，若该平台的 `char` 为有符号类型，`0x80`、`0x81` 转入该变量后与正整数常量比较不会命中前进档条件，而会走默认档位。第 48 位起的车速原始值最大为 65535，按源码系数计算结果小于 256，存成整数后范围为 0～255；这只是代码可推得的数字范围，不是物理速度范围。
 
-## 6. 消息通道与 JSON 契约
+<a id="detail-6"></a>
+### 6. 消息通道与 JSON 契约
 
-### 6.1 地址、方向和封装
+#### 6.1 地址、方向和封装
 
 | 用途 | 本模块行为 | 源码 |
 | --- | --- | --- |
@@ -159,7 +234,7 @@ SKES 接收线程 skes_run()
 
 `skes_send()` 负责在 JSON 前加主题长度、主题名和载荷长度，具体二进制封装见 `skes-3rd-party/skes-linker-git/skes-linker.c:296-322`。`skes-relay` 的 `on_msg_filter()` 解析 JSON 后转发该主题（`skes-core/skes-relay/skes-relay.c:241-267`）。因此抓取原始 nanomsg 字节时不能把整个报文直接当纯 JSON；下文示例只展示 JSON 载荷。
 
-### 6.2 主动上报
+#### 6.2 主动上报
 
 只有 `valid_dt=true` 且 `memcmp(curr_dt,last_dt,sizeof(filter_data_t)) != 0` 才尝试发布；线程每轮末尾 `usleep(200000)`。因此首次收到有效档位/车速帧也未必立即上报：如果当时整个 `curr_dt` 与清零后的 `last_dt` 相同，变化条件不成立。消息外层固定填空字符串 `version`、`id`，`ts` 取发布时 `CLOCK_REALTIME` 的毫秒值，`action="post"`、`type="properties"`；内层 `data.type="filter_table"`。属性数组固定包含以下五项，均带 `index=-1` 和 `data` 数值（`filter_pubsub.cpp:288-418`）：
 
@@ -192,7 +267,7 @@ SKES 接收线程 skes_run()
 
 源码先复制到 `last_dt` 再构造/发送 JSON，而且没有检查 `skes_send()` 返回值。因此发送失败或构造失败时，这一状态也已被记录为“上次数据”；如果后续字段不再变化，该状态不会靠定时器自动重发。源码不添加 `msg_id`；也没有心跳、固定周期全量重发或字段级过期判断。
 
-### 6.3 查询与响应
+#### 6.3 查询与响应
 
 消息回调只分派 `skes_topic_type_filter`。它先用 cJSON 解析载荷，并通过 `skes_msg_header_parse()` 取得外层 `action/type/data`；该解析函数要求存在 `type` 和 `data`，不要求 `msg_id` 必填。查询还要求外层 `action=request`、`type=properties`，内层 `data.type=query`，然后遍历 `data.data` 数组。五个已知 `property_name` 中只要有一个命中，就会生成响应；全部未知或数组为空则不发送。比较是 `strcmp`，属性名大小写必须一致。证据：`filter_pubsub.cpp:104-214`、`skes-3rd-party/skes-linker-git/skes-msg.c:22-54`。
 
@@ -212,7 +287,13 @@ SKES 接收线程 skes_run()
 
 **无有效数据时的限制：**`temp_dt` 是局部变量，仅在 `valid_dt=true` 时赋值；即使未赋值，命中字段后代码仍读取它写 `value`，并标 `result=-1`。此时 `value` 不能使用，C++ 层面的未初始化读取也使运行行为不可靠。成功发送响应之后 `on_msg_filter()` 仍返回 `-1`，回调也返回 `-1`；当前 `skes-linker` 实现忽略回调返回值，不能把该负值解释为“没有发送响应”。
 
-## 7. 线程、状态及失败路径
+<a id="details"></a>
+## 五、专题详解与设备排障
+
+本部分集中实现限制、测试边界和现场排障。专题编号沿用原文，文中的“§N”“第 N 节”仍指本文同编号的专题。
+
+<a id="detail-7"></a>
+### 7. 线程、状态及失败路径
 
 | 位置 | 源码中的具体行为 | 分析意义 |
 | --- | --- | --- |
@@ -229,13 +310,15 @@ SKES 接收线程 skes_run()
 
 上述并发与生命周期问题是从调用顺序和锁的覆盖范围直接得出的源码风险；是否在现场触发、触发频率及后果，需要针对目标编译器和运行环境验证。另需注意 `0x1AD18096` 缺少 `break` 的穿透行为，以及档位 `0x80/0x81` 的 `char` 符号性问题，均不能在文档中自动修正为“预期业务值”。
 
-## 8. 外部模块关系与部署条件
+<a id="detail-8"></a>
+### 8. 外部模块关系与部署条件
 
 `skes-relay` 的 filter 主题处理函数会转发消息；`sep-aeb/sep-aeb.c` 的 `on_msg_filter()` 可处理 `filter_table` 上报和匹配自身 `msg_id` 的查询响应，并有发起查询的代码。当前工作区的 `skes-dataengine` 也使用 `/skes/filter` 主题；所以订阅方需要结合消息 `action`、`data.type` 和业务字段区分消息。此处只证明源码存在这些接口，不断言设备上这些服务同时运行。相关证据：`skes-core/skes-relay/skes-relay.c:241-267`、`skes-apps/sep-aeb/sep-aeb.c:484-537,835-847`、`skes-apps/skes-dataengine/vehicles/forklift/skes_qt_bridge.cc` 中的 `/skes/filter` 处理。
 
 `filter_sep` 自己固定尝试连接三路 CAN 输入；相邻 `skes-dataengine/can/can_receiver.cc` 的默认通道数却是 2，虽然数组列有第三个相同地址。两者是否连接同一个现场发布端、是否启用 `16004`，需按部署配置核对。程序还依赖 SKES 消息通道可用及对应动态库存在；仅运行该可执行文件并不能在没有 CAN 帧来源时产生有效属性。
 
-## 9. 测试覆盖、可核验项与未验证项
+<a id="detail-9"></a>
+### 9. 测试覆盖、可核验项与未验证项
 
 `tests/CMakeLists.txt` 生成 `FilterUnitTest`、`FilterRequestTest`。顶层 `CMakeLists.txt:37` 调用 `enable_testing()`，本模块只通过 `add_test()` 注册前者；后者会每 5 秒循环发送固定查询，没有被注册为 CTest 用例。`FilterUnitTest` 检查部分位提取、64 位全 1 情况和大端宏的几个例子；没有覆盖四个活跃 CAN ID 的端到端解析、JSON 发布/查询、三路连接错误、并发、超时与退出。`FilterRequestTest` 固定查询四个字段，没有查询 `HCT1_Drv_BRK_Ped`，其请求 `data_type` 均写为 `boolean`，不能当作当前真实输出类型。证据：`tests/CMakeLists.txt:26-37`、`tests/test.cpp:8-58`、`tests/test_request.cpp:18-75`。
 
@@ -248,11 +331,12 @@ ctest --test-dir build -R '^FilterUnitTest$' --output-on-failure
 
 这两条是源码对应的验证入口，不代表本文已执行。本文完成的是静态源码核对及文档中 JSON 示例的语法检查；未运行目标程序、单元测试、CAN 注入或设备联调。物理单位、真实车速比例、硬件 CAN 通道映射、第三路端口、实际消息时序与并发问题发生概率均不能仅由本模块源码最终判定。
 
-## 10. 设备故障排查手册
+<a id="detail-10"></a>
+### 10. 设备故障排查手册
 
 本节按“部署与进程 → CAN 输入 → 进程内解析 → SKES 发送 → relay 转发 → 消费者处理”的顺序定位问题。先记录故障时刻、设备实际二进制和原始报文，再考虑重启；重启会抹去线程已退出或偶发错误的现场。**进程存在、端口可见、`nn_connect()` 返回成功**各自只证明一层现象，不能单独证明已经收到正确 CAN 帧或成功发布属性。
 
-### 10.1 核对部署和启动链
+#### 10.1 核对部署和启动链
 
 1. 在设备上确认实际安装目录，不要把开发机的源码路径或 `build/` 当设备路径。记录设备时间、软件包版本、实际执行文件和启动参数。`main.cpp` 的 `APP_VERSION="V0.0.2"` 是编译期日志字符串，不能单独证明二进制等于本文所查 HEAD。
 2. 查看实际 `apps/filter_sep/sep.ini`：源码安装的版本为 `enabled=true`、`name=filter_sep`、`param=`。`skes-sepd.sh` 读取 `name/cmd/param/enabled`；若设置 `cmd`，优先用它作为可执行文件名。`filter_sep` 程序自身不读取该文件。
@@ -270,7 +354,7 @@ ps -ef | grep '[s]kes-relay'
 
 若设备提供 `ldd`，在**设备上**对实际执行的文件运行 `ldd "$APP_DIR/filter_sep"`，查看是否有 `not found`；精简系统可能没有该命令，此时看加载器输出和包内 `lib/`。不要用开发机对交叉编译二进制执行 `ldd` 的结果判断设备依赖。
 
-### 10.2 日志位置和可观察证据
+#### 10.2 日志位置和可观察证据
 
 | 来源 | 源码中确实会出现什么 | 不能据此推出什么 |
 | --- | --- | --- |
@@ -281,7 +365,7 @@ ps -ef | grep '[s]kes-relay'
 
 `skes-log` 实现会向 stdout 输出；文件输出需要设置路径并启用，而本模块没有调用这两个配置函数（`skes-3rd-party/skes-log/skes-log.c:159-172,334-415`）。设备若用 systemd 可按实际服务查看 `journalctl`；若用 BusyBox/syslog，可看 `logread` 或部署脚本接收 stdout/stderr 的位置。源码没有指定固定的 `filter_sep` 日志文件。
 
-### 10.3 快速定位图（普通 Markdown 可显示）
+#### 10.3 快速定位图（普通 Markdown 可显示）
 
 ```text
 设备故障
@@ -303,7 +387,7 @@ ps -ef | grep '[s]kes-relay'
 
 这是检查顺序，不是自动诊断结论。本程序没有“已收 CAN 帧数”“上报成功数”的统计；需结合上游记录或受控抓包/订阅工具，才能在图中的层次之间作出判断。
 
-### 10.4 按现象核对的清单
+#### 10.4 按现象核对的清单
 
 | 现象 | 检查顺序与源码依据 |
 | --- | --- |
@@ -324,7 +408,7 @@ ss -lntp | grep -E ':(16002|16003|16004|19225|19226)([^0-9]|$)'
 ss -tnp  | grep -E ':(16002|16003|16004|19225|19226)([^0-9]|$)'
 ```
 
-### 10.5 受控复现与结论记录
+#### 10.5 受控复现与结论记录
 
 1. 在测试设备或隔离环境保存同一时间段的上游原始 CAN 帧（ID、负载、通道、时间）、进程/启动器状态、`/skes/filter` JSON。先比对帧与第 5 节的换算，再追踪 relay 和消费者；仅凭页面显示值无法定位是哪一层。
 2. 用明确的 `msg_id` 发送一次结构正确的查询，核对 `action=response`、相同 `msg_id`、所查字段的 `result/value`。第 6.3 节有载荷示例。`tests/test_request.cpp` 会每 5 秒无限循环发请求，只覆盖四个属性；它不能当作“只查一次”的生产设备诊断命令。
