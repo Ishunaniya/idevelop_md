@@ -2,6 +2,98 @@
 
 > 分析对象：`/home/tronlong/lyp/code/rtms_sdk/apps/cloud_client/`，仓库分支 `develop/rtms_sdk_v1.3_20240408`，提交 `bc60961e`。本文只描述此版本源码可核对的行为；设备上的配置值、云平台响应、其他进程的实现和实际运行结果没有被本文预设。行号均指上述提交的文件。本文是独立分析，`AGENTS.md` 可作简要导航。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/cloud_client/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 定位、范围与构建](#analysis-1)
+- [2. 总体结构与线程](#analysis-2)
+- [3. 初始化和区域选择](#analysis-3)
+- [4. MQTT 连接、认证与注册](#analysis-4)
+- [5. 本地数据、云端下发和主题映射](#analysis-5)
+- [6. 对时、标准信息和设备命令](#analysis-6)
+- [7. 离线缓存和补传的真实边界](#analysis-7)
+- [8. 配置、路径、状态与外部依赖](#analysis-8)
+- [9. 可由源码确认的风险与未证实事项](#analysis-9)
+- [10. 复核顺序](#analysis-10)
+- [11. 设备故障排查：从症状定位到代码路径](#analysis-11)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`cloud_client` 桥接本地与远端 MQTT，处理注册、对时、命令转发和部分离线工况缓存；消息入队或本地发布成功不等于云端业务确认。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/cloud_client/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 单实例、线程和构建 |
+| `src/cloud_dev/` | 配置、区域、共享状态与认证候选 |
+| `src/mosquitto/` | 本地/远端 MQTT、注册、转发和补传 |
+| `src/json_parse/` | 注册、命令和对时 JSON |
+| `src/nn_sock/` | 本机命令与网络状态通信 |
+| `src/db_manage/`、`src/sdcard_check/` | SQLite 历史缓存与 SD 卡检查 |
+| `src/common/`、`src/posix/`、`src/sany_log/` | 配置、时间、压缩与日志辅助 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+本地 MQTT / 本机 nanomsg ↔ 共享状态与消息队列
+                               ↕
+                    cloud_client 远端 MQTT ↔ 云 Broker
+                               │ 离线数据
+                               └→ SQLite / 内存缓存 → 条件满足后补传
+```
+
+本地与远端 Broker、注册、缓存和云端确认是不同阶段；源码中的本地 publish 成功不等于云平台处理成功。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 设备状态与区域 | `src/cloud_dev/` | 配置、认证候选、地区选择和 SD 卡状态影响后续线程 | [进入章节](#analysis-3) |
+| MQTT 桥接 | `src/mosquitto/` | 本地与远端连接、注册及主题转发分别处理 | [进入章节](#analysis-4) |
+| 数据与指令 | `src/json_parse/`、`src/nn_sock/` | 数据上行、命令下行和本机接口按主题/标签映射 | [进入章节](#analysis-5) |
+| 历史补传 | `src/db_manage/`、`src/sdcard_check/` | 数据库建立与删除时机决定离线可靠性边界 | [进入章节](#analysis-7) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+配置 / 区域选择 → 远端连接与注册
+符合主题与连接状态条件的本地 MQTT 消息 → 待发队列 → 远端 MQTT
+符合历史条件的工况/定位消息 → 内存或 SQLite 缓存
+远端命令 → 本地主题或 nanomsg → 本机处理方 / 回复
+缓存数据 → 满足补传条件后重发
+~~~
+
+对应[初始化与区域](#analysis-3)、[连接注册](#analysis-4)、[数据与指令](#analysis-5)、[历史补传](#analysis-7)。本地发布、远端发送与云端业务确认是不同阶段。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 定位、范围与构建
 
 `cloud_client` 是 RTMS SDK 的设备侧云通信桥接进程：连接本地 MQTT Broker 与远端 Broker，转发工况和指令，处理云端对时、认证/注册与离线工况缓存。它依赖其他本机进程提供工况、schema、系统信息、命令回复、网络信息和 MCU 命令接收端；源码本身没有 CAN 采集逻辑。依据：`main.c:117-169`、`src/mosquitto/client_mosquitto.c:214-238,337-427,579-627`、`src/nn_sock/nn_sock.c:16-105`。
@@ -30,6 +122,8 @@
 | `src/base64/`、`src/md5/`、`src/posix/`、`src/sany_log/` | 编码、摘要、POSIX 同步/时间和日志辅助。不能仅由函数存在推断其在主流程被调用；例如 `sany_b64_decode()` 在本目录只有定义和声明，没有调用。 |
 
 辅助实现与主流程的实际联系：`sany_platform_posix.c:56-74` 分别提供单调时钟（超时和对时请求）与实时时钟（业务时间戳）；`common.c:340-384` 通过 zlib 的 gzip 包装压缩工况，`common.c:386-418` 用 UUID/MD5 构造请求 ID 和注册凭据；`sany_log.c:8-111` 按配置的日志级别过滤并输出带时间的日志。Base64 解码器被编入目标，但本目录的 `sany_b64_decode()` 没有主流程调用者。单个辅助函数存在并不等于它是当前可观察的业务功能。
+
+<a id="analysis-2"></a>
 
 ## 2. 总体结构与线程
 
@@ -71,6 +165,8 @@ main 启动
 
 图中“打开/加锁遇到其他错误仍继续”是 `is_instance_existing()` 的实际返回路径：`open()` 失败返回 `false`；`flock()` 失败但错误不是 `EWOULDBLOCK` 时也返回 `false`。只有锁被占用这一分支阻止启动，不能把该锁当作所有异常下都有效的单实例保证。`select_domain_cfg()` 返回值也未由 `main()` 检查。依据：`main.c:26-41,148-159`。
 
+<a id="analysis-3"></a>
+
 ## 3. 初始化和区域选择
 
 `dev_info_init()` 先清零结构，再从 `/opt/conf.ini` 读取 `dev:id`、`dev:secret`；缺失则返回失败。接着尝试读取 `/opt/conf_ext2.ini`、`/opt/conf2.ini`、设备型号和模组信息；后四项的返回值没有在此函数逐一判错。认证候选：若 `conf2.ini` 有非空 ID/密钥，则候选 0 是该文件，候选 1 是 `conf.ini`；否则只有 `conf.ini` 一组。然后连接 nanomsg `16008` SUB、`26008` PUB、`38001` REQ，检查 SD 卡，条件满足才建立数据库与四个消息队列。依据：`cloud_dev.c:57-163`、`common.c:78-233`。
@@ -100,6 +196,8 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 `/opt/conf_ext2.ini` 整个文件加载失败时，读取函数直接返回 `-1`，而 `dev_info_init()` 不检查这个返回值。字段的回退值只适用于 INI 成功加载后的缺失字段；文件不存在时无法据此断言连接配置有效。依据：`common.c:78-146`、`cloud_dev.c:96-108`。
 
+<a id="analysis-4"></a>
+
 ## 4. MQTT 连接、认证与注册
 
 本地 MQTT 从配置取 IP/端口（字段默认 `127.0.0.1:1883`），客户端 ID 固定为 `cloud_client`，使用 clean session、20 秒 keepalive；连接成功后订阅 `client_mosquitto.c:222-238` 的主题。远端先调用 `domain_to_ip()` 作 IPv4 DNS 解析和重试，随后连接函数仍使用域名本身；它不是直接把预解析的 IP 传给 Mosquitto。远端用当前认证 ID/密钥作为 client ID、用户名/密码，keepalive 60 秒；远端端口为 8883 时设置 `/opt/cert/ca.crt`、`client.crt`、`client.key`。远端连接成功后云状态写 `2` 并订阅八个云端主题；失败/断开写 `1`。依据：`common.c:313-338`、`client_mosquitto.c:429-577,644-750`。
@@ -127,6 +225,8 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 ```
 
 这里的“连接被拒”特指回调中 `result == MOSQ_ERR_CONN_REFUSED` 的分支；普通 DNS/网络连接失败走重试路径，不自动等价于注册触发。注册客户端源码没有主动发布注册请求消息，实际协议交互需由注册 Broker 行为证实。注册响应中的 `hasError` 被存入状态，但协调线程判断成功只检查用户名/密码非空，见 `json_parse.c:296-347` 与 `client_mosquitto.c:1119-1135`。远端连接成功还可能覆盖保存 `/opt/conf2.ini`，见 `client_mosquitto.c:545-555`。
+
+<a id="analysis-5"></a>
 
 ## 5. 本地数据、云端下发和主题映射
 
@@ -161,6 +261,8 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 本地订阅列表包含 `v4/p/post/thing/live/cbor/1.2`、事件和位置信息等主题，但这些主题未进入四种工况的专用映射分支；在线且已对时时会作为原主题回复消息发送，远端离线时不缓存。头文件定义 `local/data/event` 历史映射，连接回调却没有订阅 `local/data/event`。这些都应以实际订阅和回调条件判断，不能把“常量已定义”视为功能已打通。依据：`client_mosquitto.c:222-238,337-427,1145-1177`。
 
+<a id="analysis-6"></a>
+
 ## 6. 对时、标准信息和设备命令
 
 远端连接后先发送一次对时请求，5 秒定时器在 `sync_time_flag` 尚未置位时继续请求；24 小时定时器继续请求。请求 JSON 仅含 `header.msgId` 和 `header.ts`，其中 `ts` 用单调时钟毫秒数；收到响应后按 `deviceSendTime/hubRecvTime/hubSendTime/deviceRecvTime` 计算时间，设置系统时钟。非 IMX6 分支还发 nanomsg MCU 时间命令，并向 `/tmp/ql_time_set_pipe` 写模组时间；IMX6 分支调用 `hwclock -w -f /dev/rtc1`。首次解析到符合结构的对时响应时调用 `killall can_client alarm_client` 后置 `sync_time_flag`。`parse_time_payload()` 即使 `set_mcu_time()` 或 `set_clock_time()` 失败也返回 `0`，因此这个标志不能证明系统时钟已设置成功。依据：`client_mosquitto.c:47-121,760-778`、`json_parse.c:18-95,349-372,423-449`、`nn_sock.c:201-257`。
@@ -168,6 +270,8 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 标准信息由 `make_standard_info_payload()` 构造：`body.id` 为空字符串，`items[0].properties` 包含 `tbox_id`、`Tbox_cellular_type`、可得时的 `machine_sn` 和有效模型 ID；只有时间同步后尝试发布到实时 JSON 1.0 主题。系统信息来自本地同名主题；schema 来自 `local/data/schema`，`NOT_USED_SCHEMA` 为 `OFF` 时远端线程在 schema 未报告前反复请求本地 `local/data/get_schema`。这三类上报标志在 `mosquitto_publish()` 返回成功时就置位，发布回调收到对应消息 ID 的确认时又置位，因此标志不能当作云端业务处理成功的证明。依据：`json_parse.c:374-422`、`client_mosquitto.c:258-335,629-641,779-831`。
 
 `REBOOT` 命令调用 `set_reboot_flag()` 并安排 10 秒后 `SIGALRM`，信号处理器执行 `system("reboot")`；`SCHEMA` 命令清 schema 上报标志；`CUSTOM` 中目前只处理包含 `type=register` 的参数并据模型 ID 更新设备型号映射。命令回复是否生成受 `header.noReply` 控制，默认需要回复，回复含原 `msgId` 和结果码；无论是否生成直接回复，远端回调仍把原命令发给本地 Broker。依据：`json_parse.c:97-295`、`main.c:43-72`、`common.c:509-559`。
+
+<a id="analysis-7"></a>
 
 ## 7. 离线缓存和补传的真实边界
 
@@ -195,6 +299,8 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 持久化范围有明显限制：未满 10 条的历史消息只在内存中；在线但尚未完成首次对时的消息直接丢弃；离线的非工况消息不缓存；实时队列最多保留约 100 条。数据库 `SELECT ... LIMIT 1` 和删除子查询均无 `ORDER BY`，不能视作严格 FIFO；删除条件是发布函数返回成功，而不是 MQTT 确认或云端业务确认。`publish_history_data()` 对未知主题的初始返回值为 `0`，可能令未知主题记录被当作已发送删除。批量写库在逐项绑定/执行时先从链表弹出并释放消息，后续事务失败/回滚时这些消息不能从该链表恢复。依据：`client_mosquitto.c:337-427,1145-1238`、`db_manage.c:387-499,501-555,590-609`。
 
+<a id="analysis-8"></a>
+
 ## 8. 配置、路径、状态与外部依赖
 
 | 路径/端口 | 字段或作用 | 代码依据 |
@@ -209,6 +315,8 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 | `/tmp/cloud_client.pid` | `flock` 单实例锁，进程存活期间未主动关闭文件描述符。 | `main.c:26-41` |
 | `/tmp/cloud_status` | 启动写 `0`、断开或清理写 `1`、远端连接成功写 `2`；不保证其他进程如何解释。 | `main.c:60,137`、`client_mosquitto.c:529-577` |
 | `/tmp/system_is_rebooting`、`/tmp/ql_time_set_pipe` | 分别由重启命令写标志、非 IMX6 对时分支写模组时间。 | `common.c:550-559`、`json_parse.c:69-80` |
+
+<a id="analysis-9"></a>
 
 ## 9. 可由源码确认的风险与未证实事项
 
@@ -226,12 +334,16 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 | 数据库顺序与失败处理 | 查询/删除没有显式排序；批量插入在事务提交前已释放弹出的内存消息。 | 校验补传顺序和写库失败的真实数据损失范围。 |
 | 外部系统 | 本目录没有云协议完整定义、现场 INI/证书、Broker 服务端、CAN/MCU/网络服务端实现或目标机日志。 | 端到端兼容性、时延和可用性需要结合设备及服务端验证，不能从本源码单独下结论。 |
 
+<a id="analysis-10"></a>
+
 ## 10. 复核顺序
 
 1. 用 `git branch --show-current`、`git rev-parse --short HEAD` 确认分析版本；切分支后先复核 `CMakeLists.txt`、`main.c` 和 `client_mosquitto.c`。
 2. 设备侧核对上述 INI/JSON 文件、SD 卡真实挂载和证书，避免把代码默认值误认为部署值；核对本地 Broker、nanomsg 服务与工况/schema 生产者。
 3. 分别验证首次启动、已有认证、连接被拒后候选切换/注册、国内/海外自动选择、对时前后本地消息、云端命令与回复、断线缓存和恢复补传；对每条结果保留实际日志或消息记录。
 4. 本目录未定义专用测试目标；本文是静态源码分析，没有宣称已在目标设备或云平台上跑通上述路径。
+
+<a id="analysis-11"></a>
 
 ## 11. 设备故障排查：从症状定位到代码路径
 

@@ -4,11 +4,102 @@
 
 阅读顺序：先看[主流程图](#3-实际逻辑流程图)和[站端流程图](#61-连接重连发送)，再按[现场故障排查](#11-现场故障排查手册)定位问题。两处流程都提供纯文本版，可在普通 Markdown 阅读器中直接看到。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/bs_client_port_crane/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 范围与核心结论](#analysis-1)
+- [2. 源码组成与实际调用](#analysis-2)
+- [3. 实际逻辑流程图](#analysis-3)
+- [4. 配置、Wi-Fi 与外部依赖](#analysis-4)
+- [5. CAN 接收、字段与 VIN](#analysis-5)
+- [6. 换电站 TCP 与协议](#analysis-6)
+- [7. 本机命令、周期任务与超时](#analysis-7)
+- [8. 已编译但未进入当前执行链的代码](#analysis-8)
+- [9. 风险和证据边界](#analysis-9)
+- [10. 构建、部署与复核顺序](#analysis-10)
+- [11. 现场故障排查手册](#analysis-11)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+港机集卡 `bs_client` 从本机 CAN 获取车辆与电池状态，经 TCP 与换电站通信，并通过本机命令服务发布换电状态；GPS/MCU 线程在当前入口未启动。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/bs_client_port_crane/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 启动、线程和独立目标 |
+| `src/app_mng/` | 配置、Wi-Fi 与共享状态 |
+| `src/can_server/` | 三路 CAN 接收和字段更新 |
+| `src/batt_stand_client/` | 站端 TCP 与报文处理 |
+| `src/cmd/` | 本机命令发布 |
+| `src/app_server/` | GPS/MCU 代码已编入，当前入口未启动 |
+| `scripts/` | 设备侧辅助脚本 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+本机 CAN → can_server → app_mng 共享状态 ↔ batt_stand_client ↔ 换电站
+                                         ↓
+                                  cmd → 本机控制服务
+app_server 的 GPS / MCU 线程在当前 main 路径未启动
+```
+
+顶层 add_subdirectory 被注释；源码存在的 CAN 发帧和 GPS/MCU 处理并不都在当前入口执行。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 入口与共享状态 | `main.c`、`src/app_mng/` | 配置、Wi-Fi 与线程启动决定后续链路 | [进入章节](#analysis-2) |
+| CAN 输入 | `src/can_server/` | 按车型字段与 VIN 更新共享状态 | [进入章节](#analysis-5) |
+| 站端协议 | `src/batt_stand_client/` | TCP 重连、收发和换电握手为不同阶段 | [进入章节](#analysis-6) |
+| 本机命令与未启动模块 | `src/cmd/`、`src/app_server/` | 当前发布链和编译但不可达代码须分开 | [进入章节](#analysis-8) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+本机 CAN → 共享车辆 / 电池状态
+Wi-Fi / 站端 TCP ↔ 心跳、车辆信息与换电状态
+站端换电状态 → 本机命令发布 → 下游控制服务
+~~~
+
+从[实际逻辑图](#analysis-3)进入，再查[CAN 与 VIN](#analysis-5)、[站端协议](#analysis-6)和[本机命令](#analysis-7)。当前入口未启动已编入的 GPS/MCU 线程；顶层构建也未纳入该目录。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 范围与核心结论
 
 本项目定义港机集卡换电场景下的设备进程 `bs_client`。实际启动路径从本机 nanomsg 服务订阅 CAN0/1/2，将车辆、电池及 VIN 信息保存在共享状态；经 `wlan0` 连接换电站 TCP 端口，发送心跳和按需发送车辆信息，接收站端换电状态；再通过本机 nanomsg PUB 发布唤醒请求、换电状态和 `PORT_CRANE=2`。站端 TCP、CAN 订阅和命令发布是三条不同链路。依据：`main.c:123-163`、`src/can_server/can_server.c:236-315`、`src/batt_stand_client/batt_stand_client.c:215-315`、`src/cmd/cmd.c:17-64`。
 
 有三项会改变对“功能已经实现”的判断：第一，顶层 `apps/CMakeLists.txt:105-107` 注释了本目录的 `add_subdirectory`，顶层常规构建不会自动编译它。第二，`main.c:160` 注释了 `app_msg_task` 的启动，GPS/MCU 代码虽被 CMake 收集，当前进程不会运行该线程。第三，CAN 指令打包函数虽存在，当前入口到 CAN 模块只有订阅、解析路径，不能把它写成已经向整车发送 CAN 指令。依据：`CMakeLists.txt:35-37`、`main.c:156-161`、`src/can_server/can_server.c:276-315`、`src/can_server/can_frame_pack.c:13-125`。
+
+<a id="analysis-2"></a>
 
 ## 2. 源码组成与实际调用
 
@@ -23,6 +114,8 @@
 | 未启用路径 | `src/app_server/{app_server,gps,mcu}.c`、`src/can_server/can_frame_pack.c` | GPS/MCU 线程未从入口启动；CAN 打包函数没有当前执行路径调用。 |
 | 基础组件 | `src/common/`、`src/iniparser/`、`src/list/`、`src/net_utils/`、`src/skt_res/` | INI、链表、时间、位操作、接口 IP 查询及 TCP socket 连接。`iniparser`、`dictionary` 和链表是通用辅助代码，不是额外业务流程。 |
 | 安装资源 | `scripts/electic_station.ini`、`scripts/station.script` | 站端配置样例及供 `udhcpc` 使用的 DHCP 事件脚本。脚本被安装不表示进程会主动调用它。 |
+
+<a id="analysis-3"></a>
 
 ## 3. 实际逻辑流程图
 
@@ -96,6 +189,8 @@ flowchart TD
 
 `app_mng_t` 为全局变量；`p_can_data` 保存 CAN 解析值，`p_batt_data` 保存站端命令和换电状态，发送链表保存待写 TCP 的完整帧。链表的压入、弹出有 `bs_data_tx_lst_mutex`；CAN 数据、站端状态、socket 文件描述符、`canState`/`bmsState`/`wifiState` 被多个线程直接读写，没有看到相应的统一互斥保护。这里能确认的是同步缺口，具体竞态表现要结合目标平台调度验证。依据：`main.c:25,63-119`、`src/app_mng/app_mng.h:34-145`、`src/batt_stand_client/batt_stand_client.c:47-68,267-315`。
 
+<a id="analysis-4"></a>
+
 ## 4. 配置、Wi-Fi 与外部依赖
 
 | 位置 | 源码读取或写入 | 实际含义 |
@@ -107,6 +202,8 @@ flowchart TD
 | `scripts/station.script` | `bound/renew` 用 `ip addr add`，`deconfig` 清空 IPv4；写网关 IP 文件 | 供设备上的 `udhcpc` 调用，当前进程没有调用脚本的路径。 |
 
 外部依赖包括本机 CAN 消息发布服务、命令接收服务、换电站 TCP 服务、设备 Wi-Fi 配置文件及 `appmng`/日志库。当前目录只对本机 nanomsg 地址调用 `nn_connect`，没有这些服务的绑定和部署定义。依据：`src/app_mng/app_mng.h:10-19`、`src/app_mng/app_mng.c:145-187`、`src/net_utils/net_utils.c:21-49`、`scripts/*`、`src/can_server/can_server.c:276-315`、`src/cmd/cmd.c:40-58`。
+
+<a id="analysis-5"></a>
 
 ## 5. CAN 接收、字段与 VIN
 
@@ -125,6 +222,8 @@ CAN 线程创建三个 `NN_SUB` socket 并订阅全部消息，分别连接 `tcp
 `enable_vin_request=true` 只令 `vin_req.done=0`，允许上述 VIN 分段被处理。虽然头文件有 VIN 握手/请求阶段枚举，`can_server.c` 有请求间隔常量，但当前执行路径没有发 VIN 请求帧的调用；最终是否收到 VIN 取决于外部 CAN 发布方。VIN 校验是 ASCII 字母数字检查，源码未实现标准 VIN 校验位或车型规则。依据：`src/app_mng/app_mng.c:148-165`、`src/app_mng/app_mng.h:95-114`、`src/can_server/can_server.c:19-23,187-229`。
 
 周期线程每约 100 毫秒递增 CAN/BMS 空闲计数，达到条件 `>=50` 时把对应状态清零；BMS 超时会清 SOC、容量和电池编码，CAN 超时只改 `canState`，没有清除手刹、里程等旧值。故车辆信息允许发送的条件只是 `canState=1`，不要求 `bmsState=1`；电池字段可能是旧值或被清零。超时约为 5 秒是由当前循环间隔推算，若线程被阻塞，实际墙钟时间会变化。依据：`main.c:63-85,118-120`、`src/can_server/can_server.c:25-37,114-185`、`src/batt_stand_client/batt_stand_client.c:291-298`。
+
+<a id="analysis-6"></a>
 
 ## 6. 换电站 TCP 与协议
 
@@ -224,17 +323,23 @@ flowchart LR
 
 握手比较还有明确边界：`app_mng.vin` 初始为空时 `strlen(vin)=0`，`strncasecmp(..., 0)` 返回相等，故只要远端 ID 首字节非零，空 VIN 分支即可令握手通过；`BCC1_RemoteTboxID` 恰为 17 字节且没有追加 NUL，代码又用 `%s` 打印它。这里是按 C 语言语义从源码直接推出的行为，不是站端身份校验已经可靠的证据。依据：`src/app_mng/app_mng.h:90-92,127-130`、`src/app_mng/app_mng.c:148-156`、`src/batt_stand_client/batt_message_parse.c:39-45`、`src/batt_stand_client/batt_stand_client.c:192-206`。
 
+<a id="analysis-7"></a>
+
 ## 7. 本机命令、周期任务与超时
 
 `send_cmd_ctrl_period()` 构造带 PID、`CMD_TAG=221`、单字节命令序号、内容长度的 `cmd_item_t`；内容只包含唤醒请求、换电状态、`PORT_CRANE=2`。代码在首次调用、当前秒数 `> last_time+5` 或状态变化时发送到 `tcp://127.0.0.1:26008`。不过用于比较的两个静态缓存变量 `g_BCC1_ExchangePowerBatWakeUpVCUReq`、`g_BCC1_ExchangeState` 只初始化为 0，从未在发送后更新；因此只要任一共享状态非零，周期线程就会在每次调用时尝试发布，约每 100 毫秒一次，不能按“每五秒一次”理解。`last_time` 即使发送失败也会更新。依据：`src/cmd/cmd.c:14-64`、`src/cmd/cmd.h:6-31`、`main.c:70-85,118-120`。
 
 周期线程还维护唤醒请求超时：若请求活跃而 `wifiState=0`，或 `wifiState=1` 但 `CarInfo_Req=0`，当当前秒数 `> last_time+120` 时清除唤醒请求；`last_time` 在请求不活跃，或 Wi-Fi 与 `CarInfo_Req` 都满足时刷新。`wifiState` 每约 10 秒才在 `show_can_data()` 根据 `wlan0/operstate` 更新；`CarInfo_Req` 由站端请求置 1、成功/失败指令或断连清 0。这些是软件超时条件，不能直接解释为 Wi-Fi 或整车物理状态。依据：`main.c:63-120`、`src/can_server/can_server.c:39-95`、`src/batt_stand_client/batt_message_parse.c:48-101`。
 
+<a id="analysis-8"></a>
+
 ## 8. 已编译但未进入当前执行链的代码
 
 - `app_msg_task()` 定义了 `GPS SUB 127.0.0.1:16005` 和 `MCU REQ 127.0.0.1:38000`，并设计每 5 秒请求 MCU JSON、解析 GPS 定位和 MCU 电压/点火信息；`main.c:160` 注释了线程创建，所以当前进程不调用它。即使日后启用，也应检查定时器在 nanomsg socket 初始化之前启动、初始化失败值进入 `nn_poll` 等边界。依据：`src/app_server/app_server.c:24-120`、`gps.c:8-99`、`mcu.c:8-125`。
 - `can_frame_pack.c` 有锁止、换电提示、同意换电、状态帧等打包函数，但在当前目录没有被工作线程调用，也没有 CAN PUB 连接。`can_frame_pack.h` 在未定义 `ENABLE_HEAVY_TRUCK` 时声明 `can_cmd_18FFA0D8_pack()`，对应实现未见；因此不能凭这些函数推断设备实际发送了该 CAN 帧。依据：`src/can_server/can_frame_pack.c:13-151`、`can_frame_pack.h:33-38`、`can_server.c:276-315`。
 - `batt_message_pack_motor_status()` 仅有头文件声明；`VIN_REQ_INTERVAL`、`VIN_REQ_TIMEOUT` 和 VIN 请求阶段定义未形成当前发送流程。依据：`src/batt_stand_client/batt_message_pack.h:76-79`、`src/can_server/can_server.c:19-23,187-229`、`src/app_mng/app_mng.h:95-114`。
+
+<a id="analysis-9"></a>
 
 ## 9. 风险和证据边界
 
@@ -249,11 +354,15 @@ flowchart LR
 
 以上是“源码可确认的行为/风险”，不是已做过真机复现的故障清单。若要判断站端接受、换电机构动作、网络切换和设备重启效果，还需设备配置、外部进程实现、协议文档及联调记录。
 
+<a id="analysis-10"></a>
+
 ## 10. 构建、部署与复核顺序
 
 本目录独立 CMake 要求 3.11、C99，查找 nanomsg 1.2、OpenSSL 1.1.1、cJSON 1.7.15、appmng 1.0，链接 cn-cbor、tbox-common、pthread 等；交叉编译支持 `QL_MODULE_PLATFORM=EC200A`、`EG25G`、`MCIMX6Y2CVM08AB`，其余平台值走配置错误。安装目标放 `opt/bs_client`，配置样例放 `opt/`，DHCP 脚本放 `etc/`。这些是 CMake 规则，未在本次分析中执行实际交叉编译。依据：`CMakeLists.txt:1-64`。
 
 建议复核时依次确认：实际构建是否包含该目录和目标平台宏；目标设备 INI、Wi-Fi JSON、`wlan0` IPv4；本机 CAN 16002–16004 和命令 26008 的服务端；站端 TCP 的完整帧、长度、BCC 与握手标识；`canState`/`bmsState`、`CarInfo_Req` 与命令发布频率；最后在隔离设备上核对换电状态和物理反馈。源码中没有本项目专用自动化测试目标；仅靠主机侧静态阅读无法证明端到端功能。依据：`apps/CMakeLists.txt:105-107`、`CMakeLists.txt:1-64`、上述各模块。
+
+<a id="analysis-11"></a>
 
 ## 11. 现场故障排查手册
 

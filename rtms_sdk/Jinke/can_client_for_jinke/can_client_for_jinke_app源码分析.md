@@ -1,5 +1,94 @@
 # can_client_for_jinke 全链路源码分析与流程图
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/can_client_for_jinke/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [0. 分析依据与范围](#analysis-1)
+- [1. 项目定位、产物与外部边界](#analysis-2)
+- [2. 编译条件：代码意图与当前实际约束](#analysis-3)
+- [3. 启动逻辑流程图](#analysis-4)
+- [4. 启动资源与运行目录](#analysis-5)
+- [5. 配置解析：从 JSON 到内存规则](#analysis-6)
+- [6. CAN 接收与字段转换流程图](#analysis-7)
+- [7. 上报选择、编码与 MQTT 流程图](#analysis-8)
+- [8. 旧路径：GPS/MCU、工作状态、金科事件与 FEI4 统计](#analysis-9)
+- [9. 数据与控制路径的失败模式](#analysis-10)
+- [10. 设备故障排查手册](#analysis-11)
+- [11. 验证状态与尚需外部资料](#analysis-12)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`can_client_for_jinke` 从本机 CAN 消息提取点表字段，经场景与间隔筛选后发布到配置的 MQTT Broker；构建宏组合和现场点表决定可达功能。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/can_client_for_jinke/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 启动、目标与条件编译 |
+| `src/can_mng/`、`src/can_server/` | 共享状态、场景库和 CAN 接收 |
+| `src/data_process/` | Schema/点表解析及字段编码 |
+| `src/scene/`、`src/scene_lib/` | 场景装载与判断 |
+| `src/mosquitto/` | MQTT 连接和筛选发布 |
+| `src/app_server/`、`src/event/`、`src/fei4/` | 受宏与入口条件约束的旧路径 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+本机 CAN → can_server → data_process / scene → MQTT 主题
+配置 / Schema / 点表 ────────┘
+NOT_USED_SCHEMA + USE_JINKE 控制旧 GPS / MCU / 事件路径
+构建宏组合本身还需先满足类型可见性约束
+```
+
+顶层 WITH_CAN_CLIENT_FOR_JINKE 默认关闭；部分宏组合在当前源码中存在类型可见性问题，不能把默认选项写成已验证可运行配置。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 构建与入口 | `CMakeLists.txt`、`main.c` | 三组开关共同决定目标纳入和可达路径 | [进入章节](#analysis-3) |
+| CAN 与点表 | `src/can_server/`、`src/data_process/` | 按槽位、CAN ID、字段规则更新数据项 | [进入章节](#analysis-7) |
+| 场景和上报 | `src/scene_lib/`、`src/mosquitto/` | 场景、间隔、变化阈值及编码分支控制发布 | [进入章节](#analysis-8) |
+| 旧路径 | `src/app_server/`、`src/event/`、`src/fei4/` | 只有满足宏与入口条件才考虑 GPS/MCU、事件和统计 | [进入章节](#analysis-9) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+配置 / 点表 → CAN 接收 → 字段换算与场景更新
+字段 + 场景 → 间隔 / 接收时间 / 变化阈值筛选
+合格字段 → 按 mtyp 编码 → 对应 MQTT 主题
+~~~
+
+这是构建宏使主链路可达时的顺序。先核对[构建条件](#analysis-3)，再顺读[启动图](#analysis-4)、[CAN 图](#analysis-7)、[上报图](#analysis-8)；Schema 和旧事件路径受条件编译限制。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 0. 分析依据与范围
 
 - 源码仓库：`/home/tronlong/lyp/code/rtms_sdk`；项目：`apps/can_client_for_jinke/`。分析时本地分支为 `develop/rtms_sdk_v1.3_20240408`，提交短哈希 `bc60961e`。本目录是 SDK 的子项目，不是独立 Git 仓库。
@@ -8,6 +97,8 @@
 - 本文分析的是 `can_client_for_jinke` 这份源码。SDK 其他应用的同名 `can_client` 或其他设备型号的 JSON 配置不能直接代入本项目。
 
 **阅读顺序：**想了解整体流程，先看第 3、6、7、8 节的文本流程图；设备现场排查直接看第 10 节；编译或配置疑问看第 2、4、5 节。所有流程图均使用普通文本代码块，无需 Mermaid 支持。
+
+<a id="analysis-2"></a>
 
 ## 1. 项目定位、产物与外部边界
 
@@ -25,6 +116,8 @@
 | 场景判断 | `src/scene/scene.c:7-41`、`src/scene_lib/scene_judge.c:76-97` | 动态加载 `judge_scene`，基于指定 CAN ID 返回场景名。 |
 | MQTT 客户端 | `src/mosquitto/client_mosquitto.c:46-247` | 连接配置的 Broker，处理 Schema 请求/发布、工作数据与可选事件发布。 |
 | 旧路径扩展 | `src/app_server/`、`src/event/`、`src/fei4/`、`src/queue/` | 受编译宏控制的 GPS/MCU、金科钻孔事件和统计。 |
+
+<a id="analysis-3"></a>
 
 ## 2. 编译条件：代码意图与当前实际约束
 
@@ -44,6 +137,8 @@
 | ON | ON | GPS/MCU、金科事件与统计 | 相关类型可见；后续编译、链接和设备运行仍需验证。 |
 
 交叉编译分支只处理 `QL_MODULE_PLATFORM=EC200A` 与 `EG25G`，其他值使 CMake 报错。CMake 查找 nanomsg、OpenSSL、cJSON、appmng、Mosquitto，并链接 cn-cbor、tbox-common、pthread、dl 等。依赖查找通过和目标程序真正可链接是两层检查。依据：`CMakeLists.txt:4-8,25-42,66-79`。
+
+<a id="analysis-4"></a>
 
 ## 3. 启动逻辑流程图
 
@@ -72,6 +167,8 @@ main
 
 `main()` 对 `can_mng_init()`、INI、两份 JSON、`cpactive_add_pinfo()` 有显式失败检查；对 `create_cpactive()` 返回指针、`load_libscene()` 返回值和每次 `pthread_create()` 的返回值没有完整检查。同一个 `pthread_t tid` 反复作为输出参数，最终只等待最后一次赋值的线程 ID。`cpactive_task()` 每 5 秒更新一次访问时间，登记超时为 10 秒；它是进程管理心跳，不是 CAN/MQTT 的数据健康证明。依据：`main.c:24-37,57-112`、`src/can_mng/can_mng.c:98-114`。
 
+<a id="analysis-5"></a>
+
 ## 4. 启动资源与运行目录
 
 | 资源 | 读取方式 | 必要性与准确边界 |
@@ -85,6 +182,8 @@ main
 | `/media/sdcard/jk_evt_no` | 读写 `日号:工单号` | 仅金科事件分支使用，不是 MQTT 离线消息队列。`src/event/jk_event.h:7`、`.c:8-34`。 |
 
 源码目录本身没有金科专用的两份 JSON，CMake 安装语句也不安装它们。仓库其他设备目录存在同名文件，不足以确定本项目使用哪一份；因此本文不列出“金科实际点位清单”。
+
+<a id="analysis-6"></a>
 
 ## 5. 配置解析：从 JSON 到内存规则
 
@@ -105,6 +204,8 @@ main
 **子规则边界：**`get_common_data_rule()` 解析并存储每层 `typ/ofs/len/val`；接收帧时 `parse_common_msg()` 只用最外层 CAN ID 查哈希。`set_common_data_item()` 对子规则逐个递归，没有再次比较子规则 `val` 或其 `typ/ofs/len`。因此不能把点表的 `rls` 理解成已经按子条件筛选的分支；若目标配置依赖这种条件，需要针对真实点表检查输出。依据：`data_process.c:260-309,445-568,676-685`。
 
 `get_file_data()` 负责读文件，但没有检查 `fread()` 的实际读取字节数；JSON 解析依赖缓冲区内容。场景和间隔数组写入时没有系统性的 `SCENE_MAX=10` 上限检查；`dev[].slot` 也直接用于三个元素的 `data_rule[]`。这些是输入有效性约束，不是已经发生的现场故障。依据：`data_process.c:103-133,180-219,390-429,807-827`、`data_process.h:9,67-69,104`。
+
+<a id="analysis-7"></a>
 
 ## 6. CAN 接收与字段转换流程图
 
@@ -128,6 +229,8 @@ CAN 线程
 普通规则先用通道与 CAN ID 查找，找到后依 `ofs/len/bo` 提取原始整数。数值类型 1/2/3 用 `sign` 做补码符号处理，再按 `raw × sc + pofs` 换算并限幅；类型 7 把原始值按 `int16_t` 转换后同样缩放；类型 4/5 按字节读字符串。处理成功会更新 `time_rcv`，代表本进程收到并解析值的单调时钟时间。依据：`data_process.c:445-568,676-685`。代码未依据 `can_dlc` 限制字段读取长度，点表位宽超出帧结构时存在越界风险。
 
 动态场景库的 `param_cfg` 固定使用 CAN ID `0x171` 与 `0x172`，分别缓存发动机转速和速度；即使当前帧是其他 CAN ID，也会用此前缓存的两个值计算场景。速度 >0 返回 `drive`；否则转速 0 返回 `power_on`，1～800 返回 `idle`，>800 返回 `work`。初始两个缓存值为 0，初始场景为 `power_on`。这与旧路径的 `device_standard_work_state` 数字状态是不同变量与判定逻辑。依据：`scene_judge.c:35-97`、`data_process.c:1374-1392`。
+
+<a id="analysis-8"></a>
 
 ## 7. 上报选择、编码与 MQTT 流程图
 
@@ -169,9 +272,11 @@ MQTT 线程 → 连接 INI 指定的 Broker
 
 默认路径先从 `GeneralParam.json` 取部分 Schema 项，点表读入时按字段名查找；新名字以从 50 起递增的 `global_cbor_index` 分配索引。旧路径跳过通用配置，应用字段要求显式 `cbidx`。`cbor_model_schema_generate()` 输出的 Schema 条目代码只附加“名称、值类型”，没有显式把 `cbor_index` 作为每项第三个值写入。因此不能仅根据“Schema 带有索引”的口头描述推断接收方解析方式；需按生成函数和对应下游协议核对。依据：`data_process.c:15-19,223-250,364-383,1280-1371`。
 
+<a id="analysis-9"></a>
+
 ## 8. 旧路径：GPS/MCU、工作状态、金科事件与 FEI4 统计
 
-`NOT_USED_SCHEMA=ON` 时 `main()` 启动 `app_msg_task()`。GPS 通道是 `tcp://127.0.0.1:16005` 的 nanomsg SUB；MCU 通道是 `tcp://127.0.0.1:38000` 的 nanomsg REQ。应用线程创建 5 秒周期的定时器发 MCU 请求，接收后分别解析 GPS `location_info` 与 MCU `status.io` 的 JSON，把值更新到点表的 `app` 字段。依据：`src/app_server/app_server.c:154-217`、`gps.c:10-104`、`mcu.c:10-126`。
+`NOT_USED_SCHEMA=ON` 时 `main()` 启动 `app_msg_task()`。GPS 通道是 `tcp://127.0.0.1:16005` 的 nanomsg SUB；MCU 通道是 `tcp://127.0.0.1:38000` 的 nanomsg REQ。应用线程创建 5 秒周期的定时器发 MCU 请求，接收后分别解析 GPS `location_info` 与 MCU `status.io` 的 JSON，把值更新到点表的 `app` 字段。依据：`src/app_server/app_server.c:154-217`、`gps.c:10-93`、`mcu.c:10-126`。
 
 `quick_check_working_state()` 由旧路径收到发动机 CAN ID `0xCF00400` 后调用，结合 MCU ACC 与发动机转速计算数字状态：ACC 关为 0，ACC 开且转速 0 为 1，转速 1～900 为 2，>900 为 3。MCU 更新时还检查发动机数据超过 60 秒未更新的情况。这个数字状态通过应用数据项发布；它与场景库的 `power_on/idle/work/drive` 不是一套逻辑。依据：`can_server.c:55-74`、`app_server.c:18-23,58-110`。
 
@@ -193,6 +298,8 @@ MQTT 线程 → 连接 INI 指定的 Broker
 
 同一双宏路径还启动 `fei4_statistics_handler()`。代码每约 300 秒依次执行 `statistical_data_setup()`、清零、`statistical_data_accumulate()`：它先用此前保存的样本计算参考扭矩、功率、SCR 上下游 NOx 浓度、进出口温度、燃料流量等应用字段，再在清零后采入当前样本。累加函数没有在 0.5 秒循环的每次迭代中调用，因此不能把这些值称为连续采集 300 秒所得的时间平均值；首次到达 300 秒时也尚无此前累加样本。未获得有效原始值的项目不一定写出，NOx 质量流量代码位于 `#if 0`。本目录没有单独的国四平台联网协议状态机；“计算并写应用字段”是源码可以确认的行为。依据：`src/fei4/fei4.c:7,25-136,139-227`。
 
+<a id="analysis-10"></a>
+
 ## 9. 数据与控制路径的失败模式
 
 | 位置 | 源码可确认的行为 | 运维/开发上的含义 |
@@ -210,6 +317,8 @@ MQTT 线程 → 连接 INI 指定的 Broker
 | 线程启动 | 未逐项检查 `pthread_create()`，复用同一个 `tid`。 | 进程存活不足以证明各工作线程均运行。 |
 
 表中“风险”由对应控制流推导，并非设备现场故障记录。依据集中在 `src/scene/scene.c:18-41`、`src/scene_lib/scene_judge.c:41-73`、`src/can_mng/can_mng.c:31-45,98-114`、`src/data_process/data_process.c:180-219,390-429,445-568,807-827,852-1074`、`src/can_server/can_server.c:144-187`、`main.c:100-111`、`src/event/jk_event.c:36-98`、`src/mosquitto/client_mosquitto.c:196-240`。
+
+<a id="analysis-11"></a>
 
 ## 10. 设备故障排查手册
 
@@ -342,6 +451,8 @@ FEI4 统计每约 300 秒才执行一次“输出上次样本 → 清零 → 采
 | 事件文件中工单号更新 | 代码至少执行过写文件路径。 | 事件 MQTT 发布成功。 |
 
 复现记录建议保留：设备/固件/分支与构建宏、正在运行的二进制路径及版本、三份配置文件的校验和、故障前后时间窗口的 CAN ID/原始帧、相关 Topic 及载荷、程序和下游日志、期望值与实际值。配置文件可能包含设备信息，导出前按现场要求处理；排查时优先保留原文件，以便复现具体点表规则。这样才能把“本程序无数据”“本机发布成功但下游异常”“字段被条件过滤”区分开。
+
+<a id="analysis-12"></a>
 
 ## 11. 验证状态与尚需外部资料
 

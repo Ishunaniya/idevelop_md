@@ -2,11 +2,102 @@
 
 > 依据 `rtms_sdk` 仓库 `develop/rtms_sdk_v1.3_20240408` 分支、提交 `bc60961e` 的当前源码整理。本文的“执行”指能从本目录 `main.c` 追到的调用链；“保留代码”指存在实现但当前主链路未调用；“风险”指由代码条件和数据操作推导出的可能后果，未声称已在设备上复现。运行所需点表、平台配置和设备服务不在本目录内，不能据本目录源码断言最终平台验收或标准符合性。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/gb32960_client_for_dima/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 项目边界和构建](#analysis-1)
+- [2. 总体流程图](#analysis-2)
+- [3. 数据采集与共享状态](#analysis-3)
+- [4. 平台 TCP 状态机](#analysis-4)
+- [5. 报文组织与分帧](#analysis-5)
+- [6. 离线保存与历史补传](#analysis-6)
+- [7. 配置与外部依赖清单](#analysis-7)
+- [8. 核查结论与验证点](#analysis-8)
+- [9. 设备故障时如何定位到本程序](#analysis-9)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`gb32960_client` 汇集本机 CAN、GPS 与 MCU 数据，组装 GB 32960 报文，经 TCP 上报，并在离线条件下使用历史文件；Dima 与远锦解析由构建选项区分。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/gb32960_client_for_dima/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 入口、线程和设备编译选项 |
+| `src/can_mng/`、`src/can_server/` | 共享状态、CAN 接收及活跃度 |
+| `src/data_process/` | 通用点表与 Dima/远锦专用解析 |
+| `src/app_server/` | GPS 订阅和 MCU 状态请求 |
+| `src/new_energy/` | GB 32960 组帧、TCP 状态机和历史补传 |
+| `src/common/`、`src/list/` | 配置、时间和容器辅助 |
+| `src/scene/`、`src/scene_lib/` | 构建场景库；当前主链路未加载 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+本机 CAN / GPS / MCU → 接收与点表解析 → 车辆共享状态
+                                        │
+                                        ↓
+              new_energy 组帧 / 登录状态机 → 平台 TCP
+                                        │ 离线时
+                                        └→ 历史文件 → 联网后补传
+```
+
+顶层开关和设备宏都影响构建；远锦专用解析仍有 TODO。历史文件删除与平台业务确认不是同一事件。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 设备数据入口 | `src/can_server/`、`src/app_server/` | 接收 CAN、GPS、MCU 数据；具体上游服务不在本目录 | [进入章节](#analysis-3) |
+| 设备专用解析 | `src/data_process/` | Dima 与远锦由编译宏选择，不能把目录名当运行配置 | [进入章节](#analysis-3) |
+| TCP 状态机 | `src/new_energy/gb32960.c` | 按 ACC/充电及连接状态推进登录和实时发送 | [进入章节](#analysis-4) |
+| 组帧与补传 | `src/new_energy/` | 分帧、离线保存、历史发送和删除时机分别核对 | [进入章节](#analysis-6) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+本机 CAN / GPS / MCU → 车辆共享状态
+共享状态 + ACC / 充电条件 → 平台 TCP 连接与登录 → 实时组帧发送
+符合缓存条件的报文 → 历史文件 → 满足补传条件后发送
+~~~
+
+先看[总体流程与启动](#analysis-2)，再看[设备解析](#analysis-3)、[TCP 状态机](#analysis-4)和[离线补传](#analysis-6)。设备宏选择解析分支；历史文件删除不等于平台业务确认。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 项目边界和构建
 
 - 源码位于 `apps/gb32960_client_for_dima/`，属于上级 `rtms_sdk` 仓库。顶层 `apps/CMakeLists.txt` 的 `WITH_GB32960_CLIENT_FOR_DIMA` 默认 OFF；打开后才纳入构建。目录 CMake 项目和可执行文件名均为 `gb32960_client`，版本 1.1；还生成并安装 `libscene.so`。
-- `GB32960_DEVICE_DIMA` 与 `GB32960_DEVICE_YUANJIN` 均默认 OFF；未选设备时 CMake 配置报错，同时选时先进入 Dima 分支。设备专用 `parse_special_msg()` 由宏选择。远锦文件中的 `parse_data_msg()` 仍为 TODO，故编译成功不代表远锦信号解析已完成。交叉编译分支支持 EC200A、EG25G、MCIMX6Y2CVM08AB，对应环境变量 `QL_MODULE_PLATFORM` 和 SDK 库路径；见本目录 `CMakeLists.txt:1-89`。
+- `GB32960_DEVICE_DIMA` 与 `GB32960_DEVICE_YUANJIN` 均默认 OFF；未选设备时 CMake 配置报错，同时选时先进入 Dima 分支。设备专用 `parse_special_msg()` 由宏选择。远锦文件中的 `parse_data_msg()` 仍为 TODO，故编译成功不代表远锦信号解析已完成。交叉编译分支支持 EC200A、EG25G、MCIMX6Y2CVM08AB，对应环境变量 `QL_MODULE_PLATFORM` 和 SDK 库路径；见本目录 `CMakeLists.txt:1-83`。
 - 直接链接 nanomsg、Mosquitto、OpenSSL、cJSON、cn-cbor、tbox-common、appmng、pthread 等，不表示所有库都参与主报文路径。当前远端主链路由 `gb32960.c` 中 TCP socket 完成；内部 CAN/GPS/MCU 消息由 nanomsg 完成。
+
+<a id="analysis-2"></a>
 
 ## 2. 总体流程图
 
@@ -39,6 +130,8 @@
 之后读取 `/opt/parameter_conf.ini` 中 `server:domain`、`server:port`，但 `main()` 未检查返回值；再读取 `/opt/machine_vin`，有内容即复制 17 字节到共享 VIN。ICCID 先读 `/opt/sim_info` 的 `dev:ICCID`，再尝试模组接口，最后回退到字面值 `123456789`。加载固定路径 `/opt/Pointsheet_info1_gb32960.json` 后，`main()` 也未检查 `rc`。点表文件在本仓库未找到，所以字段映射只能分析解析算法与硬编码信号，不能列出部署点表的完整信号清单。`snprintf()` 为固定路径传了一个额外参数，格式串不使用该参数（`main.c:69-72`）。
 
 CPActive 注册失败会使主线程返回错误；成功后依次创建保活、CAN、本机消息线程，等待 10 秒，再创建实时上报、历史补传、离线保存线程。`pthread_create()` 的返回值均未检查；最后只对最后一次写入的 `tid` 执行 `pthread_join()`，并非逐个线程管理。保活间隔 10 秒、登记超时 20 秒（`main.c:12-28,74-90`）。
+
+<a id="analysis-3"></a>
 
 ## 3. 数据采集与共享状态
 
@@ -88,6 +181,8 @@ CPActive 注册失败会使主线程返回错误；成功后依次创建保活�
 
 远锦 `parse_data_msg()` 只有 TODO，`parse_special_msg()` 调它后没有完成车辆字段解析（`yuanjin_data_process.c:1-41`）。
 
+<a id="analysis-4"></a>
+
 ## 4. 平台 TCP 状态机
 
 源码状态枚举还有 HEARTBEAT、GPS、HISTORY，但 `gb32960_data_report()` 的 `switch` 只执行 UNKNOWN、LOGIN、REPORT、LOGOUT 四类分支；图中仅画可达状态（`src/new_energy/gb32960.c:22-35,1321-1498`）。
@@ -118,6 +213,8 @@ CPActive 注册失败会使主线程返回错误；成功后依次创建保活�
 
 REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 时 1000 ms；按 `_splitFrameNum` 调组包并逐帧 `send()`。`data_send_out()` 要求单次 `send()` 返回完整长度；失败则置 `network_offline=1` 并返回 UNKNOWN。普通实时帧没有在此处等待逐帧平台 ACK。`pre_timer` 在进入循环前声明但未初始化，首次 `diff_ms(pre_timer,cur_timer)` 使用未初始化值；首帧何时触发不能仅由“10 秒周期”确定（`gb32960.c:1340-1344,1450-1482`）。
 
+<a id="analysis-5"></a>
+
 ## 5. 报文组织与分帧
 
 `new_energy_frame_pack.h:142-167` 定义固定帧头：`##` 两字节、命令字、应答标志、17 字节 VIN、加密方式、两字节数据单元长度、数据体和 BCC。普通组帧函数将加密方式写为 `0x01`（不加密），长度使用大端转换，BCC 对起始符之后至 BCC 之前的字节计算；登录 `0x01`、实时 `0x02`、历史补发 `0x03`、登出 `0x04` 的命令值见 `new_energy_frame_pack.h:9-22`。源码有 AES128 密钥常量与函数，但当前登录、登出和实时组包均调用普通 `gb4_frame_pack_full()`；不能据保留函数推断线上启用了 AES（`new_energy_frame_pack.c:14-100,113-207,1972-1975`）。
@@ -135,6 +232,8 @@ REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 
 实时组包函数按 `_splitFrameNum` 分 1～4 帧。单帧把整车、电机、位置、极值、告警、电压、温度、设备 ID 组合；多帧时首帧带主要状态和第一段电压，其余帧主要是剩余电压及极值。氢燃料数据组装调用位于 `#if 0`，不能算进当前帧。组包使用设备本地时间；函数签名中的 `timespec` 参数当前未用于帧时间。`cur_battlist` 在发送前从共享列表复制，温度虽也复制到 `cur_templist`，温度组包函数却读取 `_templist`，因此复制操作并不能保证整帧温度与电压来自同一快照（`gb32960.c:1458-1467`，`new_energy_frame_pack.c:1332-1369`）。
 
 **双分帧首帧的确定性长度问题：**`splitTotal==2` 时计算长度已计入告警段与一次电压段（`new_energy_frame_pack.c:1606-1627`），但复制时没有复制告警段，却复制了两次电压段（同文件 `1633-1645`）。该分支的电压段包含 200 个电芯的电压，明显长于固定长度告警段，因此成功进入该分支并完成分配后，复制总长度会超过 `malloc(reldataLen)` 的容量。这里仅依据代码的长度与复制语句判断，未在设备上复现内存损坏。三、四分帧路径另有不同字段排列，应以源码逐分支检查，不能假设所有分帧的内容与单帧一致。
+
+<a id="analysis-6"></a>
 
 ## 6. 离线保存与历史补传
 
@@ -168,6 +267,8 @@ REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 
 
 还有两条行为边界：主线程在首次成功登录前 `network_offline` 由 `calloc` 为 0；若登录发出但未收到正字节，代码保持 LOGIN 重试，却没有在该分支置离线标志，保存线程可能尚未启动有效缓存。补传与实时上报共用 `iClient`，分别在不同线程调用 `send()`，没有针对该 socket 的统一发送锁；`io_mutex` 只覆盖历史文件读写片段，不能证明网络字节流的帧顺序完全按业务意图排列。这些是静态代码推导的并发边界，需在目标机做断网和高负载验证。
 
+<a id="analysis-7"></a>
+
 ## 7. 配置与外部依赖清单
 
 | 路径/接口 | 代码中的用途与前提 |
@@ -186,6 +287,8 @@ REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 
 
 `/opt/conf_ext2.ini`、`/tmp/offline.flag`、`/media/sdcard/gb32960.log`、`/media/sdcard/gb32960_recorder` 在本目录有读取辅助函数、函数定义或常量，但没有证据表明它们都由当前 `main()` 的主上报链路持续使用。`NEW_ENERGY_IP/PORT` 也是保留的测试地址常量，实际 TCP 地址来自平台 INI。上述路径不应与主链路配置混为一谈。
 
+<a id="analysis-8"></a>
+
 ## 8. 核查结论与验证点
 
 | 结论 | 静态证据 | 需要实机确认的部分 |
@@ -197,6 +300,8 @@ REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 
 | 当前无法证明完整标准符合性或线上长期稳定性。 | 部署点表和平台配置未在仓库中；代码未做完整 ACK 校验。 | 按目标标准版本、设备服务和平台协议做互通、断网及压力验证。 |
 
 本文只记录当前提交的可见行为及明确的静态边界。若切换 Git 分支、替换部署点表或修复上述代码，流程图和结论应同步更新。
+
+<a id="analysis-9"></a>
 
 ## 9. 设备故障时如何定位到本程序
 

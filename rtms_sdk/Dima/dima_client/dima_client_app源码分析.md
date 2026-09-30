@@ -4,6 +4,96 @@
 
 阅读顺序：第 1～3 节了解程序和依赖，第 4～7 节追踪 CAN 到 MQTT 的数据流，第 8～9 节查看构建与已确认的实现边界；设备故障可直接从第 10 节的定位流程图开始。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/dima_client/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 程序边界和组成](#analysis-1)
+- [2. 启动和进程生命周期](#analysis-2)
+- [3. 外部文件和接口](#analysis-3)
+- [4. 点表加载与内部数据结构](#analysis-4)
+- [5. CAN 接收、特殊报文与场景](#analysis-5)
+- [6. 复用数据项](#analysis-6)
+- [7. MQTT 发布条件与消息格式](#analysis-7)
+- [8. 构建和部署事实](#analysis-8)
+- [9. 已确认的实现边界与验证清单](#analysis-9)
+- [10. 设备故障排查手册](#analysis-10)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`dima_client` 从本机接收 CAN 帧，按点表提取字段、调用场景库判断状态，再把符合场景与间隔条件的数据作为 JSON 发布到 MQTT；设备点表和服务端接收结果需要另核。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/dima_client/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 启动、线程、保活及两个构建目标 |
+| `src/can_mng/` | 读取配置并装载场景库 |
+| `src/can_server/` | 订阅三路本机 CAN 消息 |
+| `src/data_process/` | 点表解析、字段换算与 JSON 生成 |
+| `src/scene/`、`src/scene_lib/` | 场景库加载与场景判定 |
+| `src/mosquitto/` | MQTT 连接、定时筛选与发布 |
+| `src/list/` | 点表规则使用的链表 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+/opt/配置与点表 ───────→ main / can_mng → data_process 规则
+                                  └→ 加载 libscene 的 judge_scene
+本机 CAN 发布端 ──────→ can_server ─┬→ data_process 更新数据项
+                                    └→ judge_scene 更新当前场景
+数据项 + 当前场景 ───────────────→ mosquitto 筛选 / 组 JSON
+                                    └→ TBOX/REPORT → MQTT 服务端
+```
+
+顶层 WITH_DIMA_CLIENT 默认关闭；当前有效发布路径为 JSON。场景库加载失败、点表异常和服务端接收结果分别按正文核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 启动与配置 | `main.c`、`src/can_mng/` | 配置和点表加载失败会影响启动；场景库加载结果未完整向上处理 | [进入章节](#analysis-2) |
+| CAN 与点表 | `src/can_server/`、`src/data_process/` | 按通道和 CAN ID 匹配规则，处理特殊报文及位提取 | [进入章节](#analysis-5) |
+| 场景与复用项 | `src/scene_lib/`、`src/data_process/` | 场景决定可上报项；复用项仍受点表完整性约束 | [进入章节](#analysis-6) |
+| MQTT 发布 | `src/mosquitto/` | 场景、间隔、变化阈值和 mtyp 共同决定是否生成并发布 JSON | [进入章节](#analysis-7) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+配置和点表加载 → 三路 CAN 订阅
+每帧 → 特殊帧处理 → 普通点表解析 → 场景判定
+数据项 + 场景 → 间隔/变化阈值筛选 → JSON 组帧 → MQTT 发布
+~~~
+
+具体分支依次见[启动与线程](#analysis-2)、[CAN 与场景图](#analysis-5)、[MQTT 条件](#analysis-7)。这里的“发布”指本地 MQTT 调用，平台接收仍需外部证据。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 程序边界和组成
 
 `dima_client` 是设备侧可执行程序。它订阅本机 CAN 数据，按 JSON 点表提取数据项，调用场景库判断当前状态，然后在满足场景、间隔与变化条件时向 MQTT 发布 JSON。`scene` 是单独构建的共享库，程序运行时从 `/usr/lib/libscene.so` 查找 `judge_scene`。代码还含 CAN 请求发送、CBOR、schema 和另一种 JSON 生成函数，但默认运行路径没有启动或调用这些功能。
@@ -26,6 +116,8 @@
 
 图中的场景库加载失败不会让 `can_mng_init()` 返回失败：它忽略了 `load_libscene()` 的返回值。若后续收到 CAN 帧，代码仍会直接调用函数指针。图中的线程创建调用也未检查返回码；主线程只对最后一次赋值的 `pthread_t tid` 调用 `pthread_join()`。（`main.c:91-127`、`src/can_mng/can_mng.c:83-98`、`src/can_server/can_server.c:37-40`）
 
+<a id="analysis-2"></a>
+
 ## 2. 启动和进程生命周期
 
 1. `is_instance_existing()` 对 `/tmp/dima_client.pid` 执行 `open(O_CREAT|O_RDWR)` 和非阻塞 `flock`；只在 `EWOULDBLOCK` 时判为已有实例。代码没有检查 `open()` 失败，也没有把文件描述符显式关闭；锁随进程结束释放。（`main.c:53-68`）
@@ -33,6 +125,8 @@
 3. 先读 `/opt/conf.ini` 中的 `dev:id`，再读 `/opt/conf_dima.ini` 的 MQTT 地址、端口、用户名、密码；任一 INI 加载失败，主函数退出。源码虽给配置键设回退值，但回退值只在文件成功加载且键不存在时有机会使用。（`src/can_mng/can_mng.c:10-64`）
 4. `load_pointsheet_json()` 必须能够读取并解析固定路径 `/opt/Pointsheet_info1.json`，否则主函数退出。部分规则无效时解析器可能仅跳过相应规则，并不保证整份点表被完整验证。（`main.c:102-112`、`src/data_process/data_process.c:1109-1202`）
 5. 程序注册 CPActive，超时参数为 10 秒；保活线程约每 5 秒更新时间。它记录点表文件的 `st_mtime`，之后检测到变化就 `exit(0)`。若 `stat()` 失败，本轮只跳过比较；删除、短暂缺失或内容改变但 mtime 不变，不构成代码中的重载触发条件。（`main.c:25-51,114-125`）
+
+<a id="analysis-3"></a>
 
 ## 3. 外部文件和接口
 
@@ -48,6 +142,8 @@
 | `TBOX/REPORT` | 当前 JSON 上报主题，QoS 0，retain=false | 其他 `local/data/...` 主题在 `#if 0` 中 |
 
 仓库的 `todel/opt/device_apps/{HAC,NAC,NEWCAC,NTC,RC,STC}/Pointsheet_info1.json` 是**已提交的格式样例**，但其中没有 `dima_client` 应用配置，`mtyp` 均为 1。这些样例不能证明设备上 `/opt/Pointsheet_info1.json` 的内容，也不能当作当前 `dima_client` 已能发布的配置：当前 MQTT 的 CBOR 分支被 `#if 0` 屏蔽。`todel/package_install/...` 还有对应打包副本。样例数据的具体点位、数量和车型关系不应直接套用到本程序的现场部署。
+
+<a id="analysis-4"></a>
 
 ## 4. 点表加载与内部数据结构
 
@@ -69,6 +165,8 @@
 
 本机消息中的 `can_frame_t` 依次包含 32 位 `can_id`、16 位 `can_dlc`、16 位 `rsv_ms`、8 字节 `data`、32 位 `timestamp`；在当前结构体布局下，`data` 从结构体第 8 字节开始。点表中的 `ofs` 是按整个结构体起算的位偏移，不能未经核对就按 `data[0]` 起算。代码先按 `bo` 提取位段，对有符号值做补码扩展，然后执行 `物理值 = 原始值 × sc + pofs`，再按 `min`/`max` 裁剪。`ptyp` 支持整数、布尔、数值、字符串和 JSON 字符串。（`src/can_server/can_server.h:15-22`、`src/data_process/data_process.c:745-850`）
 
+<a id="analysis-5"></a>
+
 ## 5. CAN 接收、特殊报文与场景
 
 ![CAN 接收与解析流程图](./flow_can.png)
@@ -81,6 +179,8 @@
 - 普通点表解析只在顶层哈希表按 CAN ID 找规则；进入命中的规则后，若有子 `rls[]`，代码递归处理所有子规则，没有再次用子规则的 `val` 判别报文字段。因此点表看似定义的子规则筛选条件，不等于当前实现确实执行了相应筛选。（`src/data_process/data_process.c:433-616,745-860,1029-1039`）
 - 场景库对 `0x171` 读取发动机转速，对 `0x172` 读取速度，均从位偏移 64 提取 16 位小端原始值。判定优先级：速度大于 0 为 `drive`；否则发动机转速为 0 是 `power_on`，1～800 是 `idle`，大于 800 是 `work`。两个值保存在库内静态数组，其他 CAN 帧也会用最近值重新判定，没有超时清零、物理量缩放或通道条件。（`src/scene_lib/scene_judge.c:30-97`）
 
+<a id="analysis-6"></a>
+
 ## 6. 复用数据项
 
 点表 `app[].params[].multiplex` 可引用一个数量项 `count` 和若干 `frame` 数据项；引用的数据项先按 CAN 规则更新，`set_multiplex_data_item()` 在接收过程中把各帧数值放入临时数组。只有所有单元都标记为已收到、且至少一项达到其变化阈值时，代码才构造 `{名称_1: 值, ...}` JSON 字符串，写到一个 `VALUE_TYPE_JSON_STRING` 应用项。发布阶段再把这个字符串解析成 JSON 对象加入 `properties`，并跳过被复用项直接上报。（`src/data_process/data_process.c:193-306,616-745,1205-1332`）
@@ -88,6 +188,8 @@
 这一路径高度依赖点表完整性。`get_common_data_item()` 遍历多个通道时，后续未找到的结果可能覆盖先前找到的指针；`find_common_data_item()` 递归子规则时也没有找到即停止。`frame` 数组写入固定 8 项指针时没有边界检查。数量项还会决定运行时分配规模。上述都是静态分析可见的边界，实际是否触发取决于现场点表。（`src/data_process/data_process.c:139-306,616-745`）
 
 发布筛选函数中的 `skip_pub` 定义在数据项循环外，一旦某个被复用项把它设为 `true`，同一规则列表内后续数据项也会被跳过。这是当前控制流的直接结果；受影响的具体字段需依据现场点表排列确认。（`src/data_process/data_process.c:1205-1227`）
+
+<a id="analysis-7"></a>
 
 ## 7. MQTT 发布条件与消息格式
 
@@ -119,11 +221,15 @@ MQTT 创建客户端时以设备 ID 为客户端 ID，配置用户名和密码�
 
 默认 `NOT_USED_SCHEMA=ON` 时，schema 订阅与首次发布代码被条件编译排除。即使关闭该选项，当前 `client_mosquitto.h` 中相关主题宏也位于 `#if 0`，且 JSONGZ/CBOR 的发布 `case` 仍在 `#if 0`，不能仅靠改一个选项就断言这些路径可用。（`CMakeLists.txt:13-17`、`src/mosquitto/client_mosquitto.h:4-12`、`src/mosquitto/client_mosquitto.c:42-102,176-240`）
 
+<a id="analysis-8"></a>
+
 ## 8. 构建和部署事实
 
 顶层 `apps/CMakeLists.txt:52-54` 的 `WITH_DIMA_CLIENT` 默认关闭；本目录 CMake 最低版本 3.11、C99、项目版本 1.5，生成 `dima_client` 与 `scene` 两个目标。可执行程序通过 `GLOB_RECURSE` 收集 `src/*/*.c`，再排除 `scene_judge.c`；场景代码独立构建为共享库。程序链接 nanomsg、Mosquitto、OpenSSL、cJSON、cn-cbor、tbox-common、appmng、pthread 等；链接库出现不表示相应功能都在当前执行路径使用。安装规则将可执行程序置于 `usr/bin`，场景库与列出的依赖库置于 `usr/lib`。（`CMakeLists.txt:1-77`）
 
 交叉编译分支明确识别 `EC200A`、`EG25G`、`MCIMX6Y2CVM08AB` 的 `QL_MODULE_PLATFORM`；其他值触发 CMake 错误。本文没有执行完整交叉编译，因为目标 SDK 环境和设备依赖需要匹配。目录中没有专用自动化测试目标。（`CMakeLists.txt:19-45`）
+
+<a id="analysis-9"></a>
 
 ## 9. 已确认的实现边界与验证清单
 
@@ -142,6 +248,8 @@ MQTT 创建客户端时以设备 ID 为客户端 ID，配置用户名和密码�
 | 复用项筛选标志没有在每个数据项开始时重置 | 同一列表中后续字段可能一起被跳过 | 包含复用字段的现场点表及输出对照 |
 
 验证现场行为的最小路径：先获取目标设备**实际** `/opt/Pointsheet_info1.json` 与两个 INI（处理凭据时做脱敏），确认 `mtyp`、场景、`slot` 和数据项；再核对场景库、三个本机 CAN 发布端和 MQTT 服务器；最后用受控 CAN 帧验证位提取、场景切换、间隔/阈值、断网重连和点表改动后的重启。未取得这些设备资料前，本文只能完整描述当前源码和已提交样例，不能给出真实设备的全部点位与端到端上报结论。
+
+<a id="analysis-10"></a>
 
 ## 10. 设备故障排查手册
 

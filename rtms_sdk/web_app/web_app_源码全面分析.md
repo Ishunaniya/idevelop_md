@@ -6,6 +6,96 @@
 
 本文流程图采用纯文本代码块，按编号和箭头从上往下读；`├─`、`└─` 表示互斥分支。普通 Markdown 查看器即可显示，不需要 Mermaid 扩展。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/web_app/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 结论速览](#analysis-1)
+- [2. 构建边界与目录职责](#analysis-2)
+- [3. 启动、请求分发与认证](#analysis-3)
+- [4. 浏览器页面与端到端功能](#analysis-4)
+- [5. 数据路径、配置与外部依赖](#analysis-5)
+- [6. 源码可证实的限制和维护风险](#analysis-6)
+- [7. 模块关系与修改索引](#analysis-7)
+- [8. 设备异常时的排查手册](#analysis-8)
+- [9. 核对方法与边界](#analysis-9)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`web_app` 基于 GoAhead 提供记录查询和日志导出页面，也注册配置文件等后端 action；页面入口、action 注册和部署权限需分开核对。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/web_app/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `CMakeLists.txt`、`global_config.h.in` | go、web_app、gopass 构建目标 |
+| `webserver/start_web.sh` | 工作目录、监听和进程监测 |
+| `webserver/route.txt`、`webserver/auth.txt` | 实际部署的路由与用户数据 |
+| `webserver/html/` | 页面、记录查询和日志导出脚本 |
+| `src/src/goahead.c` | HTTP 入口、参数和 action 注册 |
+| `src/src/action_func.c` | 记录、配置、下载和批量导出 |
+| `src/src/log_export.c` | 日志查询及异步 ZIP 导出 |
+| `src/src/` | GoAhead 核心、INI/JSON/TLS 等库源码 |
+| `docs/` | 日志导出设计资料；行为仍以实装代码为准 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+浏览器 → webserver/html → GoAhead 路由 / 认证
+                            ↓
+            goahead.c 注册的 action
+              ├→ action_func.c → 记录 / 配置 / ZIP
+              └→ log_export.c → 内存或 SD 日志 / ZIP
+```
+
+页面可见入口、已注册 action、已编译 GoAhead 处理器和设备上实际启用功能分别核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 构建与服务入口 | `CMakeLists.txt`、`src/src/goahead.c` | 共享库与程序目标分离，脚本传入运行参数 | [进入章节](#analysis-2) |
+| 路由与认证 | `webserver/route.txt`、`src/src/goahead.c` | 路由、注册、页面入口和认证配置共同决定可达请求 | [进入章节](#analysis-3) |
+| 记录与配置 | `src/src/action_func.c` | 查询布局、文件路径、导出任务和配置接口分支不同 | [进入章节](#analysis-4) |
+| 日志导出 | `src/src/log_export.c` | 独立目录来源、后台任务及进度查询 | [进入章节](#analysis-4) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+start_web.sh → GoAhead / 路由 / 认证 → 已注册 action
+浏览器查询 → 记录或日志列表 → 页面显示 / 单文件下载
+勾选批量导出 → 后台 ZIP 任务 → 进度轮询 → 触发下载
+~~~
+
+[组件与数据流](#analysis-1)、[启动图](#analysis-3)、[记录查询图](#analysis-4)分别展开。日志批量导出还有独立的任务和进度路径，具体条件见第 4 节。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 结论速览
 
 `web_app` 是设备上的 GoAhead HTTP 服务。CMake 构建 `libgo.so`、`web_app`、`gopass`；启动脚本在 `/usrdata/webserver` 运行 `web_app`，将 `html/` 作为页面根目录，监听脚本指定的 `http://192.168.1.1:80`。页面实际露出的两个业务入口是“按日期查询记录”和“日志导出”。普通记录列表、配置文件导入/删除等后端 action 仍已注册，但主页导航入口被注释。记录查询有 `dated`、`erk`、`flat-can` 三套布局；日志查询另用 `mem`、`sd` 两套来源目录。两套批量导出各建自己的后台 ZIP 任务并由页面轮询进度。依据：`CMakeLists.txt:95-199`，`webserver/start_web.sh:3-31`，`webserver/html/home.html:262-265`，`src/src/goahead.c:404-423`。
@@ -33,6 +123,8 @@ GoAhead（路由、认证、静态文件）
 ```
 
 这里的箭头表示代码调用或文件访问；图中没有画出未在本项目实现的记录生成进程、日志生成进程。GoAhead 核心负责网络、路由、认证、上传和静态文件服务，项目业务层实现查询、下载、打包。依据：`src/src/http.c:229-286`，`src/src/action.c:22-98`，`src/src/goahead.c:328-423`，`src/src/action_func.c:19-40`，`src/src/log_export.c:69-73`。
+
+<a id="analysis-2"></a>
 
 ## 2. 构建边界与目录职责
 
@@ -69,6 +161,8 @@ CMake 的 TLS 开关默认 mbedTLS 开、OpenSSL 关，二者同时开启会直�
 仓库本目录的 `README.md` 把安装目录写成 `userdata/webserver`，但当前 CMake 安装规则和启动脚本均为 `usrdata/webserver`；本文采用可执行规则中的拼写。`src/test/` 是随 GoAhead 源码存在的测试目录，当前本项目 `CMakeLists.txt` 没有把它加入构建或定义专用测试目标。依据：`README.md:67-69`，`CMakeLists.txt:195-199`，`webserver/start_web.sh:3`。
 
 **版本区分**：CMake `project(web_app VERSION 2.8)` 是本项目版本；GoAhead 配置头 `src/projects/goahead-linux-default-me.h:280-281` 中 `ME_VERSION` 为 `5.2.0`，`--version` 打印的是 `ME_VERSION`（`src/src/goahead.c:308-312`），两者不能混写。
+
+<a id="analysis-3"></a>
 
 ## 3. 启动、请求分发与认证
 
@@ -108,6 +202,8 @@ cd /usrdata/webserver --> killall -9 web_app
 `webserver/route.txt` 先声明 `/css`、`/index.html`，再声明登录 POST、登出 GET/POST、`/` 的 `auth=form` 继续路由、`/action` 处理器和 `/` 静态路由。GoAhead 的 `websOpenAuth()` 先在同一 action 表中注册内置 `login`、`logout` 两个处理函数，项目 `goahead.c` 又注册 14 个业务 action；下节接口表只统计这 14 个业务项。登录处理函数从表单读取 `username/password`，验证后建立会话并按路由重定向；登出会销毁会话。GoAhead 的 `actionHandler` 从路径中取 action 名，在 `actionTable` 查找已注册 C 函数；未注册时返回 404。认证用户和角色由 `webserver/auth.txt` 加载，GoAhead 配置头启用 `ME_GOAHEAD_AUTH=1`。当前启动脚本使用 HTTP，因此该链路本身未启用 TLS；CMake 编入 TLS 库不等于脚本监听 HTTPS。依据：`webserver/route.txt:1-7`，`src/src/http.c:229-286`，`src/src/auth.c:145-166,482-559`，`src/src/action.c:22-98`，`src/src/goahead.c:328-419`，`src/projects/goahead-linux-default-me.h:93-97`。
 
 一个请求的核心调用链为 `websServiceEvents()` 轮询 socket → `websAccept()` 建请求对象 → `websPump()` 解析请求/请求体 → `websRouteRequest()` 按路由匹配并执行认证检查 → `websRunRequest()` 注入查询/表单变量并调用匹配的处理器。静态页面走 `file` 处理器，`/action/...` 走 `action` 处理器；其后再由 action 名查找内置登录函数或本项目业务函数。这个流程只描述当前 GoAhead 的主要请求路径，上传体解析和后台写回还有各自的内部状态分支。依据：`src/src/http.c:739-800,930-960,1541-1564`，`src/src/route.c:41-156`，`src/src/action.c:22-98`，`src/src/file.c:187-191`。
+
+<a id="analysis-4"></a>
 
 ## 4. 浏览器页面与端到端功能
 
@@ -209,6 +305,8 @@ cd /usrdata/webserver --> killall -9 web_app
 
 配置列表固定扫描 `/opt/`，仅在目录项类型为普通文件且文件名**包含** `.ini` 或 `.json` 时加入列表；过滤不是“严格以扩展名结尾”。上传路径是 GoAhead 临时上传文件 → `html/tmp/<客户端文件名>` → shell `mv` 到 `/opt/<客户端文件名>`。GoAhead 的 `upload.c` 会先规范化并拒绝包含路径分隔符等特定字符的客户端文件名；业务层对 `.ini`/`.json` 仍只采用子串检查，且 `uploadFileAction` 没有检查 `mv` 的退出状态就设置成功返回。当前仓库的 `webserver/` 与 `webserver/html/` 都没有 `tmp/` 目录，启动脚本和本目录 CMake 也未创建它们；设备上是否由其他部署步骤提供，需实际检查。`getFile` 使用 `Filename` 设置 `wp->filename/wp->path`，GoAhead 页面文件接口打开并以 `Content-Disposition: attachment` 回传；下载对象不限于配置文件。`delFile` 从 `wp->input.servp` 取原始请求体，`stat` 为普通文件后通过 shell 删除。依据：`src/src/upload.c:230-259,465-477`，`src/src/goahead.c:47-218`，`src/src/action_func.c:225-357,481-577`。
 
+<a id="analysis-5"></a>
+
 ## 5. 数据路径、配置与外部依赖
 
 | 路径或对象 | 读写方式与条件 | 证据 |
@@ -224,6 +322,8 @@ cd /usrdata/webserver --> killall -9 web_app
 | `/tmp/rtms_log/`、`/media/sdcard/rtms_log/` | 日志读取和对应 ZIP 输出目录；`mem/sd` 由后端固定映射。 | `src/src/log_export.c:69-73,428-432` |
 
 GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/UPLOAD 上限设为 204800000 字节；这属于 GoAhead 请求层容量常量，不等于业务 ZIP 的 20–100 MB 上限。静态页面依赖项目内的 JS/CSS 资源；`index.html` 还引用 Google Fonts 地址，断网环境下字体加载结果取决于浏览器网络，业务页面本身是本地静态文件。依据：`src/projects/goahead-linux-default-me.h:153-174,238-243`，`webserver/html/index.html:8-18`。
+
+<a id="analysis-6"></a>
 
 ## 6. 源码可证实的限制和维护风险
 
@@ -244,6 +344,8 @@ GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/U
 
 这些风险的优先级应由部署环境决定。本文只记录可从实现直接确认的输入来源、判断条件和输出行为，不以设计文档承诺或界面隐藏状态替代服务端事实。
 
+<a id="analysis-7"></a>
+
 ## 7. 模块关系与修改索引
 
 | 要修改的行为 | 需要联查的源码 |
@@ -255,6 +357,8 @@ GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/U
 | 日志导出 | `logExport.js`；`log_export.c/.h` 的目录映射、时间解析、任务和路径守卫；`goahead.c` 注册；`CMakeLists.txt` 构建目标。 |
 | 配置文件导入/下载 | `importFile.js`、`exportFile.js`、`home.html` 导航；`goahead.c` 上传/删除/列表；`action_func.c` 下载与文件列表。 |
 | 打包与部署 | 顶层 `apps/CMakeLists.txt`、本目录 `CMakeLists.txt`、`webserver/` 安装内容、目标工具链与 `QL_MODULE_PLATFORM`。 |
+
+<a id="analysis-8"></a>
 
 ## 8. 设备异常时的排查手册
 
@@ -352,6 +456,8 @@ curl -i --max-time 5 http://192.168.1.1/index.html
 脚本当前把 GoAhead 日志指向 `stdout:2`，很多 `logmsg(9, ...)` 的详细 JSON/逐文件时间比对在级别 2 下不会出现；`printf`/`error` 还可能走不同标准流。先确认 `fd/1`、`fd/2` 指向哪里，再按设备的进程管理方式取日志。必要时在受控环境临时提高 `--log` 级别并做单次复现；参数改动和服务重启会改变现场，须先保存原始证据。系统级崩溃可查看目标设备可用的内核日志，例如 `dmesg`，但不能把缺少日志直接当作程序未出错。
 
 一份可复现的问题记录至少包括：设备平台与系统版本、`web_app --version` 输出、进程完整启动参数、发生时间及设备时区、记录模式或日志目录类型、首次失败请求/响应、对应进程输出、相关目录的存在性和权限、剩余空间、`zip` 可用性、任务 ID/状态变化。分享时遮盖用户名、密码、Cookie、`auth.txt` 散列、`/opt/conf.ini` 中的 `dev:secret` 及可能包含敏感数据的文件内容。依据：`src/src/goahead.c:265-315,434-448`，`src/src/conf.c:55-85`，`src/src/action_func.c:1718-1755`，`src/src/log_export.c:190-342,401-505`。
+
+<a id="analysis-9"></a>
 
 ## 9. 核对方法与边界
 

@@ -2,6 +2,101 @@
 
 > 分析对象：`/home/tronlong/lyp/code/rtms_sdk/apps/gb_client_for_mixer/`；仓库分支 `develop/rtms_sdk_v1.3_20240408`，提交 `bc60961e`。以下源码位置相对于该目录；同一引用组中的 `:行号` 沿用前一个完整路径，省略目录的文件名位于同段已提到的子目录。本文以当前代码实际控制流为准；外部服务的应答、目标设备硬件状态及平台接收结果，不能仅由本仓库源码证明。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/gb_client_for_mixer/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 工程边界与结论](#analysis-1)
+- [2. 构建与编译路径](#analysis-2)
+- [3. 启动流程图](#analysis-3)
+- [4. 线程、共享状态与数据来源](#analysis-4)
+- [5. 车型与 CAN 数据解析](#analysis-5)
+- [6. VIN、定位和 MCU 状态](#analysis-6)
+- [7. 协议线程流程图](#analysis-7)
+- [8. 签名、发送与补传流程图](#analysis-8)
+- [9. TCP 与 MQTT 两种企业平台通道](#analysis-9)
+- [10. 配置、文件及本机接口](#analysis-10)
+- [11. 具体实现限制与核查重点](#analysis-11)
+- [12. 验证范围与维护路径](#analysis-12)
+- [13. 设备现场故障排查手册](#analysis-13)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`gb_client` 按车型解析 CAN、GPS 与 MCU 数据，按发动机参数选择国六或非四协议，经签名设备处理后使用 TCP 或 MQTT 企业通道发送。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/gb_client_for_mixer/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 参数、线程和编译选项 |
+| `src/app_mng/`、`src/app_server/` | 共享状态、GPS 与 MCU |
+| `src/can_server/`、`src/can_parse/` | CAN 收发及车型分发 |
+| `src/gb6/`、`src/fei_4/` | 国六与非四协议状态机 |
+| `src/data_signature/` | 签名设备请求与回复 |
+| `src/platform/`、`src/mosquitto/` | 企业平台 TCP 或 MQTT 出口 |
+| `src/db/` | SQLite 历史数据 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+本机 CAN / GPS / MCU → 车型解析 → gb6 或 fei_4 状态机
+                                      │
+                                      ↓
+                         data_signature ↔ /dev/ttySIGN
+                                      ↓
+                           企业平台 TCP 或 MQTT
+离线队列 ↔ SQLite；备案/激活使用另一路国家平台连接
+```
+
+发动机参数选择国六或非四任务，车型参数影响 CAN 解析，TCP/MQTT 由编译选项选择；GPS 时间参数还影响取数及签名批量门槛。签名入队与平台确认不可等同。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 车型与 CAN | `src/can_parse/`、`src/can_server/` | 仅定义过的车型/发动机组合会走相应解析 | [进入章节](#analysis-5) |
+| 协议状态机 | `src/gb6/`、`src/fei_4/` | 分别处理注册、登录、节拍及历史路径 | [进入章节](#analysis-7) |
+| 签名与补传 | `src/data_signature/`、`src/db/` | 签名队列、数据库删除和发送确认要分段判断 | [进入章节](#analysis-8) |
+| 平台出口 | `src/platform/`、`src/mosquitto/` | TCP 与 MQTT 由构建选项选择，国家平台连接另计 | [进入章节](#analysis-9) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+本机 CAN / GPS / MCU → 车型解析 → 国六或非四协议任务
+协议数据 → 按需签名 → 企业平台 TCP 或 MQTT
+未登录 / 离线等条件下的报文 → SQLite 历史 → 条件满足后补传
+国家平台备案 / 激活 → 独立连接
+~~~
+
+车型、发动机参数和编译选项分别影响解析、协议任务和企业平台出口。依次看[启动图](#analysis-3)、[车型与 CAN](#analysis-5)、[协议线程图](#analysis-7)、[签名补传图](#analysis-8)和[平台出口](#analysis-9)。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 工程边界与结论
 
 该目录构建 `gb_client` 进程。它订阅本机 CAN/GPS 消息、请求 MCU 状态，按车型解析 CAN 数据；按发动机类型选择非道路国四 `fei_4` 或国六 `gb6` 协议；把报文送往 `/dev/ttySIGN` 获取签名结果；常规报文通过 TCP 或 MQTT 送往企业平台。防篡改备案/激活另外连接国家平台。离线或未登录时，部分数据进入 SQLite，在线登录后按代码规则补传。关键入口为 `main.c:119`、`src/can_parse/can_parse.c:4`、`src/fei_4/fei4.c:879`、`src/gb6/gb6.c:1225`、`src/data_signature/data_signature.c:543`。
@@ -22,6 +117,8 @@
 | `src/db/`、`src/iniparser/` | SQLite BLOB 历史数据、INI 文件解析。 |
 | `src/common/`、`src/skt_res/`、`src/list/` | 公共时间/配置/编码方法、socket 封装、队列链表。 |
 
+<a id="analysis-2"></a>
+
 ## 2. 构建与编译路径
 
 | 项目 | 源码事实 | 位置 |
@@ -35,6 +132,8 @@
 | 依赖 | CMake 查找 nanomsg、OpenSSL、cJSON、appmng、Mosquitto，另链接 cn-cbor、tbox-common、pthread 等；目标平台还需对应 SDK 和 SQLite 等库。 | `CMakeLists.txt:4`、`:68` |
 
 仓库 README 的交叉编译流程需要额外传入 `-DWITH_GB_CLIENT_FOR_MIXER=ON` 才会包含本程序。源码没有本目录专用测试目标。本文未运行目标板、国家平台、企业平台或签名硬件联调。
+
+<a id="analysis-3"></a>
 
 ## 3. 启动流程图
 
@@ -101,6 +200,8 @@ flowchart TD
 
 参数缺失或非法时回退到 `VT_MIXER + HJ1239_UNDEF`。这个组合能进入国六线程和搅拌车 CAN 解析，但 `gb6_hj1239_make_flow_data_by_gps()` 只实现发动机类型 2、3、4，其余直接返回 `-1`；因此不能把回退参数解释成可正常产生国六实时流。依据：`main.c:134-140`、`src/gb6/hj1239_1_2021_frame_pack.c:397-433`。
 
+<a id="analysis-4"></a>
+
 ## 4. 线程、共享状态与数据来源
 
 `app_mng_t` 保存 VIN、车型、发动机、CAN 数据、GPS/MCU 状态、协议登录/注册状态、多个发送队列、SQLite 句柄、nanomsg socket 和远端连接状态。`canapp_mng_init()` 分配队列和 `can_data_t`，把多数尚未采集的 CAN 字段设为无效值，再按发动机类型选择数据库与 VIN 来源。共享结构同时由 CAN、GPS/MCU、协议、签名和发送线程访问；多个队列使用互斥锁，CAN 数据字段的锁定义在结构体中，但不能据此假定所有读写都已同步。依据：`src/app_mng/app_mng.h:197-261`、`src/app_mng/app_mng.c:31-91`、`:212-376`。
@@ -113,6 +214,8 @@ flowchart TD
 | `plaform_data_report_task` 或 `mosq_client_task` | 根据编译选项消费企业平台发送队列。 | `src/platform/platform.c:30`；`src/mosquitto/client_mosquitto.c:349` |
 | `data_sign_task` | 消费签名队列，访问 `/dev/ttySIGN`，解析签名结果并重新打包。 | `src/data_signature/data_signature.c:543` |
 | `fei4_task` / `gb6_task` | 根据发动机类型只启动其一；约 100 ms 一轮，处理备案、报文入队、签名调度及 CAN 主动请求。 | `src/fei_4/fei4.c:879`；`src/gb6/gb6.c:1225` |
+
+<a id="analysis-5"></a>
 
 ## 5. 车型与 CAN 数据解析
 
@@ -131,11 +234,13 @@ flowchart TD
 
 ### 5.2 CAN 数据流
 
-CAN 消息从 `127.0.0.1:16002/16003/16004` 进入 SUB socket。`can_msg_process()` 把消息按 `sizeof(can_frame_t)` 拆帧，调用 `can_frame_parse()`；后者用车型和发动机组合分发。匹配到的解析器更新 `can_data_t` 中车速、发动机转速、扭矩、油耗、排气后处理、故障码、OBD 等字段；某些识别的帧调用 `can_update_canframe_timemap()` 更新全局 CAN 活跃时间。反向请求通过本机 PUB 的 `26002/26003/26004` 发出，具体请求由各车型函数决定。依据：`src/can_server/can_server.c:11-92`、`src/can_parse/can_parse.c:4-113`、`src/app_mng/app_mng.c:379-413`、`src/can_server/can_active.c:7-27`。
+CAN 消息从 `127.0.0.1:16002/16003/16004` 进入 SUB socket。`can_msg_process()` 把消息按 `sizeof(can_frame_t)` 拆帧，调用 `can_frame_parse()`；后者用车型和发动机组合分发。匹配到的解析器更新 `can_data_t` 中车速、发动机转速、扭矩、油耗、排气后处理、故障码、OBD 等字段；某些识别的帧调用 `can_update_canframe_timemap()` 更新全局 CAN 活跃时间。反向请求通过本机 PUB 的 `26002/26003/26004` 发出，具体请求由各车型函数决定。依据：`src/can_server/can_server.c:11-92`、`src/can_parse/can_parse.c:4-113`、`src/app_mng/app_mng.c:379-410`、`src/can_server/can_active.c:7-27`。
 
 搅拌车解析器在 CAN0 按完整 CAN ID 处理车速、气压、扭矩、转速、油耗、NOx、SCR/DPF、EGR、故障码及部分混动字段；混动冷藏车解析器有相似字段和私有帧，但开头没有 CAN 通道判断。二者还解析 UDS 诊断响应，并在检测到第三方 OBD 请求后暂停本端请求；最后一次第三方请求超过 10 秒，才恢复本端周期请求。搅拌车的 7 相位表含诊断协议、就绪状态、VIN、CALID、CVN、IUPR 和故障码，代码按约 2 秒轮转，且先递增相位再发送。依据：`src/can_parse/vt_mixer.c:14-63`、`:463-505`、`:668-870`、`:872-1108`。
 
-SAC、STC 的国六解析处理 J1939 参数组及 BAM 多帧、IUPR 分帧，并周期发送诊断/软件/IUPR 请求；非四 SAC 侧另有 VIN 请求。BAM 重组在 `bam_proc.c` 用静态缓冲和递增帧序号完成，处理跨报文状态；对并发或丢帧时的实际恢复能力不能只凭该函数推断。依据：`src/can_parse/sac4000c8.c:150-385`、`sac2000c8.c:171-408`、`stc250e5.c:134-294`、`stc250_550c5.c:134-295`、`bam_proc.c:8-80`。
+SAC、STC 的国六解析处理 J1939 参数组及 BAM 多帧、IUPR 分帧，并周期发送诊断/软件/IUPR 请求；非四 SAC 侧另有 VIN 请求。BAM 重组在 `bam_proc.c` 用静态缓冲和递增帧序号完成，处理跨报文状态；对并发或丢帧时的实际恢复能力不能只凭该函数推断。依据：`src/can_parse/sac4000c8.c:150-385`、`sac2000c8.c:171-408`、`stc250e5.c:134-294`、`stc250_550c5.c:134-295`、`bam_proc.c:8-78`。
+
+<a id="analysis-6"></a>
 
 ## 6. VIN、定位和 MCU 状态
 
@@ -143,6 +248,8 @@ SAC、STC 的国六解析处理 J1939 参数组及 BAM 多帧、IUPR 分帧，�
 - MQTT 模式下，国六 VIN 还可经订阅主题收到 JSON 命令后写入 `gb6:vin`；未取得 VIN 时每约 10 秒尝试发布请求。回调没有检查 `parse_vin_from_payload()` 的返回值，即使解析失败仍会保存当前 VIN 缓冲并把 `get_vin` 设为真。默认 TCP 模式没有这条 MQTT VIN 获取路径。依据：`src/mosquitto/client_mosquitto.c:51-112`、`:136-156`、`:323-346`、`:450-471`。
 - GPS 由 SUB 接收 `location_info` 对象，解析时间、经纬度、速度、卫星数等字段到 `gps_info`。MCU 由 REQ/REP 收到 JSON 状态，解析版本、电压、启动源、温度、ACC/IG 等字段。它们都依赖其他本机进程提供服务。依据：`src/app_server/gps.c:21-91`、`src/app_server/mcu.c:8-114`、`src/app_server/app_server.c:67-118`。
 - 国六 `enable_gps_time=0` 时，`gb6_enqueue_flow_data()` 按 10 秒常量取共享 `gps_info` 的副本，并把时间戳设为当前系统时间；非零时改从 `gps_lst` 弹出 GPS 样本。当前目录只找到该队列的初始化和消费，没有找到入队调用，因此非零模式可能一直没有实时流数据。`gps_info` 在初始化时用 `malloc` 分配且没有清零；在第一条 GPS 消息成功解析前，不能把其余字段当作有效定位数据。依据：`src/gb6/gb6.c:245-334`、`src/app_mng/app_mng.c:224-229`、`:276-284`、全目录 `gps_lst` 引用核查。
+
+<a id="analysis-7"></a>
 
 ## 7. 协议线程流程图
 
@@ -227,6 +334,8 @@ flowchart TD
 
 **登录状态的判定边界：** `gb6_device_login_direct()` / `fei4_device_login_direct()` 返回 0 的直接条件是把登录帧加入本地企业发送队列成功。协议线程随即把 INI 的 `loginStat` 写为 `LOGIN`，并将内存中的 `gb_login` 设为 1；没有在此等待平台登录答复。登出同样依据本地队列入队结果改变状态。TCP 发送线程断线和 MQTT 断开回调没有清零 `gb_login`；如果 CAN 一直活跃，连接恢复后可能沿用原本地状态继续发送实时帧。因此排查“平台说未登录/重新联网后无数据”时，要关联登录帧的入队、实际发送和平台答复，不能只看 `gb_login`、INI 或 `GB6/FEI4 platform login` 日志。依据：`src/gb6/gb6.c:150-195`、`:863-905`；`src/fei_4/fei4.c:140-185`、`:684-725`；`src/platform/platform.c:50-104`；`src/mosquitto/client_mosquitto.c:168-178`。
 
+<a id="analysis-8"></a>
+
 ## 8. 签名、发送与补传流程图
 
 文本流程图：
@@ -286,13 +395,17 @@ flowchart TD
 
 SQLite 表结构仅有自增 `id` 和 BLOB `data`；读历史 SQL 是 `select * ... limit N`，没有显式 `ORDER BY`；删除用第 N 行的 `id` 作为上界删除 `id<=...`。这套代码没有持久化远端确认状态。依据：`src/db/db.c:27-46`、`:172-245`。
 
+<a id="analysis-9"></a>
+
 ## 9. TCP 与 MQTT 两种企业平台通道
 
-**默认 TCP：** `platform.c` 连接 `140.143.114.43:50201`，运行时可用 `TRUCKLINK_GW_IP`、`TRUCKLINK_GW_PORT` 覆盖。线程从选中协议的发送队列取首项，调用 `socket_send()`；返回成功后移除并释放队列项，失败则断开、等待并重连。`remote_online()` 在此模式只按 socket fd 是否大于 0 判断。源码没有在该发送线程中读取企业平台的逐帧业务确认。依据：`src/platform/platform.c:20-116`、`src/common/common.c:614-639`。
+**默认 TCP：** `platform.c` 连接 `140.143.114.43:50201`，运行时可用 `TRUCKLINK_GW_IP`、`TRUCKLINK_GW_PORT` 覆盖。线程从选中协议的发送队列取首项，调用 `socket_send()`；返回成功后移除并释放队列项，失败则断开、等待并重连。`remote_online()` 在此模式只按 socket fd 是否大于 0 判断。源码没有在该发送线程中读取企业平台的逐帧业务确认。依据：`src/platform/platform.c:20-108`、`src/common/common.c:614-639`。
 
 **可选 MQTT：** 客户端写定 broker `192.168.1.253:1883`；国六客户端 ID 为 `g6_client`、非四为 `f4_client`。尝试订阅 VIN 命令主题 `v4/s/post/device/cmd/json/1.0`；发送国六/非四二进制帧时先转十六进制字符串，再包成包含 `seq/ts/eventType/events/info.vin/info.data` 的 JSON，发布至 `v4/p/post/thing/event/json/1.0`。当前设置 `qos=0`；`mosquitto_publish()` 返回 `MOSQ_ERR_SUCCESS` 后移除队列并递增本地序号，此返回值仍非云端业务确认。`remote_online()` 同时检查 MQTT 已连接和 `remote_online` 标志；线程定期从 `/tmp/clound_status` 读取值，读到 2 设真，读到其他值设假，读取失败则保留上次标志。该路径拼写是源码原样。依据：`src/mosquitto/client_mosquitto.c:119-173`、`:199-279`、`:349-563`。
 
 TCP/MQTT 都是企业上报通道，不替代第 7.1 节的国家平台备案 socket。头文件中存在未作为当前 TCP 发送地址使用的 `FEI4_DATA_PORT=53001` 等常量，应按实际调用点辨别。依据：`src/platform/platform.c:20-21`、`src/fei_4/fei4.h:4-6`。
+
+<a id="analysis-10"></a>
 
 ## 10. 配置、文件及本机接口
 
@@ -303,11 +416,13 @@ TCP/MQTT 都是企业上报通道，不替代第 7.1 节的国家平台备案 so
 | `/media/sdcard/hj1014.db`、`hj1239.db` | 非四 `FEI4` 表和国六 `GB6` 表的 BLOB 历史数据。 | `src/app_mng/app_mng.h:15-23`、`src/db/db.c:13-46` |
 | `/dev/ttySIGN` | 与签名设备收发请求/回复。 | `src/data_signature/data_signature.c:16`、`:543-636` |
 | 本机 `16002/16003/16004` | nanomsg SUB 接收 CAN0/1/2。 | `src/can_server/can_server.c:51-92` |
-| 本机 `26002/26003/26004` | nanomsg PUB 发送 CAN0/1/2 请求。 | `src/app_mng/app_mng.c:379-413` |
+| 本机 `26002/26003/26004` | nanomsg PUB 发送 CAN0/1/2 请求。 | `src/app_mng/app_mng.c:379-410` |
 | 本机 `16005`、`38000` | GPS SUB、MCU REQ。 | `src/app_server/gps.c:8-44`、`mcu.c:8-34` |
 | `/tmp/clound_status` | MQTT 模式下辅助判断远端在线；只有值为 2 才设在线。 | `src/mosquitto/client_mosquitto.c:541-563` |
 
 `app_mng.h` 还定义 `MQTT_COFIG_PATH` 和 `ENCRYPT_SKT_PORT=16009`，但本目录当前主执行路径没有使用这两个常量建立相应连接；当前签名执行路径是 `/dev/ttySIGN`。不能依据常量存在就写成实际在用的接口。依据：`src/app_mng/app_mng.h:13-34`，全目录引用核查。
+
+<a id="analysis-11"></a>
 
 ## 11. 具体实现限制与核查重点
 
@@ -326,6 +441,8 @@ TCP/MQTT 都是企业上报通道，不替代第 7.1 节的国家平台备案 so
 11. **故障码缓存的清除早于平台确认。** 国六 OBD、非四 ECD 数据打包并尝试入实时队列或 SQLite 后，代码清除对应故障码历史字段；入队/入库结果及平台接收未参与清除条件。不能用“缓存已清空”证明故障码已上报。见 `src/gb6/gb6.c:436-500`、`src/fei_4/fei4.c:282-345`。
 12. **登录标志早于平台确认。** 登录/登出帧入本地企业发送队列成功后，协议线程立即更新本地 `gb_login` 和 INI `loginStat`。远端断线时发送线程/回调未重置该标志；只要 CAN 持续活跃，重连后仍可能走“已登录”分支。现场必须用平台侧登录答复验证。见 `src/gb6/gb6.c:150-195`、`:863-905`；`src/fei_4/fei4.c:140-185`、`:684-725`；`src/platform/platform.c:50-104`；`src/mosquitto/client_mosquitto.c:168-178`。
 
+<a id="analysis-12"></a>
+
 ## 12. 验证范围与维护路径
 
 本文对源码的结论来自当前分支的静态调用链、条件编译和常量。没有使用目标设备数据、国家/企业平台记录，也没有执行真实 CAN、签名设备或网络联调。因此本文明确指出哪些路径**会被调用**及何时**入队/删除**，不宣称外部服务一定返回、报文一定合规或平台一定入库。
@@ -341,6 +458,8 @@ TCP/MQTT 都是企业上报通道，不替代第 7.1 节的国家平台备案 so
 | 连接和部署 | `CMakeLists.txt`、`src/platform/platform.c` 或 `src/mosquitto/client_mosquitto.c`、两个 INI、目标设备上的服务端口和 `/dev/ttySIGN` |
 
 验证时应分别记录启动参数、编译开关、CAN 原始帧、签名请求/回复、SQLite 行变动、企业平台发送结果、备案答复和平台侧最终记录。它们对应不同阶段，不能互相代替。
+
+<a id="analysis-13"></a>
 
 ## 13. 设备现场故障排查手册
 
@@ -399,7 +518,7 @@ ls -l /media/sdcard/hj1014.db /media/sdcard/hj1239.db
 | --- | --- | --- |
 | `invalid input args, use default instead!` | 核对三个参数的个数与值；回退为 `VT_MIXER/HJ1239_UNDEF/0`。`HJ1239_UNDEF` 仍起国六线程，但国六实时流打包会报 `Unknown engine_type`，因此不能把“进程在跑”当成参数正确。 | `main.c:82-140`；`src/gb6/hj1239_1_2021_frame_pack.c:397-435` |
 | `canapp_mng_init failed!`、`db_open_t4hj_db failed`、`db_create_t4hj_table failed`、`failed to add process info to CPActive` | 按第一条失败日志分支检查内存分配、当前模式数据库路径及挂载/权限/空间、CPActive 服务；这些点在创建工作线程前直接返回。数据库 `open` 成功也要核对它是否位于预期 SD 卡，避免挂载缺失时落到根文件系统的同名目录。 | `main.c:142-165`；`src/app_mng/app_mng.c:218-373`；`src/db/db.c:13-46` |
-| `connected to canN port` 或 `connected to canN port for pub`，但无有效 CAN | 这些仅证明 `nn_connect` 返回成功。检查本机发布服务是否仍运行、16002/3/4 接收与 26002/3/4 请求端口是否对应 CAN0/1/2；记录原始帧数量、ID、长度、到达时间，再对照车型/发动机分发矩阵。 | `src/can_server/can_server.c:51-92`；`src/app_mng/app_mng.c:379-413`；`src/can_parse/can_parse.c:4-113` |
+| `connected to canN port` 或 `connected to canN port for pub`，但无有效 CAN | 这些仅证明 `nn_connect` 返回成功。检查本机发布服务是否仍运行、16002/3/4 接收与 26002/3/4 请求端口是否对应 CAN0/1/2；记录原始帧数量、ID、长度、到达时间，再对照车型/发动机分发矩阵。 | `src/can_server/can_server.c:51-92`；`src/app_mng/app_mng.c:379-410`；`src/can_parse/can_parse.c:4-113` |
 | `no can data after GB6_NO_DATA_TIMEOUT time.` 或 `no can data after FEI4_NO_DATA_TIMEOUT time.` | 代码按有效 CAN 活跃时间判断，阈值 15 秒。核对设备供电/发动机状态、CAN 发布服务、通道映射及解析分支；若原始帧有而本程序仍判超时，重点查帧是否落入能更新时间戳的路径。随后程序可能走下线/登出，故要沿同一时间线看登录状态变化。 | `src/can_server/can_active.c`；`src/gb6/gb6.c:672-695`；`src/fei_4/fei4.c:515-532` |
 | 有 CAN，但 `NO GPS Message!!!!!` 或实时流始终不产生 | 先看第三参数 `enable_gps_time`。值为 1 时国六从 `gps_lst` 取时间，本目录只见该队列初始化与消费，未找到生产者；GPS SUB 更新的是 `gps_info`。值为 0 才使用系统时间覆盖时间戳。核对 16005 的 `location_info` JSON 解析及系统时钟，不能仅凭 GPS 服务在线推定本路径可打包。 | `main.c:82-116`；`src/app_server/app_server.c:91-102`；`src/app_server/gps.c:47`；`src/gb6/gb6.c:245-334` |
 | `gb6 realtm flow data pack failed!!` 或 `Unknown engine_type` | 先核对启动参数的车型/发动机组合和 CAN 数据完整性。国六实时流打包仅处理发动机类型 2、3、4；`255` 会返回失败。再对照打包函数及错误前的真实 CAN 字段，不先假定是网络问题。 | `src/gb6/gb6.c:245-334`；`src/gb6/hj1239_1_2021_frame_pack.c:397-435` |
@@ -408,7 +527,7 @@ ls -l /media/sdcard/hj1014.db /media/sdcard/hj1239.db
 | `GB6 platform ... vin error`、`respond timeout`、`connection closed` 或非四对应日志 | 这是**国家平台备案**链路，核对国六 `g6check.vecc.org.cn:20006` 或非四 `fdlpfjk.vecc.org.cn:55001` 的解析、路由、连接、发送帧与平台原始答复。国六 VIN 错误会使当前运行周期的 `gb_register=-1`，从而停止普通重试；分片答复的超时路径也要记录每次接收长度与时间。不要只看企业平台 TCP/MQTT 状态。 | `src/gb6/gb6.c:580-605`、`:698-823`；`src/fei_4/fei4.c:533-645` |
 | `failed to open /dev/ttySIGN`、`serial ... encrypt failed`、签名校验错误 | 检查设备节点、权限、串口是否被占用及签名设备供电；捕获请求和回复的类型、序号、长度、状态、BCC/CRC、R/S 长度及重试次数。`chip id set OK` 仅表明芯片 ID 命令回复通过，不能代表后续业务帧签名完成。 | `src/data_signature/data_signature.c:79-197`、`:543-636` |
 | 签名日志显示 `check data OK`，却没有企业发送 | 再查 `data_signatured_handler()` 的重组、备案 socket 写入或常规队列入队。调用方没有检查 handler 返回值便标 `OK`，所以该日志只能证明回复校验通过。按报文类型看具体目标队列，不能用签名 OK 直接判定已经发出。 | `src/data_signature/data_signature.c:199-320`、`:440-478` |
-| TCP 模式 `failed to connect to platform`、`socket_send t4hj data failed` | 先确认 `ENABLE_TCP_PLATFORM` 与运行时 `TRUCKLINK_GW_IP/PORT`，默认企业网关 `140.143.114.43:50201`。检查路由、运营商链路、远端监听及断开时刻；`socket_send()` 单次发送不满即判失败，可能已有部分字节到达。发送成功后本地队列被移除，但源码未读取逐帧业务确认。 | `src/platform/platform.c:20-116`；`src/common/common.c:614-639` |
+| TCP 模式 `failed to connect to platform`、`socket_send t4hj data failed` | 先确认 `ENABLE_TCP_PLATFORM` 与运行时 `TRUCKLINK_GW_IP/PORT`，默认企业网关 `140.143.114.43:50201`。检查路由、运营商链路、远端监听及断开时刻；`socket_send()` 单次发送不满即判失败，可能已有部分字节到达。发送成功后本地队列被移除，但源码未读取逐帧业务确认。 | `src/platform/platform.c:20-108`；`src/common/common.c:614-639` |
 | MQTT 模式 `client_connect error`、`remote mqtt disconnect`、publish 失败或队列不出 | 确认实际编译为 MQTT，核对 `192.168.1.253:1883` 可达、broker 连接回调及 `/tmp/clound_status` 内容：值 2 才使本地 `remote_online` 为真。文件读取失败会保留旧值；`mosquitto_publish()` 成功、QoS 0 和本地序号递增均不是云端入库凭证。源码的连接日志会打印账号密码，收集时应脱敏。 | `src/mosquitto/client_mosquitto.c:119-173`、`:349-563` |
 | 历史数据增长、补传缺失或 DB 行数下降却平台未收到 | 用只读 SQL 记录当前模式的行数、最小/最大 `id`，并对照签名/发送时间线。国六最多 61488 行、非四最多 11088 行，满额删约 10%；补传读取后也在签名和远端确认前删除。行数下降只能证明本地删除，不能证明补传成功；`select ... limit N` 没有显式排序。 | `src/db/db.c:27-46`、`:172-245`；`src/gb6/gb6.c:1089-1223`；`src/fei_4/fei4.c:808-877` |
 

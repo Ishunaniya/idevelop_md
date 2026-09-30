@@ -2,6 +2,96 @@
 
 **阅读入口：**[主逻辑流程图](#3-主逻辑流程图)｜[单点 RTU 处理流程图](#7-单点-rtu-处理流程)｜[设备排障流程图](#12-设备故障排查手册)｜[配置语义](#5-配置加载的精确语义)｜[已核实的实现风险](#10-可核实的异常路径与实现风险)。流程图使用普通文本代码块，打开 Markdown 即可见，不依赖 Mermaid 渲染。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/modbus_app/` 在 `dcd34abb` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 分析范围与证据](#analysis-1)
+- [2. 一句话定位](#analysis-2)
+- [3. 主逻辑流程图](#analysis-3)
+- [4. 模块与构建关系](#analysis-4)
+- [5. 配置加载的精确语义](#analysis-5)
+- [6. 通道与随附点表](#analysis-6)
+- [7. 单点 RTU 处理流程](#analysis-7)
+- [8. 时间、缓存和发布格式](#analysis-8)
+- [9. 串口、IPC 和工具细节](#analysis-9)
+- [10. 可核实的异常路径与实现风险](#analysis-10)
+- [11. 验证记录与边界](#analysis-11)
+- [12. 设备故障排查手册](#analysis-12)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`modbus_app` 按 JSON 点表轮询串口 Modbus RTU 从站，校验响应后将原始采集帧发布到本机 nanomsg 端口；业务量换算由下游决定。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/modbus_app/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 启动、构建与安装 |
+| `src/modbus_forward.c`、`src/modbus_forward.h` | 配置、通道、轮询、RTU 和发布主链路 |
+| `src/serial.c`、`src/serial.h` | 串口打开和参数配置 |
+| `src/ipc_pubsub.c`、`src/ipc_pubsub.h` | nanomsg PUB/SUB 封装；主链路使用 PUB |
+| `src/sany_list.c`、`src/sany_list.h` | 点表顺序容器 |
+| `etc/` | 安装输入的 JSON 点表 |
+| `tool/` | 转换与订阅调试工具，不属于主程序入口 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+/usr/local/etc/modbus_app_config.json → 通道与点表
+                                      ↓
+串口 RTU 请求 → 单次响应读取 / 校验 → 原始采集帧
+                                      ↓
+                         对应 nanomsg PUB 端口
+```
+
+通道线程是否工作取决于配置及串口/PUB 初始化；程序发布原始采集帧，不在本项目内完成业务量换算。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 配置与通道 | `src/modbus_forward.c` | 最多检查 com0 至 com3；计入通道数与启用线程数不同 | [进入章节](#analysis-5) |
+| RTU 轮询 | `src/modbus_forward.c`、`src/serial.c` | 按点表发送请求并校验单次读取的响应 | [进入章节](#analysis-7) |
+| 本机发布 | `src/ipc_pubsub.c` | 校验后的原始帧由对应 PUB 地址发出 | [进入章节](#analysis-8) |
+| 点表与工具 | `etc/`、`tool/` | 随附点表是默认安装输入，转换工具不参与进程运行 | [进入章节](#analysis-6) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+配置 / 点表 → 可用串口通道 → 按点表构造 RTU 请求
+单次响应读取与校验 → 原始采集帧 → 对应 nanomsg PUB
+~~~
+
+先看[主逻辑图](#analysis-3)，再看[配置语义](#analysis-5)、[单点 RTU 处理](#analysis-7)和[发布格式](#analysis-8)。本程序发布原始采集帧，业务数值换算需看下游。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 分析范围与证据
 
 - 源码根目录：`/home/tronlong/lyp/code/rtms_sdk/apps/modbus_app`；所属 Git 仓库根目录为 `/home/tronlong/lyp/code/rtms_sdk`。
@@ -9,9 +99,13 @@
 - 覆盖主程序、所有 `src/` 下的 C 源码与头文件、CMake 构建、默认 JSON 配置，以及 `tool/` 中的脚本和调试工具。点表数据来自对实际 JSON 的解析，不依据文件名推测设备含义。
 - 本文区分“源码确定的行为”和“需要设备验证的效果”。未在目标 RK3568 设备上运行程序、连接串口从站或测量网络行为。对 `cfmakeraw()` 的本机行为另做了最小 C 探针，结论限定在本机 libc。
 
+<a id="analysis-2"></a>
+
 ## 2. 一句话定位
 
 `modbus_app` 是 **Modbus RTU 主站采集器和 nanomsg 发布器**：它从固定 JSON 文件读取串口与点表配置，为最多四个串口各开一个线程，依次发送读请求，把通过校验的响应原始数据装入 `modbus_frame_t`，通过对应的 TCP PUB 端口发送。它不提供 Modbus TCP 服务，也不在本项目内解释电压、温度等业务量的比例系数和单位。依据：`main.c:13-32`、`src/modbus_forward.c:279-375`、`src/modbus_forward.h:37-46`。
+
+<a id="analysis-3"></a>
 
 ## 3. 主逻辑流程图
 
@@ -51,6 +145,8 @@
 
 流程图简化了响应校验条件；站号与功能码比较的实际布尔条件见第 10 节。图只展示源码中的主控制路径，线程创建失败、`nn_send` 失败等边界另见下文。依据：`main.c:13-32`、`src/modbus_forward.c:279-375,458-620`。
 
+<a id="analysis-4"></a>
+
 ## 4. 模块与构建关系
 
 | 文件 | 实际职责 |
@@ -66,6 +162,8 @@
 | `tool/modbus_tool.c`、`build.sh`、现成 ARM 可执行文件 | 独立 nanomsg SUB 调试工具及其编译入口，不参与主程序的 CMake 目标。 |
 
 `apps/CMakeLists.txt` 用 `add_subdirectory(modbus_app)` 纳入 SDK；本目录 `CMakeLists.txt` 定义版本 1.5，要求 CMake 3.11，查找 nanomsg 1.2 和 cjson 1.7.15，把 `src/*.c` 递归加入 `modbus_app`，链接 nanomsg、cjson、pthread、stdc++。交叉编译分支要求环境变量 `QL_MODULE_PLATFORM=RK3568_UBUNTU`；其他值会在该分支触发 CMake 错误。目标安装路径为 `usr/local/bin`，配置安装到 `usr/local/etc`，同时安装两库的指定共享对象。构建前命令会在构建目录生成 `modbus_app_startup_level.json`，值为 1；本 CMake 文件未将该 JSON 列为安装文件。依据：`CMakeLists.txt:1-49`、SDK `apps/CMakeLists.txt:20`、SDK `generate_img.sh:115-123`。
+
+<a id="analysis-5"></a>
 
 ## 5. 配置加载的精确语义
 
@@ -95,6 +193,8 @@
 - 启用通道缺少任一串口参数键会被禁用；但整个 `serial_port` 对象缺失时，`modbus_load_serial_config` 仍返回成功。点表没有可装入的点会使该通道禁用。源码主要检查字段存在性，没有完整检查 JSON 类型和值域。依据：`src/modbus_forward.c:377-455,527-540`。
 - `com_count` 不是实际可用串口数量；它只在对应代码路径末尾增加。全是显式禁用或无效启用通道时，通常为 0，启动失败。依据：`src/modbus_forward.c:518-555`。
 
+<a id="analysis-6"></a>
+
 ## 6. 通道与随附点表
 
 | 通道 | 串口 | PUB 绑定地址 | 默认配置 | 点数 | 站号与功能码 |
@@ -113,6 +213,8 @@
 | `com2` | `temp1:2/3/0/1`、`humidity1:2/3/1/1`、`temp2:3/3/0/1`、`humidity2:3/3/1/1`、`noise:1/3/0/1`、`smoke:49/3/3/1`。 |
 
 以上计数和数据由 `jq` 读取随附 JSON 核对；点名只是配置字符串，不能单独证明传感器型号、数据类型、比例系数或单位。设备映射来自 `src/modbus_forward.h:27-35`；点表来自 `etc/modbus_app_config.json`。
+
+<a id="analysis-7"></a>
 
 ## 7. 单点 RTU 处理流程
 
@@ -148,6 +250,8 @@ tcflush → 循环 write → tcdrain → 等待 5 ms
 
 站号为 0 时，`try_slave_id` 在 1～15 间轮换，收到通过代码校验的响应后把当前尝试值写回该点 `slave_id`，以后不再探测。注释“1～16”与取模 16 后跳过 0 的代码不一致；实际尝试范围为 1～15。依据：`src/modbus_forward.c:78-96,155-159,179-196,255-259`。
 
+<a id="analysis-8"></a>
+
 ## 8. 时间、缓存和发布格式
 
 - 每个启用通道各有串口 fd、点链表、计数器、发布缓存和 nanomsg PUB 端点；线程间没有在此模块共享点表或发布缓存。线程是 `pthread_detach` 的，主线程不 `join`。依据：`src/modbus_forward.h:48-85`、`src/modbus_forward.c:602-619`。
@@ -158,6 +262,8 @@ tcflush → 循环 write → tcdrain → 等待 5 ms
 
 `modbus_frame_t` 在当前主机头文件布局的最小探针中为 **16 字节**；字段按顺序为 `uint8_t slave_id`、`uint8_t function_code`、`uint16_t read_address`、`uint16_t read_quantity`、`uint8_t try_slave_id`、`uint8_t reserve[1]`、`uint8_t data[8]`。发送时是一个或多个结构体直接拼接的进程内字节，不含 JSON、长度头、时间戳、点名称或单位；多字节字段取决于目标 ABI/字节序，接收方必须按实际目标构建确认。依据：`src/modbus_forward.h:37-46`、`src/modbus_forward.c:160-164,260-264,364-367`。
 
+<a id="analysis-9"></a>
+
 ## 9. 串口、IPC 和工具细节
 
 `setup_serial` 通过 termios 设置波特率、数据位、停止位、校验和 `VTIME/VMIN`。代码列出的波特率是 2400、4800、9600、19200、38400、57600、115200、230400；其他值回退为 9600。读取模式设 `VMIN=0`，`VTIME` 以 100 ms 为单位。每次请求前会 `tcflush(TCIOFLUSH)`，写完后调用 `tcdrain`。依据：`src/serial.c:22-169`、`src/modbus_forward.c:88-116,188-216`。
@@ -167,6 +273,8 @@ tcflush → 循环 write → tcdrain → 等待 5 ms
 主程序用 `init_pubsub_endpoint(true,url,false,NULL)` 创建 `NN_PUB` 并绑定 `tcp://0.0.0.0:端口`；`ipc_pubsub.c` 的 SUB 接口是通用封装，在主程序路径未使用。调试工具 `modbus_tool` 则创建 4 个 `NN_SUB`，订阅全部消息，通过 libev 监听可读 fd，`recv debug` 时逐帧打印字段。工具源码的帧结构用 2 字节 `reserve` 覆盖主程序的 `try_slave_id+reserve[1]` 位置，字段布局在这些字节之后一致；工具不会打印名称、单位或换算值。依据：`src/ipc_pubsub.c:78-154`、`src/modbus_forward.c:326-334`、`tool/modbus_tool.c:11-49,70-112,114-204`。
 
 `tool/build.sh` 调用 `aarch64-linux-gnu-gcc`，从相对的 SDK 构建目录取头文件和库，链接 libev、nanomsg；仓库内已有的 `tool/modbus_tool` 是 AArch64 ELF，`tool/modbus_xlsx2json.exe` 是 Windows x86-64 GUI 文件。Python 转换器使用 Tkinter 选择 xlsx、openpyxl 读取活动工作表，以 `port` 列分组，输出到执行时当前工作目录的 `modbus_app_config.json`；运行需要相应的 Python 包和图形环境。依据：`tool/build.sh`、`tool/modbus_xlsx2json.py:1-66`、文件格式检查。
+
+<a id="analysis-10"></a>
 
 ## 10. 可核实的异常路径与实现风险
 
@@ -184,11 +292,15 @@ tcflush → 循环 write → tcdrain → 等待 5 ms
 | 线程创建与 detach 返回值未检查 | `src/modbus_forward.c:614-617` | `modbus_forward_start` 可在个别线程未成功创建时仍返回 0；实际是否触发需运行验证。 |
 | 调试工具的 `usage` 标签在正常调用返回后也会执行 | `tool/modbus_tool.c:207-232` | `modbus_recv` 返回时会继续打印用法；这不是主程序采集路径。 |
 
+<a id="analysis-11"></a>
+
 ## 11. 验证记录与边界
 
 已完成的静态核对：逐一读取本目录 C 源码、头文件、CMake、Python 转换器和默认 JSON；用 `jq` 核对默认三个通道的点数、站号与功能码；用 `file` 检查现成工具的二进制平台；用最小 C 程序在本机检查 `sizeof(modbus_frame_t)=16` 和 `cfmakeraw` 对 `CS7/PARENB` 的影响。文档没有改动源码，也没有在目标设备上运行采集服务。
 
 尚不能仅由这些证据确定的事项：真实串口和从站是否连通、实际波特率及校验位是否匹配、设备寄存器数值的单位/比例/有符号解释、订阅方使用何种 ABI 解帧、程序在目标 libc 与驱动上的超时和分段接收表现、`0.0.0.0` 绑定在实际网络环境中的可达性。要确认这些，需要目标固件、设备端日志和串口/订阅端实测。
+
+<a id="analysis-12"></a>
 
 ## 12. 设备故障排查手册
 

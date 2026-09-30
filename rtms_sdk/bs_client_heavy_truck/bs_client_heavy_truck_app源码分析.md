@@ -2,6 +2,94 @@
 
 > 分析对象：`/home/tronlong/lyp/code/rtms_sdk/apps/bs_client_heavy_truck`。核对时仓库分支 `develop/rtms_sdk_v1.3_20240408`，提交 `bc60961e`。本文只描述此版本可从源码确认的行为；涉及站端、整车和目标设备的实际效果，需要联调验证。行号均指本次检出的源码。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/bs_client_heavy_truck/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 范围与结论](#analysis-1)
+- [2. 总体逻辑流程图](#analysis-2)
+- [3. 启动、配置和运行前提](#analysis-3)
+- [4. 站端 TCP 与协议状态机](#analysis-4)
+- [5. 换电状态与锁止控制](#analysis-5)
+- [6. CAN、VIN、属性与故障](#analysis-6)
+- [7. 本机消息与周期命令](#analysis-7)
+- [8. 构建、条件编译与证据边界](#analysis-8)
+- [9. 已确认的代码边界与核查点](#analysis-9)
+- [10. 源码检索入口](#analysis-10)
+- [11. 设备故障排查手册](#analysis-11)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+重卡换电 `bs_client` 汇集 CAN、MCU、DI 与站端 TCP 状态，向本机服务发送控制命令并按反馈答复换电站；源码还含自卸车分支。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/bs_client_heavy_truck/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 启动、周期任务与独立构建 |
+| `src/app_mng/` | 配置与跨线程共享状态 |
+| `src/batt_stand_client/` | 站端 TCP、协议打包解析 |
+| `src/can_server/` | 车型 CAN 解析与帧发送 |
+| `src/app_server/`、`src/cmd/` | GPS/MCU/DI 和本机控制命令 |
+| `src/fault/`、`src/common/`、`src/list/` | 故障、配置和队列辅助 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+本机 CAN / MCU / DI → app_mng 共享状态
+                              ├→ batt_stand_client ↔ 换电站 TCP
+                              └→ cmd / can_server → 本机控制接口
+车型与平台宏决定部分解析及 DI/DO 映射
+```
+
+该目录未纳入标注提交的顶层 apps/CMakeLists.txt；下述流程以独立目标构建并部署为前提。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| 启动与共享状态 | `main.c`、`src/app_mng/` | 车型、平台宏和配置共同决定实际分支 | [进入章节](#analysis-3) |
+| 站端链路 | `src/batt_stand_client/` | 连接、鉴权、心跳、收发与分帧风险 | [进入章节](#analysis-4) |
+| 锁止控制 | `src/batt_stand_client/`、`src/cmd/` | 站端状态与本机控制/反馈需分段核对 | [进入章节](#analysis-5) |
+| 车辆与故障 | `src/can_server/`、`src/fault/` | 车型 CAN、VIN 和故障路径影响上报内容 | [进入章节](#analysis-6) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+本机 CAN / MCU / DI → app_mng 共享状态
+共享状态 ↔ 站端 TCP 连接 / 报文 / 换电状态
+站端 0x02 / 0x04 状态 → 本机控制命令 → 锁销反馈或超时 → 站端结果应答
+~~~
+
+[总体逻辑图](#analysis-2)给出参与线程；[站端协议](#analysis-4)、[锁止控制](#analysis-5)、[车辆数据](#analysis-6)分别展开。此路径以该目标单独构建并部署为前提；TCP 收包不等于本机动作完成。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 范围与结论
 
 本目录约 7,600 行 C/C++ 与构建代码，主程序名为 `bs_client`。它把换电站 TCP 协议、本机 CAN 数据、本机 MCU/GPS/DI 状态及控制命令连接起来；全局 `app_mng_t` 和 `bcc_ctrl_t` 是跨线程共享状态。目录名虽然是重卡，代码也处理 `dump_truck` 和 `dump_truck_newc`。顶层 `apps/CMakeLists.txt` 当前没有纳入此目录，因此下文的“运行流程”是该目标成功单独构建并部署后的源码流程，不代表现有顶层构建会启动它。[依据：`CMakeLists.txt:1-82`、`main.c:276-334`、`src/app_mng/app_mng.h:11-21`、`apps/CMakeLists.txt`]
@@ -17,6 +105,8 @@
 | CAN 输入和输出 | `src/can_server/can_server.c`、`can_frame_pack.c` | CAN 帧订阅、按车型解析、VIN 获取、发送 T-Box 状态和故障帧。 |
 | 本机状态与命令 | `src/app_server/`、`src/cmd/` | GPS 订阅、MCU/DI 请求、向命令服务发布换电及 DO 命令。 |
 | 故障和基础组件 | `src/fault/`、`src/common/`、`src/log/`、`src/net_utils/`、`src/skt_res/`、`src/list/`、`src/iniparser/` | 故障判定、配置/位操作、日志、网络、队列和 INI 解析。`src/aes128/` 有自带 AES 实现，但当前鉴权调用 OpenSSL AES 接口。 |
+
+<a id="analysis-2"></a>
 
 ## 2. 总体逻辑流程图
 
@@ -65,6 +155,8 @@ flowchart TD
 
 `main()` 创建四个 `pthread` 并立即 `detach`；没有检查 `pthread_create` 返回值。主线程自身执行 `start_timer_task()`，持续 `usleep(500000)`。`SIGINT` 直接退出，`SIGPIPE` 被忽略；`SIGUSR1`/`SIGUSR2` 直接改共享换电状态。[依据：`main.c:44-70,276-334`]
 
+<a id="analysis-3"></a>
+
 ## 3. 启动、配置和运行前提
 
 1. `is_instance_existing(argv[0])` 以传入的程序名拼 `/tmp/<argv[0]>.pid`，通过 `flock(LOCK_EX | LOCK_NB)` 判重。若启动参数是带斜线的路径，生成的 pid 路径也含斜线；源码没有规范化 basename，也没有显式关闭该 fd。[`src/common/common.c:255-280`]
@@ -86,6 +178,8 @@ flowchart TD
 | `26002`、`26008` | nanomsg PUB 分别向本机 CAN 发送端、命令服务发送数据。 |
 
 以上环回地址由本机其他服务绑定；本目录只调用 `nn_connect`。设备侧进程名、服务自启动方式和真实网桥拓扑不在本目录定义。[`src/can_server/can_server.c:94-112,886-926`、`src/app_server/{gps,mcu,di}.c`、`src/cmd/cmd.c:21-42`]
+
+<a id="analysis-4"></a>
 
 ## 4. 站端 TCP 与协议状态机
 
@@ -179,6 +273,8 @@ flowchart TD
 
 接收端当前不按外层长度先切完整 TCP 帧：它直接对一次 `read()` 的全部字节做 BCC 检查，然后才尝试 `NEXT_PACKET`；因此 TCP 分包或多帧合包的可靠性不能从代码保证。[`batt_message_parse.c:90-453`]
 
+<a id="analysis-5"></a>
+
 ## 5. 换电状态与锁止控制
 
 纯文本版：
@@ -226,6 +322,8 @@ flowchart TD
 
 主循环还实现了两个保护条件：存在换电唤醒请求**或**锁销反馈为解锁时，如 VCU 处于代码值 `0x02`、手刹为 `0`、站端断线，则将换电状态设成 `0x04` 并清唤醒；唤醒请求仍在且站端断开超过约 1800 秒时也清唤醒。重卡的 DO 在唤醒时设 1、否则设 0。`send_cmd_ctrl_period()` 在这段保护逻辑之前调用，所以保护逻辑对命令发布的影响最早发生在下一轮。这里是代码赋值逻辑，物理锁止动作依赖本机命令接收方和 VCU。[`main.c:219-272`]
 
+<a id="analysis-6"></a>
+
 ## 6. CAN、VIN、属性与故障
 
 CAN 接收线程将 nanomsg 收到的字节按 `sizeof(can_frame_t)` 分块，按帧 ID 和车型更新 BCC 状态。主要映射如下；同一车型可能还有其他 ID，完整位定义应以 `can_frame_parse()` 为准。[`src/can_server/can_server.c:488-884`]
@@ -245,6 +343,8 @@ CAN 接收线程将 nanomsg 收到的字节按 `sizeof(can_frame_t)` 分块，�
 主循环约每 500 毫秒累计 `canIdleTimeout`、`bmsIdleTimeout`，达到 10 次时清除部分车辆或电池字段并把对应状态置 0；这相当于约 5 秒量级，实际值受循环调度影响。清理函数特意保留手刹、锁销、连接器、换电状态和里程等字段，不是把整份状态清零。[`main.c:185-201`、`can_server.c:31-92`]
 
 发送侧在本机 `26002` 发布 CAN 故障帧。`can_tbox_fault_send()` 仅在故障等级非零时调用故障打包；一个故障发单帧，多个故障走 TP 多帧。主循环仅在重卡分支调用它，且在 `fault_handle()` **之前**调用，因此本轮新判定的故障最早在下一轮被发送。`can_cmd_18FFA0FC_pack()` 虽定义了滚动计数、锁销、连接器、唤醒、失败状态、换电状态、VCU 控制的打包方式，但本目录没有发现调用点，不能把它写成当前发送流程。`can_tbox_id_send()` 同样有定义但未被主流程调用。`fault_handle()` 仅在开机 60 秒后、约每 10 秒检查锁销中间态和连接器未连接两项，分别置 `LOCK_UNLOCK_FAULT`、`UNCONN_FAULT`。源码中的 `gps_fault` 等局部变量没有进入当前判定。[`can_frame_pack.c:102-145`、`fault_handle.c:17-46,77-217`、`can_server.c:114-205`、`main.c:264-269`]
+
+<a id="analysis-7"></a>
 
 ## 7. 本机消息与周期命令
 
@@ -267,6 +367,8 @@ MCU 请求体含 `status.io:["mcu"]`，DI 请求体含 `status.io:["di"]`；响�
 
 [依据：`src/common/common.c:76-123,255-401`、`src/list/sany_list.c:17-92`、`src/net_utils/net_utils.c:21-50`、`src/skt_res/skt_res.c:61-96`、`src/log/log.cpp:24-29,170-239,420-520`、`batt_message_pack.c:320-382`]
 
+<a id="analysis-8"></a>
+
 ## 8. 构建、条件编译与证据边界
 
 - `CMakeLists.txt` 定义 `bs_client` 2.1、C99，依赖 nanomsg、OpenSSL、tbox-common、cJSON、appmng，以及 cn-cbor、pthread、stdc++ 等；安装程序到安装前缀的 `opt/`。交叉编译选择 `EC200A`、`EG25G`、`MCIMX6Y2CVM08AB`、`AG35GL`。这只是 CMake 中列出的分支，不能推断每个平台当前都能完成链接或跑通设备协议。
@@ -274,6 +376,8 @@ MCU 请求体含 `status.io:["mcu"]`，DI 请求体含 `status.io:["di"]`；响�
 - `EC200A_ENABLE` 单独决定 `get_iccid()` 是真实 SIM API 路径还是固定测试字符串；它与 CMake 里设置的 `QL_MODULE_PLATFORM_EC200A` 名称不同，需检查构建时是否另有定义。
 - `main.c` 的 `cpactive_task()`、`check_batt_exchange_stat()`，`can_server.c` 的 `can_tbox_id_send()`，以及 `can_frame_pack.c` 的多种打包函数在本目录主调用链没有调用点；这些实现不能当作当前设备流程。`batt_stand_send_task()` 中主动属性上报调用也被注释。
 - 本目录没有专用测试目标或站端模拟器。本分析是静态源码审查，没有以实车、站端、CAN 总线或目标设备日志验证。外部协议文档、第三方库和其他进程不在本次分析范围内；“物理锁止成功”“鉴权安全性满足要求”等结论不能从本目录单独得出。
+
+<a id="analysis-9"></a>
 
 ## 9. 已确认的代码边界与核查点
 
@@ -295,9 +399,13 @@ MCU 请求体含 `status.io:["mcu"]`，DI 请求体含 `status.io:["di"]`；响�
 | `common.c:283-345`、`log.cpp:420-455` | 每次配置读取会创建 INI 字典而未释放；日志超限后按当前秒重建同名文件并以 `w+` 打开。 | 长运行内存增长和同秒日志覆盖需核查；可用泄漏检测与快速写日志场景验证。 |
 | `can_server.c:775-795` | 新 C 自卸车累计充/放电组装时，先写最高字节又用赋值覆盖为下一字节。 | 四字节容量最高字节丢失；应以总线样本核对。 |
 
+<a id="analysis-10"></a>
+
 ## 10. 源码检索入口
 
 要继续追某条链路，可从 `main.c` 的 `main()` 与 `start_timer_task()` 入手；站端收发看 `batt_stand_client.c` 的 `batt_stand_client()`、`batt_stand_send_task()`；站端命令看 `batt_message_parse()`；CAN 看 `can_frame_parse()`；周期命令看 `send_cmd_ctrl_period()`。上面每节给出了本次核对的文件与行号，分支或提交变化后应重新定位。
+
+<a id="analysis-11"></a>
 
 ## 11. 设备故障排查手册
 

@@ -2,11 +2,101 @@
 
 **流程图导航：**[启动流程](#32-启动流程图) · [页面请求流程](#41-页面请求流程图) · [导入流程](#51-导入流程图) · [导出流程](#53-导出流程图)。每节先嵌入 PNG 图片，普通 Markdown 预览器即可显示；后附 Mermaid 源码供修改。
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/webserver/` 在 `dcd34abb` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 分析范围与结论边界](#analysis-1)
+- [2. 系统组成和职责](#analysis-2)
+- [3. 构建、安装与运行入口](#analysis-3)
+- [4. HTTP 路由与页面流程](#analysis-4)
+- [5. action 清单与文件去向](#analysis-5)
+- [6. 页面与代码中的已确认限制](#analysis-6)
+- [7. 设备故障排查：从现象定位到代码](#analysis-7)
+- [8. 核对依据与验证状态](#analysis-8)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`webserver` 基于 GoAhead 提供设备配置页面，处理 Excel 配置导入、固定配置文件导出与重启请求；实际认证效果受安装路由和运行库配置影响。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/webserver/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | GoAhead 初始化、构建和安装 |
+| `src/webserver_init.c` | 临时目录和 action 注册 |
+| `src/action_handle.c`、`src/action_handle.h` | 页面、导入、导出及重启处理 |
+| `src/auth_pam.c` | 认证扩展函数；效果受路由与 GoAhead 配置制约 |
+| `www/route_auth.txt`、`www/route_noauth.txt` | 安装时二选一的路由配置 |
+| `www/template/`、`www/js/`、`www/scripts/` | 页面模板、浏览器脚本与 Excel 转换 |
+| `3rdparty/goahead/` | SDK 随附的第三方服务器源码包，位于应用目录外 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+浏览器 → GoAhead 路由 / 认证 → webserver_init 注册的 action
+                                     ↓
+             action_handle → 模板 / Excel 转换 / 配置文件
+                                     ↓
+                              HTTP 响应或设备文件
+```
+
+安装的路由受 ENABLE_LOGIN_AUTH 影响；设备实际链接的 GoAhead 构建、认证和文件权限仍需现场核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| HTTP 入口 | `main.c`、`src/webserver_init.c` | 加载文档目录和路由，监听后注册 action | [进入章节](#analysis-3) |
+| 页面与路由 | `www/`、`src/webserver_init.c` | URL、前端请求和注册函数三者需对应 | [进入章节](#analysis-4) |
+| 导入与导出 | `src/action_handle.c`、`www/scripts/` | 上传、转换、部署与下载为不同阶段 | [进入章节](#analysis-5) |
+| 认证边界 | `src/auth_pam.c`、`www/route_auth.txt` | 认证效果受编译配置、路由和实际库共同约束 | [进入章节](#analysis-6) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+启动 → GoAhead 加载文档目录 / 路由 → 监听并注册 action
+浏览器请求 → 路由 / 认证 → 对应 action
+  ├→ 导入：上传文件 → 转换脚本 → 配置文件
+  └→ 导出：读取目标文件 → 分块写回 → 浏览器下载
+~~~
+
+图和实现细节分别见[启动](#analysis-3)、[页面请求](#analysis-4)、[导入及导出](#analysis-5)；安装路由的认证模式由构建配置选择，设备上的实际效果还须结合[认证边界](#analysis-6)。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 分析范围与结论边界
 
 - 源码位置：`rtms_sdk/apps/webserver`；核对时 Git 分支为 `rk3568_ubuntu_20241218`，提交为 `dcd34abb`。本文依据该版本中的 `CMakeLists.txt`、`main.c`、`src/`、`www/` 文本源码和配置，以及 SDK 随附的 `3rdparty/goahead/goahead-6.0.4.tar.gz` 中相关源码撰写。
 - `www/bootstrap/`、jQuery、`www/libgo.so`、`www/webserver` 是随目录放置的第三方资源或二进制；本文只说明它们在项目中的引用和安装方式，不把它们的内部实现当作已核实的源码事实。
 - 以下“会执行”“会写入”指代码到达相应分支时的行为。随附 GoAhead 源码可解释路由与认证的实现，但设备实际链接的库、默认监听值、文件权限及服务启动方式还需现场核对；不能仅凭仓库源码断言设备上的实际效果。
+
+<a id="analysis-2"></a>
 
 ## 2. 系统组成和职责
 
@@ -46,6 +136,8 @@
 几个容易混淆的词：`route.txt` 是 URL 到处理方式的规则表；`action` 是按名字注册、由 `/action/<名字>` 分发的 C 回调；“文档目录”是 GoAhead 读取网页资源的根路径；“工作目录”是进程解释 `route.txt`、`auth.txt`、`template/...` 等相对路径时所在目录，两者可能不同。随附 GoAhead `src/action.c` 会按 action 名查注册表，查不到时产生 404；其 `src/auth.c` 在初始化认证时注册内置的 `login/logout` action。
 
 **版本边界：**上面关于 GoAhead 内部的描述已核对 SDK 随附的 `goahead-6.0.4.tar.gz`；设备实际加载的 `libgo.so` 是否由同一配置、同一源码构建，应以设备二进制和部署记录核对。不能把 SDK 源码包的默认宏值直接当作设备上的监听端口或认证配置。
+
+<a id="analysis-3"></a>
 
 ## 3. 构建、安装与运行入口
 
@@ -92,6 +184,8 @@ flowchart TD
 
 `webserver_init` 先尝试建立工作目录的 `tmp/`，再建立 `websGetDocuments()/tmp`；失败返回 -1。随后调用 `websDefineAction` 注册 18 个 action（Modbus 4、IEC 5、显示 5、摄像头 3、重启 1）。已存在目录仅凭 `EEXIST` 视作成功，代码未进一步验证它确实是目录。
 
+<a id="analysis-4"></a>
+
 ## 4. HTTP 路由与页面流程
 
 | 模式 | `/` | `/login.html` | `/home.html` | 配置/重启 action |
@@ -128,6 +222,8 @@ flowchart TD
 ```
 
 该图只展示路由中声明的登录/重定向分支和主页实际请求链。`action/login` 的认证结果由 GoAhead 处理，本目录没有该 action 的 C 实现；图中“成功/失败”对应 `route_auth.txt` 配置的 `200/401` 重定向，**并不证明**当前构建一定能正确完成认证。
+
+<a id="analysis-5"></a>
 
 ## 5. action 清单与文件去向
 
@@ -207,6 +303,8 @@ flowchart TD
 
 `www/js/reboot.js` POST `/action/request_reboot`；`request_reboot` 先发送正文 `success` 并结束响应，然后同步执行 `system("sleep 5; reboot")`（`src/action_handle.c:661-674`）。所以前端看到 200/`success` 只说明 HTTP 处理器已响应，不能证明设备已经成功重启。不要在开发主机上直接调用该入口。
 
+<a id="analysis-6"></a>
+
 ## 6. 页面与代码中的已确认限制
 
 1. **认证结论需要运行时验证。** `ENABLE_LOGIN_AUTH` 只控制安装哪份路由；`ME_GOAHEAD_AUTH`、`auth=form` 和设备上实际链接的 GoAhead 库共同决定登录行为。随附 GoAhead 源码有文件密码校验实现，项目的 `authPamVerify` 函数自身没有密码检查，且未见其在默认认证注册链中被引用。宽泛的 `route uri=/action handler=action` 没有显式 `auth=form`；其实际访问效果应在目标设备上核对，不能仅按具名路由推断所有 action 都受保护。
@@ -216,6 +314,8 @@ flowchart TD
 5. **模板加载存在字符串边界问题。** `load_template` 按文件长度执行 `calloc(1, length)`、`fread(..., length, ...)`，随后用 `%s` 输出；文件读满缓冲区时没有预留结尾的 `\0`，可能越界读取（`src/action_handle.c:41-68`）。这是源码层面的内存安全风险，本文未通过运行测试量化影响。
 6. **资源与入口不一致。** 摄像头加载路由和升级资源的情况见第 5 节；存在文件不等于存在可用 HTTP 功能。
 7. **依赖部署环境。** 目标目录可写、Python 和 `openpyxl` 可用、GoAhead 宏及链接库正确，是功能运行所需条件；本目录源码未证明这些条件在设备上全部成立。
+
+<a id="analysis-7"></a>
 
 ## 7. 设备故障排查：从现象定位到代码
 
@@ -299,6 +399,8 @@ python3 -m json.tool /usr/local/etc/modbus_app_config.json >/dev/null
 `main.c` 支持 `--log <日志文件:级别>`、`--verbose`（设为 `stdout:2`）、`--route`、`--auth`、`--home` 和端点参数。先从现有进程参数或设备启动脚本确认日志去向；如果由 systemd 托管，再按实际服务名读取 `journalctl`。不要在仍有生产进程监听时另起同端口实例，也不要直接把日志改到未授权的目录。
 
 定位后留下一份最小证据：设备软件/二进制版本、进程命令行与工作目录、实际监听端点、安装版路由、请求 URL/方法/状态/响应、相关日志时间点、目标文件的存在与修改时间、Python 版本及转换脚本退出码。把现象归到“未启动/未监听 → 路由或认证 → action/文件路径 → Python 转换 → 目标文件部署 → 下游应用”中的一个阶段，再去修改对应源码或部署配置。
+
+<a id="analysis-8"></a>
 
 ## 8. 核对依据与验证状态
 

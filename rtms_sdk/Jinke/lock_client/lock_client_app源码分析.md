@@ -1,5 +1,94 @@
 # lock_client 源码全面分析
 
+<!-- rtms-analysis-guide:start -->
+
+## 文档目录
+
+本报告对应 `rtms_sdk/apps/lock_client/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+
+- [项目概述](#project-overview)
+- [源码目录总览](#source-overview)
+- [核心架构设计](#core-architecture)
+- [核心模块深度分析](#core-modules)
+- [关键流程与数据流](#key-flows)
+- [1. 分析范围与结论依据](#analysis-1)
+- [2. 项目用途和进程边界](#analysis-2)
+- [3. 启动与初始化](#analysis-3)
+- [4. MQTT 链路和消息生命周期](#analysis-4)
+- [5. JSON 解析与命令映射](#analysis-5)
+- [6. 本机 nanomsg 协议和回复处理](#analysis-6)
+- [7. 队列、时序和状态](#analysis-7)
+- [8. 失败路径和源码可见风险](#analysis-8)
+- [9. 构建、打包与部署约束](#analysis-9)
+- [10. 核对与维护路线](#analysis-10)
+- [11. 设备故障排查：如何定位到本程序](#analysis-11)
+
+**顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
+
+<a id="project-overview"></a>
+
+## 项目概述
+
+`lock_client` 接收 MQTT 锁控指令并经本机 nanomsg 向命令服务下发，同时生成接收和本地发送阶段的回执；锁具动作需下游证据。
+
+<a id="source-overview"></a>
+
+## 源码目录总览
+
+以下路径相对于该提交的 `apps/lock_client/`；“职责”只描述源码中的构建或调用角色。
+
+| 路径 | 职责 |
+| --- | --- |
+| `main.c`、`CMakeLists.txt` | 入口、定时器、线程和构建 |
+| `src/lock_mgr/` | 共享状态、配置与 socket 初始化 |
+| `src/mosquitto/` | MQTT 指令和回执队列 |
+| `src/lock/` | JSON 命令映射、ACK 与业务结果 |
+| `src/cmd/` | 本机 nanomsg 命令帧及回复 |
+| `src/list/`、`src/common/` | FIFO 容器与时间辅助 |
+
+<a id="core-architecture"></a>
+
+## 核心架构设计
+
+```text
+配置的 MQTT Broker → 接收队列 → lock 解析 / 映射
+                           ├→ 接收 ACK / 本地发送结果 → 回执队列 → Broker
+                           └→ cmd / nn_send → 本机命令服务 → 锁具
+本机命令回复 → cmd 本地日志或密码状态；不生成硬件完成的 MQTT 回执
+```
+
+ACK、nn_send 成功、命令服务回复与锁具实际状态是四个不同证据阶段。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
+
+<a id="core-modules"></a>
+
+## 核心模块深度分析
+
+下表给出主链路模块的入口、关键判断和详细分析位置；具体函数、常量与失败路径以所链章节中的源码引用为准。
+
+| 模块 | 源码入口 | 关键判断与输出 | 详细分析 |
+| --- | --- | --- | --- |
+| MQTT 生命周期 | `src/mosquitto/` | 按主题接收指令并异步发布两类回执 | [进入章节](#analysis-4) |
+| JSON 与映射 | `src/lock/` | 字段合法性、锁车/绑定映射与定时处理分别判定 | [进入章节](#analysis-5) |
+| 本机协议 | `src/cmd/` | 标签、帧布局和回复条件须与实际命令服务核对 | [进入章节](#analysis-6) |
+| 队列与风险 | `src/lock_mgr/`、`src/list/` | 内存队列、节奏和失败出队影响可靠性 | [进入章节](#analysis-7) |
+
+<a id="key-flows"></a>
+
+## 关键流程与数据流
+
+~~~text
+MQTT 指令 → 接收队列 / 接收 ACK
+定时回调 → 解析与命令映射 → nanomsg 发送本机命令
+本地发送结果 → 回执队列 → MQTT 回复主题
+本机服务回复 → 本地日志或密码状态；锁具动作需下游证据
+~~~
+
+依次看[整体结构图](#analysis-2)、[MQTT 生命周期](#analysis-4)、[定时处理图](#analysis-5)和[本机协议](#analysis-6)。接收 ACK、命令发送结果和锁具动作不能合并成一次“执行成功”。
+
+<!-- rtms-analysis-guide:end -->
+
+<a id="analysis-1"></a>
+
 ## 1. 分析范围与结论依据
 
 本文分析 `/home/tronlong/lyp/code/rtms_sdk/apps/lock_client/` 的当前检出源码。仓库分支为 `develop/rtms_sdk_v1.3_20240408`，提交为 `bc60961e`，工程版本为 1.1。文中“会”“不会”均指这一份源码可见的执行路径；MQTT broker、本机命令服务和锁具固件不在本目录，无法仅据本目录判定设备动作成功。
@@ -15,6 +104,8 @@
 | 本机帧、PID 订阅、密码请求和锁车发送 | `src/cmd/cmd.h:7-61`、`src/cmd/cmd.c:12-197` |
 | FIFO 行为 | `src/list/cc_slist.c:136-139,181-205,538-550` |
 | 构建与安装 | `CMakeLists.txt:1-62` |
+
+<a id="analysis-2"></a>
 
 ## 2. 项目用途和进程边界
 
@@ -41,6 +132,8 @@
 
 `src/common/common.c` 还定义 `sany_get_tick_count_ms()` 和 `set_clock_time_ms()`，但本应用源码没有调用它们；因此本进程没有通过这些函数执行系统时钟设置。`src/list/cc_common.c` 的字符串比较工具函数以及 `cc_slist.c` 的其他通用 API 也未被本应用业务路径调用。这些是随目录编译的辅助代码，不能直接算作当前锁车流程。参见 `src/common/common.c:52-81`、`src/list/cc_common.c:33-36`、`CMakeLists.txt:37-39`。
 
+<a id="analysis-3"></a>
+
 ## 3. 启动与初始化
 
 1. `is_instance_existing()` 打开或创建 `/tmp/lock_client.pid`，对文件描述符尝试非阻塞排他 `flock`；只有 `flock` 失败且 `errno == EWOULDBLOCK` 时才认定已有实例并退出。文件名虽含 `.pid`，本函数没有写入 PID。`open()` 或其他 `flock` 失败未被视为启动失败。参见 `main.c:20-30,47-50`。
@@ -55,6 +148,8 @@
 ![启动与初始化流程](./流程图/02_启动与初始化.png)
 
 图只表示源码明确检查的退出条件。`pthread_create()`、链表创建等未检查的调用发生异常时，源码没有对应的受控失败分支。
+
+<a id="analysis-4"></a>
 
 ## 4. MQTT 链路和消息生命周期
 
@@ -75,6 +170,8 @@ MQTT 客户端 ID 固定为 `lock_client`，clean session 参数为 `true`，kee
 接收确认示意：`{"header":{"msgId":"example-001","ts":<生成时的毫秒时间>},"body":{"hasError":0,"isAck":true}}`。本地处理回执示意：`{"header":{"msgId":"example-001","ts":<生成时的毫秒时间>},"body":{"hasError":0,"isAck":false,"results":{"id":"","lock":{"code":0}}}}`。这里的 `<...>` 是说明性占位符，不是合法 JSON 字面量。`ts` 调用 `CLOCK_REALTIME` 取得 Unix 毫秒时间；`hasError` 固定为 0；`results.id` 固定为空字符串。参见 `src/lock/lock.c:136-175`、`src/common/common.c:63-72`。
 
 `isAck=true` 只表示回调把确认报文排入本地队列；`isAck=false, code=0` 只表示转换为命令后 `nn_send()` 返回非负值。命令组合无效时用 `code=1`；本机发送失败、JSON 解析失败及密码未到达时当前代码不会生成相应的失败业务回执。命令服务的实际锁车回复没有进入上述业务结果。参见 `src/lock/lock.c:177-214`、`src/cmd/cmd.c:104-111,189-197`。
+
+<a id="analysis-5"></a>
 
 ## 5. JSON 解析与命令映射
 
@@ -98,6 +195,8 @@ MQTT 客户端 ID 固定为 `lock_client`，clean session 参数为 `true`，kee
 
 这张图只覆盖 `ev_timeout_cb()` 的可见分支。消息回调里的接收确认在它之前独立入队；缺失 `msgId`、非终止字符串等输入可触发未定义行为，不能保证图中异常分支都能平稳执行。参见 `src/lock/lock.c:177-214`。
 
+<a id="analysis-6"></a>
+
 ## 6. 本机 nanomsg 协议和回复处理
 
 本进程用 `NN_PUB` 连接 `127.0.0.1:26008` 发送请求，用 `NN_SUB` 连接 `127.0.0.1:16008` 接收回复。SUB 以 `getpid()` 的前 4 字节作为订阅前缀；这要求服务端发布的回复从相同 PID 字节开始。连接地址均固定为本机回环地址，不读取 MQTT 的 `mgw:local_ip`。参见 `src/cmd/cmd.c:14-86`。
@@ -112,6 +211,8 @@ MQTT 客户端 ID 固定为 `lock_client`，clean session 参数为 `true`，kee
 
 同仓库 `apps/cloud_client/src/nn_sock/nn_sock.h`、`apps/version_client/src/nn_sock/nn_sock.h` 对 200/201/202/203 的标签编号与本应用一致；`apps/io_mng/src/cmd/cmd.h` 却把 `CMD_TAG_LOCK` 定义为 200。在所查 `io_mng` 源码中未见标签 202 的专门锁控执行分支。`apps/io_mng/src/io_mng/io_mng.h` 虽有 `16008/26008` 地址，端口相同并不能证明当前设备上的服务实现与 `lock_client` 匹配。设备固件/服务端的确切锁车处理、密码生成和实际锁具状态需要查看运行中的服务及下游协议。以上是代码间的兼容性检查结果，不是对设备功能的断言。
 
+<a id="analysis-7"></a>
+
 ## 7. 队列、时序和状态
 
 `cc_slist_add()` 实际追加到尾部，`cc_slist_remove_first()` 从头部移除，因此两条队列各自是 FIFO。MQTT 消息回调持有 `recv_list_mutex` 添加待处理消息；libev 定时器持同一锁移除并处理。回执由 MQTT 回调或 libev 定时器在 `send_list_mutex` 下添加；MQTT 线程在同一锁下移除并发布。源码没有持久化、容量上限或队列长度监控。参见 `src/list/cc_slist.c:136-139,181-205,538-550`、`src/mosquitto/client_mosquitto.c:70-82,135-147`、`src/lock/lock.c:187-214`。
@@ -125,6 +226,8 @@ MQTT 客户端 ID 固定为 `lock_client`，clean session 参数为 `true`，kee
 | Mosquitto keepalive | 30 秒 | 这是 MQTT 连接参数，不是 CPActive 超时。 |
 
 接收确认通常先入队，业务结果在后续定时器中入队；但实际发布时间还受已有队列、网络状态和线程调度影响。QoS 1 的至少一次交付可能造成重复指令；本程序没有按 `msgId` 去重，业务结果也没有等平台确认。参见 `src/mosquitto/client_mosquitto.c:57-82,133-150`。
+
+<a id="analysis-8"></a>
 
 ## 8. 失败路径和源码可见风险
 
@@ -147,11 +250,15 @@ MQTT 客户端 ID 固定为 `lock_client`，clean session 参数为 `true`，kee
 
 `lock_mgr_t` 把两条队列、互斥锁、两个 nanomsg socket、事件监听器、broker 地址和密码保存在同一个共享对象中。进程长时间断网、密码始终取不到或远端指令速率高于每 5 秒一条的处理速率时，队列可能持续增长；源码没有背压或丢弃策略。参见 `src/lock_mgr/lock_mgr.h:8-26`、`src/lock/lock.c:177-214`。
 
+<a id="analysis-9"></a>
+
 ## 9. 构建、打包与部署约束
 
 本目录 CMake 要求最低版本 3.11、C99，查找 libev 4.33、nanomsg 1.2、OpenSSL 1.1.1、cJSON 1.7.15、appmng 1.0、tbox-common 1.0、Mosquitto 2.0.15。源码列表通过 `src/*/*.c` 递归收集，生成头文件 `global_config.h`。交叉编译分支支持环境变量 `QL_MODULE_PLATFORM=EC200A` 或 `EG25G`，并使用各自 SDK 路径和库；其他值配置时报错。安装规则把 `lock_client` 放到安装前缀 `opt/`，把指定依赖共享库放到 `usr/lib/`。参见 `CMakeLists.txt:1-62`。
 
 当前仓库 `apps/CMakeLists.txt` 未把 `lock_client` 加为子目录，顶层构建不会因本目录存在而自动生成该目标。仓库 `todel/opt/device_apps/` 的若干设备分类和 `todel/file.info` 中存在名为 `lock_client` 的预置产物/路径记录；不能据文件名判断这些 ARM 二进制与当前检出源码、版本宏或目标设备运行的文件一致。构建本目录之前，应核对交叉工具链、依赖查找路径和目标设备所需库；部署时还要确认配置文件及外部本机命令服务。此文档仅作源码分析，未执行交叉编译或设备联调。
+
+<a id="analysis-10"></a>
 
 ## 10. 核对与维护路线
 
@@ -164,6 +271,8 @@ MQTT 客户端 ID 固定为 `lock_client`，clean session 参数为 `true`，kee
 | 查消息延迟或丢失 | 查看两条队列是否积压、5 秒节奏、MQTT 连接状态、发布失败的出队行为，以及 JSON/回复帧长度异常。 |
 
 若要把本文扩展成真正的端到端锁控说明，还需获取设备上实际运行的命令服务源码或协议文档、配置与日志，并用目标设备验证密码回复、标签 202、锁车命令码以及硬件状态反馈。当前仓库内 `io_mng` 的标签差异是必须先澄清的对接点。
+
+<a id="analysis-11"></a>
 
 ## 11. 设备故障排查：如何定位到本程序
 
