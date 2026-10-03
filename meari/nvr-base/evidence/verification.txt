@@ -1,0 +1,14 @@
+Verification date: 2026-10-02
+Scope: second document review, source-backed corrections, original chapter structure preserved.
+Numbered chapters checked: 17 (original 1-15 preserved, supplements 16-17)
+Module sections and explicit navigation anchors: 17
+Document lines: 1768
+Markdown link targets checked (files, line bounds, internal anchors): 137
+Code fences: balanced
+Source hashes rechecked against existing manifest: 335
+Source changes detected: 0
+Document SHA256: 89ec7e90fd59ec48413575792a381dab0a5532fdcf1f2f6d86ca1c13c2172313
+Structural/link/source-snapshot result: PASS
+Semantic review corrections: documented in section 17.5; unresolved coverage in section 17.4.
+Limits: PASS applies only to the structural/link/hash checks listed above.
+No complete API audit, build, runtime, device, disk, upgrade, or power-loss test performed.
