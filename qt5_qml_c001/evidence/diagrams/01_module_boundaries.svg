@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1100" viewBox="0 0 1000 1100">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="none" stroke="#334155" stroke-width="1.5"/></marker></defs>
+<rect width="1000" height="1100" fill="white"/>
+<text x="500" y="50" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="30">模块边界：外部生产者 → 本程序 → 界面</text>
+<text x="50" y="95" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">按三条链路分别核验；共享对象存在不代表数据仍更新。</text>
+<rect x="60" y="125" width="880" height="65" rx="12" fill="#fff3db" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="162" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">外部 YOLO</text>
+<path d="M500,190 L500,215" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="220" width="880" height="65" rx="12" fill="#eef7ed" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="257" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">/detection_boxes</text>
+<path d="M500,285 L500,310" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="315" width="880" height="65" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="352" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">DetectionBoxShmBridge → 检测框 / 告警</text>
+<rect x="60" y="415" width="880" height="65" rx="12" fill="#fff3db" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="452" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">外部 avm_app</text>
+<path d="M500,480 L500,505" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="510" width="880" height="65" rx="12" fill="#eef7ed" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="547" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">/avm_stitched（BGRA）</text>
+<path d="M500,575 L500,600" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="605" width="880" height="65" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="642" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">CalShmItem → 360 拼接图</text>
+<rect x="60" y="705" width="880" height="65" rx="12" fill="#fff3db" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="742" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">外部状态 / 网络 / 告警服务</text>
+<path d="M500,770 L500,795" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="800" width="880" height="65" rx="12" fill="#eef7ed" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="837" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">nanomsg：16011 / 16005 / 38001 / 19226</text>
+<path d="M500,865 L500,890" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="60" y="895" width="880" height="65" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="932" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">NanoStatusBridge / NetStatusPoller / RecordAlarmBridge</text>
+<text x="50" y="1020" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">反向控制：QML → AvmControlBridge → /avm_control → avm_app</text>
+<text x="50" y="1060" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">视频采集 / 编码见图 2；外部算法和服务需另行验证。</text>
+</svg>

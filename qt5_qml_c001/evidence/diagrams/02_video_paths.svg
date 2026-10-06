@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1210" viewBox="0 0 1000 1210">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="none" stroke="#334155" stroke-width="1.5"/></marker></defs>
+<rect width="1000" height="1210" fill="white"/>
+<text x="500" y="50" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="30">前台视频：预览、图像输出、编码与拍照</text>
+<text x="50" y="95" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">本图对应 VideoSurfaceItem；后台通道使用另一套管线。</text>
+<rect x="160" y="120" width="680" height="65" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="157" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">配置设备 /dev/videoN → V4L2 采集</text>
+<path d="M500,185 L500,215" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="160" y="220" width="680" height="65" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="257" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">variant 0：videoconvert → RGB → tee</text>
+<path d="M500,285 L270,325" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M500,285 L730,325" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="50" y="330" width="440" height="100" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="270.0" y="367" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">预览 queue → video-sink</text>
+<text x="270.0" y="402" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">appsink 回调 / Qt 帧缓存</text>
+<rect x="510" y="330" width="440" height="100" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="730.0" y="367" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">编码 queue → encode-tap</text>
+<text x="730.0" y="402" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">独立编码输入回调</text>
+<path d="M270,430 L270,465" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M730,430 L730,465" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="50" y="470" width="440" height="100" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="270.0" y="507" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">QImage / QPainter</text>
+<text x="270.0" y="542" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">QML 预览显示</text>
+<rect x="510" y="470" width="440" height="100" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="730.0" y="507" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">appsrc → NV12</text>
+<text x="730.0" y="542" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">mpph264enc → h264parse</text>
+<path d="M730,570 L730,610" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="510" y="615" width="440" height="100" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="730.0" y="652" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">H.264 appsink → System V</text>
+<text x="730.0" y="687" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">key = 设备 key + 0x100</text>
+<path d="M730,715 L730,750" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="510" y="755" width="440" height="100" rx="12" fill="#fff3db" stroke="#64748b" stroke-width="1.5"/>
+<text x="730.0" y="792" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">外部消费者 / 录像工具</text>
+<text x="730.0" y="827" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">封装 MP4 并写入存储</text>
+<path d="M50,405 L30,405 L30,635 L50,635" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="50" y="585" width="440" height="100" rx="12" fill="#eaf2ff" stroke="#64748b" stroke-width="1.5"/>
+<text x="270.0" y="622" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">工作线程：图像转换为 BGR</text>
+<text x="270.0" y="657" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">写 /picshare&lt;channel&gt;</text>
+<path d="M270,685 L270,730" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="50" y="735" width="440" height="65" rx="12" fill="#fff3db" stroke="#64748b" stroke-width="1.5"/>
+<text x="270.0" y="772" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">外部图像消费者</text>
+<rect x="50" y="875" width="900" height="100" rx="12" fill="#f2edff" stroke="#64748b" stroke-width="1.5"/>
+<text x="500.0" y="912" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">拍照：CameraManager 请求 → 工作线程 BGR → JPEG 文件</text>
+<text x="500.0" y="947" text-anchor="middle" fill="#172033" font-family="Noto Sans CJK SC" font-size="24">accepted 是请求接受，须再验证文件和保存结果</text>
+<text x="50" y="1020" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">variant 1（BGRA）/ 2（MJPEG）可预览，没有上述 encode-tap。</text>
+<text x="50" y="1060" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">拍照直接保存工作线程图像；picshare 有独立写出开关。</text>
+<text x="50" y="1100" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">有预览 ≠ 有编码；有共享帧 ≠ 已录像；有文件 ≠ 可正常解码。</text>
+<text x="50" y="1140" text-anchor="start" fill="#172033" font-family="Noto Sans CJK SC" font-size="23">通道号、设备编号、共享 key 须按现场配置对应。</text>
+</svg>
