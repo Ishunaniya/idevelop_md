@@ -1,0 +1,211 @@
+{
+  "source_root": "/home/tronlong/lyp/meari/lecamera_app",
+  "tree_sha256": "3b3f40da450f397b98e9d2bd7e10ee6934b9cd6ff783c1b7d36ce4e262982c86",
+  "file_count": 1364,
+  "suffix_counts": {
+    "": 18,
+    ".md": 3,
+    ".h": 1097,
+    ".cc": 3,
+    ".c": 199,
+    ".mk": 1,
+    ".liteos": 1,
+    ".3": 1,
+    ".html": 1,
+    ".in": 1,
+    ".txt": 3,
+    ".log": 2,
+    ".cfg": 1,
+    ".env": 1,
+    ".conf": 25,
+    ".sh": 1,
+    ".afi": 3,
+    ".py": 1,
+    ".mak": 1,
+    ".map": 1
+  },
+  "directories": {
+    "apps": {
+      "files": 75,
+      "c": 27,
+      "h": 45
+    },
+    "arch": {
+      "files": 905,
+      "c": 69,
+      "h": 834
+    },
+    "components": {
+      "files": 212,
+      "c": 52,
+      "h": 145
+    },
+    "core": {
+      "files": 12,
+      "c": 6,
+      "h": 6
+    },
+    "device": {
+      "files": 36,
+      "c": 18,
+      "h": 18
+    },
+    "include": {
+      "files": 35,
+      "c": 0,
+      "h": 35
+    },
+    "ppsdk": {
+      "files": 4,
+      "c": 2,
+      "h": 2
+    },
+    "scripts": {
+      "files": 28,
+      "c": 0,
+      "h": 0
+    },
+    "test": {
+      "files": 6,
+      "c": 4,
+      "h": 1
+    },
+    "tools": {
+      "files": 47,
+      "c": 21,
+      "h": 11
+    }
+  },
+  "lexical_counts": {
+    "all": {
+      "strcpy": 253,
+      "sprintf": 219,
+      "strcat": 33,
+      "snprintf": 232,
+      "malloc": 121,
+      "free": 301
+    },
+    "apps": {
+      "strcpy": 91,
+      "sprintf": 55,
+      "strcat": 0,
+      "snprintf": 81,
+      "malloc": 20,
+      "free": 59
+    }
+  },
+  "bundled_a_so_files": [],
+  "make_dry_runs": {
+    "b8": {
+      "command": [
+        "make",
+        "-n",
+        "VCAMERA_PLATFORM_TYPE=b8",
+        "VCAMERA_FACTORY_TYPE=neutral_nkit",
+        "VCAMERA_PLATFORM_ID=b8-neutral_nkit",
+        "VCAMERA_BUILD_DIR=/tmp/lecamera-doc-dry/b8",
+        "VCAMERA_BUILD_BRANCH=meari",
+        "VCAMERA_BUILD_TYPE=release"
+      ],
+      "exit_code": 0,
+      "stderr": [],
+      "stdout_sha256": "27f49b996f9bb9bc6e3f81b4515a7f91127c43201675cb0964b89360ffa7c235"
+    },
+    "b7": {
+      "command": [
+        "make",
+        "-n",
+        "VCAMERA_PLATFORM_TYPE=b7",
+        "VCAMERA_FACTORY_TYPE=neutral_std",
+        "VCAMERA_PLATFORM_ID=b7-neutral_std",
+        "VCAMERA_BUILD_DIR=/tmp/lecamera-doc-dry/b7",
+        "VCAMERA_BUILD_BRANCH=meari",
+        "VCAMERA_BUILD_TYPE=release"
+      ],
+      "exit_code": 2,
+      "stderr": [
+        "Makefile:43: /config.mk: No such file or directory",
+        "make: *** No rule to make target '/config.mk'.  Stop."
+      ],
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "b6": {
+      "command": [
+        "make",
+        "-n",
+        "VCAMERA_PLATFORM_TYPE=b6",
+        "VCAMERA_FACTORY_TYPE=neutral_std",
+        "VCAMERA_PLATFORM_ID=b6-neutral_std",
+        "VCAMERA_BUILD_DIR=/tmp/lecamera-doc-dry/b6",
+        "VCAMERA_BUILD_BRANCH=meari",
+        "VCAMERA_BUILD_TYPE=release"
+      ],
+      "exit_code": 2,
+      "stderr": [
+        "Makefile:43: ../liteos_v5.0.1.3/config.mk: No such file or directory",
+        "make: *** No rule to make target '../liteos_v5.0.1.3/config.mk'.  Stop."
+      ],
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "b9": {
+      "command": [
+        "make",
+        "-n",
+        "VCAMERA_PLATFORM_TYPE=b9",
+        "VCAMERA_FACTORY_TYPE=neutral_std",
+        "VCAMERA_PLATFORM_ID=b9-neutral_std",
+        "VCAMERA_BUILD_DIR=/tmp/lecamera-doc-dry/b9",
+        "VCAMERA_BUILD_BRANCH=meari",
+        "VCAMERA_BUILD_TYPE=release"
+      ],
+      "exit_code": 2,
+      "stderr": [
+        "Makefile:43: ../liteos_gk020/config.mk: No such file or directory",
+        "make: *** No rule to make target '../liteos_gk020/config.mk'.  Stop."
+      ],
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "x86": {
+      "command": [
+        "make",
+        "-n",
+        "VCAMERA_PLATFORM_TYPE=x86",
+        "VCAMERA_FACTORY_TYPE=neutral_std",
+        "VCAMERA_PLATFORM_ID=x86-neutral_std",
+        "VCAMERA_BUILD_DIR=/tmp/lecamera-doc-dry/x86",
+        "VCAMERA_BUILD_BRANCH=meari",
+        "VCAMERA_BUILD_TYPE=release"
+      ],
+      "exit_code": 2,
+      "stderr": [
+        "Makefile:43: arch/x86/config/config.mk: No such file or directory",
+        "make: *** No rule to make target 'arch/x86/config/config.mk'.  Stop."
+      ],
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "mips_compiler_in_path": null,
+  "host_probes": {
+    "user_auth": {
+      "function_sha256": "cb7e157372f767d313b46b8f923cd7dcfcd3b3a3fd4ec45ea2ed626c0cc45706",
+      "compiler": "/usr/bin/cc",
+      "output": [
+        "full=0 wrong=-1 empty=0 prefix=0 empty_password=0"
+      ]
+    },
+    "ssl_ca_init": {
+      "function_sha256": "87ee694faaacfaa910b805880814716027f40d387f33d3c6d88ecb1c984b6ee1",
+      "compiler": "/usr/bin/cc",
+      "output": [
+        "ca_saved=0 verify_host=1 verify_peer=1"
+      ]
+    },
+    "flash_write_failure": {
+      "function_sha256": "08ae24fd64f22fde826fe7d3b8f23c59664b2c6b7bb13328422003d035b937de",
+      "compiler": "/usr/bin/cc",
+      "output": [
+        "success_return=0 all_writes_fail_return=0 write_attempts=10 erase_attempts=10"
+      ]
+    }
+  }
+}
