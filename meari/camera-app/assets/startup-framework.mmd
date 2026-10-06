@@ -1,0 +1,10 @@
+flowchart TD
+    A[main] --> B[遍历 core 表]
+    B --> C[遍历 user 表]
+    C --> D[遍历 after 表]
+    D --> E[主线程 sleep 10000 循环]
+    B -. 创建 detached 线程 .-> F[看门狗、PTZ、SD 等后台任务]
+    C -. 创建 detached 线程 .-> G[网络、RTSP、ONVIF 等后台任务]
+    D -. 创建线程或同步调用 .-> H[云 SDK 与后续任务]
+    F -. 模块内部事件或状态协调 .-> G
+    G -. 联网等待等模块内部条件 .-> H

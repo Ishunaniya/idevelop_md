@@ -1,0 +1,114 @@
+source	line	phase	name	handler	by_thread	stack_kib	priority	preprocessor_context
+ipc_app/meari_ipc/main/ppsapp.c	17	core	debug log redirect	pps_log_redirect_init	0	0	0	#ifdef LOG_PRINTF_REDIRECT
+ipc_app/meari_ipc/main/ppsapp.c	19	core	debug log report	pps_log_report_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	20	core	hardware_init	pps_device_system_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	22	core	singal_register	pps_register_signal_handlers	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	24	core	watchdog_init	pps_watchdog_init	1	16	60	
+ipc_app/meari_ipc/main/ppsapp.c	25	core	startup_log	pps_startup_log_init	1	16	50	
+ipc_app/meari_ipc/main/ppsapp.c	26	core	board_init	pps_device_board_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	28	core	init_user	pps_device_user_info_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	30	core	settings_init	pps_settings_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	32	core	local music	pps_local_music_init	1	256	60	#ifdef CONFIG_LOCAL_MUSIC
+ipc_app/meari_ipc/main/ppsapp.c	34	core	white_light_module	pps_white_light_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	36	core	pet_service_init	pps_pet_service_init	1	128	60	#ifdef CONFIG_PET
+ipc_app/meari_ipc/main/ppsapp.c	38	core	ptz_service_init	pps_ptz_service_init	1	32	60	
+ipc_app/meari_ipc/main/ppsapp.c	39	core	media_start	pps_media_service_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	41	core	hg0_init	pps_hg0_module_init	1	256	60	#ifdef CONFIG_BABY_SERIAL
+ipc_app/meari_ipc/main/ppsapp.c	42	core	record_hg0_conf	pps_record_hg0_conf	1	256	60	#ifdef CONFIG_BABY_SERIAL
+ipc_app/meari_ipc/main/ppsapp.c	43	core	pps_babaymonitor_init	pps_babymonitor_init	1	512	60	#ifdef CONFIG_BABY_SERIAL
+ipc_app/meari_ipc/main/ppsapp.c	46	core	common_bt_pre	pps_common_bt_pre_init	0	0	0	#ifdef CONFIG_COMMON_BT
+ipc_app/meari_ipc/main/ppsapp.c	50	core	logo_state_cb_init	pps_watermark_state_obtain_cb_init	0	0	0	#ifdef CONFIG_REC_OVERLAY
+ipc_app/meari_ipc/main/ppsapp.c	51	core	media_watermark	pps_device_watermark_loop	1	16	50	#ifdef CONFIG_REC_OVERLAY
+ipc_app/meari_ipc/main/ppsapp.c	54	core	reboot_cb_init	pps_reboot_cb_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	56	core	gpio_event_init	pps_gpio_event_init	1	64	80	
+ipc_app/meari_ipc/main/ppsapp.c	57	core	led_ctrl	pps_led_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	61	core	prodtest_init	pps_product_test_init	0	0	0	else of #ifdef CONFIG_NO_FACTORY_MODE
+ipc_app/meari_ipc/main/ppsapp.c	63	core	sdcard	pps_device_sdcard_init	1	256	60	
+ipc_app/meari_ipc/main/ppsapp.c	65	core	av_recorder_init	pps_device_recorder_init	0	0	0	#if defined(CONFIG_SD_RECORD) && !defined(CONFIG_ENABLE_NKIT_ONLY)
+ipc_app/meari_ipc/main/ppsapp.c	66	core	pps_sd_record	pps_device_storage_init	1	512	60	#if defined(CONFIG_SD_RECORD) && !defined(CONFIG_ENABLE_NKIT_ONLY)
+ipc_app/meari_ipc/main/ppsapp.c	69	core	pps_event_report	pps_device_event_report	1	512	60	#ifdef CONFIG_MEARI_IPC_SDK
+ipc_app/meari_ipc/main/ppsapp.c	71	core	shell	shell_server_open	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	76	user	netmng_start	pps_netmng_service_start	1	64	80	
+ipc_app/meari_ipc/main/ppsapp.c	77	user	pps_ap_v2_start	pps_ap_v2_start	1	256	80	
+ipc_app/meari_ipc/main/ppsapp.c	79	user	pps_nkit_sdk_init	pps_nkit_sdk_init	1	256	60	#ifdef CONFIG_ENABLE_NKIT
+ipc_app/meari_ipc/main/ppsapp.c	82	user	pps_nkit_wlan_start	pps_nkit_wlan_start	1	64	60	#ifdef CONFIG_ENABLE_NKIT_ONLY
+ipc_app/meari_ipc/main/ppsapp.c	84	user	siren_start	pps_device_siren_ctrl	1	64	50	
+ipc_app/meari_ipc/main/ppsapp.c	86	user	flight_start	pps_flight_service_init	0	0	0	#ifdef CONFIG_FLIGHT_SUPPORT
+ipc_app/meari_ipc/main/ppsapp.c	88	user	rgb_light	pps_rgb_color_light_service	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	91	user	pps_onvif_init	pps_onvif_cfg_init	1	64	50	#ifdef CONFIG_ONVIF_SERVICE
+ipc_app/meari_ipc/main/ppsapp.c	94	user	onvif_srv	pps_onvif_start1	1	128	60	#ifdef CONFIG_ONVIF_SERVICE_V2
+ipc_app/meari_ipc/main/ppsapp.c	95	user	onvif_dis	pps_onvif_start2	1	128	80	#ifdef CONFIG_ONVIF_SERVICE_V2
+ipc_app/meari_ipc/main/ppsapp.c	98	user	rtsp_server	pps_rtsp_server_init	1	128	80	#ifdef CONFIG_RTSP_SERVICE
+ipc_app/meari_ipc/main/ppsapp.c	101	user	restful_server	restful_webserver_init	1	128	80	#ifdef CONFIG_RESTFUL_SERVER
+ipc_app/meari_ipc/main/ppsapp.c	103	user	discovery	pps_device_discovery_init	1	256	60	
+ipc_app/meari_ipc/main/ppsapp.c	105	user	home_away	pps_device_sleeping_init	0	0	0	#ifdef CONFIG_HOME_AWAY
+ipc_app/meari_ipc/main/ppsapp.c	107	user	temp_humidity	pps_temp_humidity_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	108	user	battery	pps_device_battery_init	0	0	0	
+ipc_app/meari_ipc/main/ppsapp.c	110	user	music	music_player_module_init	0	0	0	#ifdef CONFIG_MUSIC
+ipc_app/meari_ipc/main/ppsapp.c	113	user	pps_charm	pps_charm_service_init	1	16	50	#ifdef CONFIG_DOORBELL
+ipc_app/meari_ipc/main/ppsapp.c	115	user	pps_pcr_rotation	pps_pcr_rotation_init	1	512	50	
+ipc_app/meari_ipc/main/ppsapp.c	121	after	zoom_uart	pps_uart_zoom_start	1	256	80	#ifdef CONFIG_ZOOM
+ipc_app/meari_ipc/main/ppsapp.c	124	after	common_bt	pps_common_bt_init	1	256	80	#ifdef CONFIG_COMMON_BT
+ipc_app/meari_ipc/main/ppsapp.c	127	after	mp_ipc_start	pps_mp_sdk_init	1	64	60	#ifdef CONFIG_MEARI_IPC_SDK
+ipc_app/meari_ipc/main/ppsapp.c	130	after	bitrate_auto_adaptation	pps_check_p2p_usage	1	512	60	#ifdef CONFIG_ENABLE_BITRATE_AUTO_ADAPTATION
+ipc_app/meari_ipc/main/ppsapp.c	133	after	music	music_player_init_music_list	1	64	0	#ifdef CONFIG_MUSIC
+ipc_app/meari_ipc/main/ppsapp.c	135	after	start ok	NULL	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	15	core	debug redirect	pps_tuya_log_redirect_init	0	0	0	#ifdef LOG_PRINTF_REDIRECT
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	17	core	base_init	pps_device_system_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	18	core	tuya_base_init	pps_tuya_signal_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	19	core	watchdog_init	pps_tuya_watchdog_init	1	16	60	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	20	core	startup_log	pps_startup_log_init	1	16	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	21	core	board_init	pps_device_board_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	22	core	tuya_base_init	pps_tuya_dp_config_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	23	core	init_user	pps_device_user_info_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	24	core	ptz_service_init	pps_ptz_service_init	1	32	60	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	26	core	media_start	pps_tuya_media_init	0	0	0	#ifdef CONFIG_MEDIA_SUPPORT
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	30	core	media_watermark	pps_device_watermark_loop	1	16	50	#ifdef CONFIG_REC_OVERLAY
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	34	core	pet_service_init	pps_tuya_pet_service_init	1	128	60	#ifdef CONFIG_PET
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	37	core	hg0_init	pps_hg0_module_init	1	256	60	#ifdef CONFIG_BABY_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	38	core	record_hg0_conf	pps_record_hg0_conf	1	256	60	#ifdef CONFIG_BABY_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	39	core	pps_babaymonitor_init	pps_babymonitor_init	1	512	60	#ifdef CONFIG_BABY_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	42	core	local music	pps_local_music_init	1	256	60	#ifdef CONFIG_LOCAL_MUSIC
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	44	core	rgb_light	pps_rgb_color_light_service	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	45	core	reboot_cb_init	pps_tuya_reboot_cb_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	46	core	gpio_event_init	pps_gpio_event_init	1	32	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	48	core	led_ctrl	pps_tuya_aolai_led_init	0	0	0	#ifdef CONFIG_FLIGHT_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	50	core	led_ctrl	pps_tuya_led_init	0	0	0	else of #ifdef CONFIG_FLIGHT_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	55	core	prodtest_init	pps_product_test_init	0	0	0	else of #ifdef CONFIG_NO_FACTORY_MODE
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	57	core	sdcard	pps_device_sdcard_init	1	256	60	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	59	core	av_recorder_init	pps_device_recorder_init	0	0	0	#ifdef CONFIG_SD_RECORD
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	61	core	shell	shell_server_open	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	67	user	pps_tuya_iot_dev_uart_service_start	pps_tuya_iot_dev_uart_service_start	1	64	50	#ifdef CONFIG_TUYA_GW_SDK
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	70	user	eth net state	pps_tuya_register_eth_net_state_cb	0	0	0	#ifdef PPS_NET_MANAGER_SUPPORT_ETH
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	72	user	network init	pps_tuya_netmng_service_start	1	32	60	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	74	user	pps_nkit_sdk_init	pps_nkit_sdk_init	1	256	60	#ifdef CONFIG_ENABLE_NKIT
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	77	user	rtsp_server	pps_rtsp_server_init	1	128	80	#ifdef CONFIG_RTSP_SERVICE
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	80	user	restful_server	restful_webserver_init	1	128	80	#ifdef CONFIG_RESTFUL_SERVER
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	83	user	home_away	pps_device_sleeping_init	0	0	0	#ifdef CONFIG_HOME_AWAY
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	87	user	pps_onvif_init	pps_onvif_cfg_init	1	64	50	#ifdef CONFIG_ONVIF_SERVICE
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	91	user	onvif_srv	pps_onvif_start1	1	128	60	#ifdef CONFIG_ONVIF_SERVICE_V2
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	92	user	onvif_dis	pps_onvif_start2	1	128	80	#ifdef CONFIG_ONVIF_SERVICE_V2
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	96	user	discovery	pps_device_discovery_init	1	256	60	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	97	user	temp_humidity	pps_temp_humidity_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	98	user	battery	pps_device_battery_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	100	user	pps_charm	pps_tuya_charm_service_init	1	16	50	#ifdef CONFIG_DOORBELL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	102	user	pps_siren	pps_device_siren_ctrl	1	64	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	104	user	pps_flight	pps_tuya_flight_service_init	0	0	0	#ifdef CONFIG_FLIGHT_SUPPORT
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	110	user	pps_aolai_flight	status_sync	1	16	50	#ifdef CONFIG_FLIGHT_SERIAL && else of #ifdef PPS_TUYA_YAOTAI
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	112	user	mcu      upgrade	pps_flight_camera_init	0	0	0	#ifdef CONFIG_FLIGHT_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	113	user	pps_flight_aolai	pps_flight_service_init_aolai	1	16	50	#ifdef CONFIG_FLIGHT_SERIAL
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	115	user	pps_white_light	pps_tuya_white_light_init	1	16	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	120	after	dp init	dp_list_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	122	after	gw sdk start	pps_tuya_gw_sdk_init	0	0	0	#ifdef CONFIG_TUYA_GW_SDK
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	125	after	sdk start	pps_tuya_sdk_init	0	0	0	else of #ifdef CONFIG_TUYA_GW_SDK && #ifndef CONFIG_5_0_X_SDK
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	127	after	sdk start	pps_tuya_sdk_init_5_0_x	0	0	0	else of #ifdef CONFIG_TUYA_GW_SDK && else of #ifndef CONFIG_5_0_X_SDK
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	131	after	sdk p2p live	tuya_p2p_start_live	0	0	0	#ifdef CONFIG_MEDIA_SUPPORT
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	133	after	sdk time	tuya_set_time	1	32	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	135	after	doorbell msg	pps_tuya_doorbell_timer_task	1	32	50	#ifdef CONFIG_DOORBELL_LEAVEMSG
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	137	after	upload status	IPC_APP_upload_all_status	1	32	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	139	after	tuya_iotdev_info	pps_tuya_iot_dev_report	1	64	50	#ifdef CONFIG_TUYA_GW_SDK
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	140	after	tuya_light_ctrl	pps_tuya_ipc_light_ctrl_loop	1	64	50	#ifdef CONFIG_TUYA_GW_SDK
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	143	after	cloud enable	pps_tuya_app_enable_cloudstorage	0	0	0	#ifdef CONFIG_TUYA_CLOUD_STORAGE
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	145	after	status report	tuya_device_states_reporter	1	512	50	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	146	after	other_component init	tuya_pps_other_modules_init	0	0	0	
+ipc_app/tuya_ipc/tuya_app/pps_tuya_app.c	148	after	pps_sd_record	pps_device_storage_init	1	512	60	#ifdef CONFIG_SD_RECORD

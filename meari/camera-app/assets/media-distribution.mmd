@@ -1,0 +1,9 @@
+flowchart LR
+    A[传感器与 SoC 媒体库] --> B[pps_device_media 适配]
+    B --> C[主流、子流、音频回调]
+    C --> D[RTSP circular buffer 与 RTP]
+    C --> E[Meari SDK 回调]
+    C --> F[Tuya SDK ring buffer]
+    C --> G[SD 录像写入]
+    B --> H[快照与检测回调]
+    H --> I[事件、告警、云推送]

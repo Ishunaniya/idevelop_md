@@ -1,0 +1,38 @@
+{
+  "documents": [
+    {
+      "path": "camera-app-analysis.md",
+      "lines": 880,
+      "sha256": "824df9fc2da25a642ce3005592cf7ffb404b24fc950de31da36ec0bea7b556aa",
+      "checked_links": 197,
+      "code_fences_balanced": true
+    },
+    {
+      "path": "核验记录.md",
+      "lines": 158,
+      "sha256": "b563693065dc1e3763e2d2ff93659f5e2fd7ab79d846e15b8eb5185a3376a8b5",
+      "checked_links": 29,
+      "code_fences_balanced": true
+    }
+  ],
+  "checked_links": 226,
+  "source_links": 182,
+  "snapshot_comparison_directory": "/tmp/camera-app-diagram-recheck",
+  "snapshot_files_identical": {
+    "source-inventory.tsv": true,
+    "startup-plugins.tsv": true,
+    "missing-cmake-paths.tsv": true,
+    "summary.json": true
+  },
+  "source_snapshot_identical": true,
+  "statistics_checks": {
+    "file_count_matches": true,
+    "source_count_matches": true,
+    "source_lines_match": true,
+    "startup-plugins.tsv_count_matches": true,
+    "missing-cmake-paths.tsv_count_matches": true
+  },
+  "errors": [],
+  "passed": true,
+  "scope": "Local link existence, source line bounds, heading anchors, fences, document hashes and reproducible evidence; not semantic proof or firmware tests"
+}

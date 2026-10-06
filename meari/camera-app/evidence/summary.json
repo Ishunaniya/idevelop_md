@@ -1,0 +1,236 @@
+{
+  "source_root": "/home/tronlong/lyp/meari/camera-app",
+  "line_count_definition": "LF-delimited physical lines, counting final unterminated line; includes comments and blanks",
+  "total_files": 3470,
+  "extensions": {
+    ".a": 1,
+    ".c": 236,
+    ".cfg": 1,
+    ".cmake": 294,
+    ".conf": 5,
+    ".cpp": 3,
+    ".doc": 4,
+    ".docx": 4,
+    ".gz": 2,
+    ".h": 2862,
+    ".json": 2,
+    ".log": 2,
+    ".md": 9,
+    ".py": 1,
+    ".sh": 10,
+    ".txt": 16,
+    ".xlsx": 4,
+    "<none>": 14
+  },
+  "source_files": 3101,
+  "source_lines": 1016026,
+  "tuya_sdk_source_files": 2510,
+  "tuya_sdk_source_lines": 702336,
+  "startup_plugin_rows": 113,
+  "modules": {
+    ".clang-format": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    ".gitignore": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    ".vscode": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    "README.md": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    "all.sh": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    "auto.sh": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    "common": {
+      "files": 10,
+      "source_files": 9,
+      "source_lines": 4347
+    },
+    "components": {
+      "files": 174,
+      "source_files": 165,
+      "source_lines": 118527
+    },
+    "doc": {
+      "files": 15,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    "include": {
+      "files": 101,
+      "source_files": 101,
+      "source_lines": 20312
+    },
+    "ipc_app": {
+      "files": 2940,
+      "source_files": 2629,
+      "source_lines": 772650
+    },
+    "pps_device": {
+      "files": 139,
+      "source_files": 136,
+      "source_lines": 82823
+    },
+    "pps_hal": {
+      "files": 35,
+      "source_files": 34,
+      "source_lines": 6198
+    },
+    "test": {
+      "files": 3,
+      "source_files": 2,
+      "source_lines": 326
+    },
+    "tools": {
+      "files": 37,
+      "source_files": 25,
+      "source_lines": 10843
+    },
+    "version": {
+      "files": 9,
+      "source_files": 0,
+      "source_lines": 0
+    },
+    "更新要点.md": {
+      "files": 1,
+      "source_files": 0,
+      "source_lines": 0
+    }
+  },
+  "largest_source_files": [
+    {
+      "path": "components/pps_rtmp/srs_librtmp.cpp",
+      "lines": 36004
+    },
+    {
+      "path": "ipc_app/meari_ipc/main/pps_dp.c",
+      "lines": 8579
+    },
+    {
+      "path": "pps_device/pps_device_ptz.c",
+      "lines": 8343
+    },
+    {
+      "path": "pps_device/pps_device_miniz.c",
+      "lines": 7733
+    },
+    {
+      "path": "components/prodtest/pps_product_test.c",
+      "lines": 6308
+    },
+    {
+      "path": "ipc_app/tuya_ipc/tuya_app/pps_tuya_ipc_dp_utils.c",
+      "lines": 6061
+    },
+    {
+      "path": "pps_device/pps_device_media.c",
+      "lines": 5782
+    },
+    {
+      "path": "ipc_app/meari_ipc/main/ppsall_init.c",
+      "lines": 5568
+    },
+    {
+      "path": "ipc_app/meari_ipc/main/pps_babymonitor_init.c",
+      "lines": 5387
+    },
+    {
+      "path": "ipc_app/tuya_ipc/tuya_app/pps_babymonitor_init.c",
+      "lines": 5148
+    },
+    {
+      "path": "pps_device/pps_device_media_5.x.c",
+      "lines": 4965
+    },
+    {
+      "path": "components/prodtest/pps_product_test_restful.c",
+      "lines": 4189
+    }
+  ],
+  "meari_cmake_profiles": 128,
+  "tuya_cmake_profiles": 166,
+  "capa_unique_v_tokens": 293,
+  "missing_literal_cmake_references": 54,
+  "missing_path_method": "PROJECT_TOP_DIR literal paths in uncommented text only; no CMake condition or variable evaluation",
+  "shell_syntax_checks": [
+    {
+      "path": "all.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "auto.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "ipc_app/meari_ipc/configs/pps_tp_resolve.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "ipc_app/meari_ipc/mkprj.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "ipc_app/meari_ipc/mkprj_ai.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "ipc_app/tuya_ipc/mkprj.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "ipc_app/tuya_ipc/mkprj_ai.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "tools/cmd_srv/makeall.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "version/gen_git_info.sh",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "path": "version/gen_version.sh",
+      "exit_code": 0,
+      "stderr": ""
+    }
+  ],
+  "source_has_git_directory": false,
+  "dependency_presence": {
+    "arch": false,
+    "ipc_app/meari_ipc/sdk": false,
+    "pps_hal/x86_64": false,
+    "include/storage": true,
+    "include/nkit": true,
+    "components/pps_nkit_module/pps_nkit_wlan.c": false,
+    "ipc_app/meari_ipc/meari_platform.conf": true,
+    "ipc_app/meari_ipc/meari_software_platform.conf": true,
+    "common/net/mongoose.c": false
+  }
+}
