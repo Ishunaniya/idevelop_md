@@ -54,13 +54,18 @@
 
 ## 核心架构设计
 
-```text
-/opt/配置与点表 ───────→ main / can_mng → data_process 规则
-                                  └→ 加载 libscene 的 judge_scene
-本机 CAN 发布端 ──────→ can_server ─┬→ data_process 更新数据项
-                                    └→ judge_scene 更新当前场景
-数据项 + 当前场景 ───────────────→ mosquitto 筛选 / 组 JSON
-                                    └→ TBOX/REPORT → MQTT 服务端
+```mermaid
+flowchart LR
+    cfg[配置与点表] --> main[main / can_mng]
+    main --> rules[data_process 规则]
+    main --> scene[加载 libscene 的 judge_scene]
+    can[本机 CAN 发布端] --> server[can_server]
+    server --> data[更新数据项]
+    server --> judge[judge_scene 更新当前场景]
+    data --> select[mosquitto 筛选并组 JSON]
+    judge --> select
+    select --> topic[TBOX/REPORT]
+    topic --> broker[MQTT 服务端]
 ```
 
 顶层 WITH_DIMA_CLIENT 默认关闭；当前有效发布路径为 JSON。场景库加载失败、点表异常和服务端接收结果分别按正文核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -82,11 +87,17 @@
 
 ## 关键流程与数据流
 
-~~~text
-配置和点表加载 → 三路 CAN 订阅
-每帧 → 特殊帧处理 → 普通点表解析 → 场景判定
-数据项 + 场景 → 间隔/变化阈值筛选 → JSON 组帧 → MQTT 发布
-~~~
+```mermaid
+flowchart TD
+    config[配置和点表加载] --> subscribe[订阅三路 CAN]
+    subscribe --> frame[接收每帧]
+    frame --> special[特殊帧处理]
+    special --> parse[普通点表解析]
+    parse --> scene[场景判定]
+    scene --> select[按间隔 / 变化阈值筛选数据项]
+    select --> json[JSON 组帧]
+    json --> mqtt[MQTT 发布]
+```
 
 具体分支依次见[启动与线程](#analysis-2)、[CAN 与场景图](#analysis-5)、[MQTT 条件](#analysis-7)。这里的“发布”指本地 MQTT 调用，平台接收仍需外部证据。
 

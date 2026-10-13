@@ -122,19 +122,22 @@
 
 ## 9. 端到端数据流
 
-```
-[CAN桥接 16002/3/4]──► [CAN线程 can_server] 点表解析→data_item / high_speed_data / data_0f9b / tpms / auto_drive / crash / AEBS缓存
-        │(无锁共享 can_mng)                                    │ pthread_save_aebs_log → /media/sdcard/high_data/DENSE_log_<VIN>
-        ▼                                                       
-[GPS线程 16005]──► gps_info                                     
-        │                                                       
-[MQTT线程 每1s]                                                 
-   ├─(每30s) binary_work_data_generate(data_0f6b_t+TPMS) → 0x0F6B → publish
-   ├─(事件)  error_code/coolant/crash/auto_drive/AEBS文件 → 0x0F4D → publish
-   ├─(每1s,若 energyDataSwitch.flag) data_0f9b → 0x0F9B → publish
-   └─(AEBS)  0F4D文件通知 + start_ftp_file_upload → 删本地文件
-        ▼
-   本机 broker(TSP_TOPIC_PUB_MSG) → TSP 平台 ;  FTP 服务器 ← 高密文件
+```mermaid
+flowchart TD
+    CAN[CAN桥接 16002/3/4] --> CANThread[CAN线程 can_server：点表解析]
+    CANThread --> Shared[共享 can_mng：data_item、高密数据、0F9B、TPMS、事件及 AEBS 缓存]
+    GPS[GPS线程 16005] --> GPSInfo[gps_info]
+    GPSInfo --> Shared
+    CANThread -->|pthread_save_aebs_log| LogFile[/media/sdcard/high_data/DENSE_log_<VIN>/]
+    Shared --> MQTT[MQTT线程：主循环每 1s]
+    MQTT -->|每 30s：data_0f6b_t + TPMS| F6B[0x0F6B]
+    MQTT -->|事件：故障、冷却液、碰撞、自动驾驶、AEBS| F4D[0x0F4D]
+    MQTT -->|每 1s，energyDataSwitch.flag 有效| F9B[0x0F9B]
+    MQTT -->|AEBS 文件通知及 FTP 上传后删除本地文件| FTP[FTP 服务器：高密文件]
+    F6B --> Publish[本机 broker：TSP_TOPIC_PUB_MSG]
+    F4D --> Publish
+    F9B --> Publish
+    Publish --> TSP[TSP 平台]
 ```
 
 ---

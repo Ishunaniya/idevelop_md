@@ -13,18 +13,18 @@
 
 ### 核心定位
 
-```
-┌────────────────────────────────────────────────┐
-│         上层应用 (UI / App / 客户端)            │
-├─────────────────────┬──────────────────────────┤
-│  netclient（外部接口）│  modclient（内部接口）   │
-├─────────────────────┴──────────────────────────┤
-│              mpc-base 核心框架层                │
-│  base / ipcm / dsp / ai / aov / nets / param   │
-├────────────────────────────────────────────────┤
-│           Hardware / OS / SDK 层               │
-│   HAL / MCU / LED / PTZ / WiFi / 4G / BLE     │
-└────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    App[上层应用：UI / App / 客户端]
+    Net[netclient：外部接口]
+    Mod[modclient：内部接口]
+    Core[mpc-base 核心框架：base / ipcm / dsp / ai / aov / nets / param]
+    Platform[Hardware / OS / SDK：HAL / MCU / LED / PTZ / WiFi / 4G / BLE]
+    App --> Net
+    App --> Mod
+    Net --> Core
+    Mod --> Core
+    Core --> Platform
 ```
 
 ---
@@ -113,42 +113,52 @@ mpc-base/
 
 ### 4.1 整体分层架构
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                     应用层接口                            │
-│  ┌─────────────────────┐  ┌────────────────────────────┐ │
-│  │    netclient         │  │       modclient            │ │
-│  │（外部 Socket 接口）  │  │   （内部 RPC 调试程序）    │ │
-│  │  需鉴权 / UI / APP   │  │   Unix Socket 跨进程调用   │ │
-│  └─────────────────────┘  └────────────────────────────┘ │
-├──────────────────────────────────────────────────────────┤
-│                    业务逻辑层                              │
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ │
-│  │  base  │ │  ipcm  │ │ param  │ │ event  │ │  sys   │ │
-│  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ │
-├──────────────────────────────────────────────────────────┤
-│                    媒体处理层                              │
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐            │
-│  │  dsp   │ │  ai    │ │ rtsps  │ │preview │            │
-│  │码流处理│ │智能识别│ │RTSP流  │ │实时预览│            │
-│  └────────┘ └────────┘ └────────┘ └────────┘            │
-├──────────────────────────────────────────────────────────┤
-│                  电源与任务调度层（AOV）                   │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │  nv_task（任务调度） + nv_battery（状态/统计）       │ │
-│  │  nv_heart_beat（心跳） + nv_timer（定时器）          │ │
-│  └─────────────────────────────────────────────────────┘ │
-├──────────────────────────────────────────────────────────┤
-│                    网络通信层                              │
-│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ │
-│  │ nets │ │ 4g   │ │ wlan │ │ wired│ │  BLE │ │nkit  │ │
-│  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ │
-├──────────────────────────────────────────────────────────┤
-│                    硬件抽象层（HAL）                       │
-│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐          │
-│  │ hal  │ │ mcu  │ │ ptz  │ │ led  │ │button│          │
-│  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘          │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph API[应用层接口]
+        Net[netclient：外部 Socket，需鉴权，供 UI / App 使用]
+        Mod[modclient：内部 RPC 调试程序，通过 Unix Socket 跨进程调用]
+    end
+    subgraph Business[业务逻辑层]
+        Base[base]
+        IPCM[ipcm]
+        Param[param]
+        Event[event]
+        Sys[sys]
+    end
+    subgraph Media[媒体处理层]
+        DSP[dsp：码流处理]
+        AI[ai：智能识别]
+        RTSP[rtsps：RTSP 流]
+        Preview[preview：实时预览]
+    end
+    subgraph AOV[电源与任务调度层：AOV]
+        Task[nv_task：任务调度]
+        Battery[nv_battery：状态 / 统计]
+        Heartbeat[nv_heart_beat：心跳]
+        Timer[nv_timer：定时器]
+    end
+    subgraph Network[网络通信层]
+        Nets[nets]
+        FourG[4g]
+        WLAN[wlan]
+        Wired[wired]
+        BLE[BLE]
+        NKIT[nkit]
+    end
+    subgraph HAL[硬件抽象层]
+        HALMod[hal]
+        MCU[mcu]
+        PTZ[ptz]
+        LED[led]
+        Button[button]
+    end
+    Net --> Business
+    Mod --> Business
+    Business --> Media
+    Business --> AOV
+    Business --> Network
+    Network --> HAL
 ```
 
 **架构图说明**：图中为逻辑职责分组，模块并非严格单向分层。AI直接从本地VI采集原始图像；DSP接收编码帧。RTSP框表示仓库有相应源码，当前默认构建和启动路径未接入。底层系统休眠、媒体和网络协议 SDK 均存在外部依赖。
@@ -202,15 +212,12 @@ ipcm 负责 IPC 通道的连接配置、状态、控制和能力集管理。当�
 
 **内部架构（Factory 工厂模式）**:
 
-```
-nvipcm.cc（通道管理主控）
-    │
-    ├── nvfactory.cc（抽象工厂接口）
-    │       │
-    │       └── nvfactorydef.cc（默认实现；远程操作多为桩）
-    │
-    └── nvlocal.cc（本地通道管理）
-        nvipcmconfig.cc（通道配置持久化）
+```mermaid
+flowchart TD
+    IPCM[nvipcm.cc：通道管理主控] --> Factory[nvfactory.cc：抽象工厂接口]
+    Factory --> Default[nvfactorydef.cc：默认实现，远程操作多为桩]
+    IPCM --> Local[nvlocal.cc：本地通道管理]
+    IPCM --> Config[nvipcmconfig.cc：通道配置持久化]
 ```
 
 factory 实际按枚举索引分发函数指针表；当前明确填充 `NV_FACTORY_DEF` 和 `NV_FACTORY_LOCAL`，本地操作由 `nvlocal.cc` 提供。ONVIF相关声明/依赖路径不等于已完整接入。[nvfactory.cc:76](/home/tronlong/lyp/meari/mpc-base/mod/ipcm/src/nvfactory.cc:76)、[nvfactorydef.cc:17](/home/tronlong/lyp/meari/mpc-base/mod/ipcm/src/nvfactorydef.cc:17)。
@@ -258,17 +265,12 @@ typedef struct _NV_IP_CONFIG_ {
 
 大量设置命令通过通道消息队列异步执行；查询和配置管理等并非全部走队列。枚举除了1～44外，还包含1001～1010、2000等值。入队成功仅表示请求被接受，不是设备动作已经成功：
 
-```
-API 调用层
-    │  nv_ipcm_set_xxx()
-    ↓
-消息队列入队（E_IPCM_MSG_XXX）
-    │  IPCM_MSG_MAX_QU = 16
-    ↓
-ipcm 工作线程处理
-    │
-    ↓
-通过 factory 分发（当前明确为默认/本地实现）
+```mermaid
+flowchart TD
+    A[API 调用层: nv_ipcm_set_xxx] --> B[消息队列入队: E_IPCM_MSG_XXX]
+    B --> C[IPCM_MSG_MAX_QU = 16]
+    C --> D[ipcm 工作线程处理]
+    D --> E[通过 factory 分发]
 ```
 
 队列与异步分发见 [nvipcm.cc:30](/home/tronlong/lyp/meari/mpc-base/mod/ipcm/src/nvipcm.cc:30)、[nvipcm.cc:109](/home/tronlong/lyp/meari/mpc-base/mod/ipcm/src/nvipcm.cc:109)。
@@ -309,15 +311,14 @@ AOV（Always-On Video，全时视频）是电池摄像机的低功耗任务协�
 
 **任务状态机**：
 
-```
-注册 → START → RUNNING（按delay周期执行loop）
-                  │
-                  ├── SUSPENT / FINISH → loop收尾 → IDLE
-                  │                                 │
-                  │                              RESUME
-                  │                                 ↓
-                  └──────────────────────────── RUNNING
-STOP → IDLE → helper线程退出
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE: 注册
+    IDLE --> RUNNING: START
+    RUNNING --> RUNNING: 按 delay 周期执行 loop
+    RUNNING --> IDLE: SUSPENT / FINISH，loop 收尾
+    IDLE --> RUNNING: RESUME
+    IDLE --> [*]: STOP，helper 线程退出
 ```
 
 系统suspend发生在全部任务报告IDLE、并通过AI/MCU/pending检查之后；IDLE是用户态任务状态，不是硬件本身已睡下。
@@ -385,18 +386,22 @@ STOP → IDLE → helper线程退出
 
 #### 5.3.4 AOV循环执行流程
 
-```text
-恢复符合条件的业务任务
-  → 汇总资源需求、视频模式与连续运行截止时间
-  → 恢复所需资源组
-  → 检查是否仍需CPU连续运行
-      ├── 是：等待约10ms，回到下一轮需求扫描
-      └── 否：请求任务暂停/结束 → 等待全部报告IDLE
-                → 再检查AI、MCU和pending
-                    ├── 有新需求：取消休眠，回到扫描
-                    └── 无新需求：调用媒体系统suspend
-                                  → 外部系统唤醒后恢复执行
-                                  → 读取原因，回到下一轮
+```mermaid
+flowchart TD
+    A[恢复符合条件的业务任务] --> B[汇总资源需求、视频模式与连续运行截止时间]
+    B --> C[恢复所需资源组]
+    C --> D{是否仍需 CPU 连续运行？}
+    D -->|是| E[等待约 10 ms]
+    E --> A
+    D -->|否| F[请求任务暂停 / 结束]
+    F --> G[等待全部报告 IDLE]
+    G --> H[检查 AI、MCU 和 pending]
+    H --> I{是否有新需求？}
+    I -->|是| A
+    I -->|否| J[调用媒体系统 suspend]
+    J --> K[外部系统唤醒后恢复执行]
+    K --> L[读取唤醒原因]
+    L --> A
 ```
 
 普通、非长休眠模式默认恢复主编码任务，编码回调按当前 AOV 标志切换媒体模式或取单帧。AI检测任务也被恢复，但线程执行是异步的，是否取得有效图像取决于媒体准备与调用结果。不能把它写成“固定串行顺序、每次必定成功编码一帧再成功推理”。[nv_task.cc:813](/home/tronlong/lyp/meari/mpc-base/mod/aov/src/nv_task.cc:813)、[nv_task_venc.cc:43](/home/tronlong/lyp/meari/mpc-base/mod/aov/src/nv_task_venc.cc:43)。
@@ -586,13 +591,13 @@ NV_STREAM_EVENT        = 9   // 公共宏声明；不据名称推定具体路由
 
 图像从本地采集接口进入检测器，调用关系如下：
 
-```text
-外部媒体库本地 VI 图像
-  → nv_media_recv_vi_frame(chan, NV_STREAM_SUB, ...)
-  → pps_media_vi_recv_frame_v2(chan, 2, ...)
-  → 得到 aligned_size 的宽高及 NV12 buffer
-  → 构造 pps_nn_mat(w, h*3/2, 1, buffer)
-  → status_process(detector, img, PPSNN_FORMAT_NV12, AIerIdx, objs)
+```mermaid
+flowchart TD
+    A[外部媒体库本地 VI 图像] --> B[nv_media_recv_vi_frame chan, NV_STREAM_SUB]
+    B --> C[pps_media_vi_recv_frame_v2 chan, 2]
+    C --> D[取得 aligned_size 宽高和 NV12 buffer]
+    D --> E[构造 pps_nn_mat w, h×3/2, 1, buffer]
+    E --> F[status_process detector, img, NV12, AIerIdx, objs]
 ```
 
 `NV_STREAM_SUB` 在这个取图函数中被映射为媒体采集子通道2，注释说明抓拍/智能单独使用360P通道。它是**原始采集图像接口，不是从网络子码流中读H264/H265再交给AI**。实际尺寸以返回的 aligned_size 为准。[nvencode.cc:1806](/home/tronlong/lyp/meari/mpc-base/mod/dsp/src/nvencode.cc:1806)、[nvIntelligence.cc:533](/home/tronlong/lyp/meari/mpc-base/mod/ai/src/nvIntelligence.cc:533)、[nvIntelligence.cc:233](/home/tronlong/lyp/meari/mpc-base/mod/ai/src/nvIntelligence.cc:233)。
@@ -898,25 +903,17 @@ nv_stop_netserver()    // 停止服务
 
 ### 5.12 modclient 与 netclient —— 双接口设计
 
-```
-┌───────────────────────────────────────────────────────┐
-│                    调用者视角                          │
-│                                                       │
-│  ┌──────────────────┐     ┌─────────────────────────┐ │
-│  │    modclient      │     │       netclient         │ │
-│  │                   │     │                         │ │
-│  │  本机跨进程RPC    │     │  跨网络外部调用         │ │
-│  │  链接RPC客户端库  │     │  TCP Socket 连接        │ │
-│  │  本地Socket接口   │     │  用户名/密码鉴权        │ │
-│  │  nv_rpc_*调用     │     │  私有消息头/JSON/媒体    │ │
-│  │  Unix Socket      │     │  兼容导出声明           │ │
-│  │  当前已有实现     │     │  客户端 SDK             │ │
-│  └──────────────────┘     └─────────────────────────┘ │
-│           │                         │                  │
-│           └──────────┬──────────────┘                 │
-│                      ↓                                 │
-│               mpc-base 核心框架                        │
-└───────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[modclient: 本机跨进程 RPC] --> B[链接 RPC 客户端库]
+    A --> C[本地 Unix Socket 接口]
+    A --> D[nv_rpc_* 调用；当前已有实现]
+    E[netclient: 跨网络外部调用] --> F[TCP Socket 连接]
+    E --> G[用户名 / 密码鉴权]
+    E --> H[私有消息头 / JSON / 媒体]
+    E --> I[兼容导出声明与客户端 SDK]
+    C --> J[mpc-base 核心框架]
+    F --> J
 ```
 
 **modclient** 当前产物是RPC调试可执行程序，链接 `librpcclient`，不是同进程静态库接口；README中的Unix Socket规划描述已落后于实现。
@@ -983,23 +980,33 @@ nv_stop_netserver()    // 停止服务
 
 `cyclone` 包含跨平台异步TCP网络框架源码和三种I/O多路复用实现；当前未加入顶层默认构建，不代表产品网络路径已使用下面全部组件：
 
-```
-cyEvent（事件循环）
-    ├── cye_looper_epoll.cpp    → Linux epoll
-    ├── cye_looper_kqueue.cpp   → macOS/BSD kqueue
-    └── cye_looper_select.cpp   → select实现（可用性依赖平台/构建）
-
-cyNetwork（TCP 网络）
-    ├── cyn_tcp_server          → 多线程 TCP 服务器
-    │   ├── master_thread       → 接受连接（Accept）
-    │   └── work_thread         → 处理读写（epoll）
-    └── cyn_tcp_client          → TCP 客户端
-
-cyCrypt（加密）
-    ├── cyr_rijndael            → AES 加密
-    ├── cyr_dhexchange          → Diffie-Hellman 密钥交换
-    ├── cyr_adler32             → Adler32 校验
-    └── cyr_xorshift128         → 随机数生成
+```mermaid
+flowchart TD
+    Event[cyEvent：事件循环]
+    EPOLL[cye_looper_epoll.cpp：Linux epoll]
+    Kqueue[cye_looper_kqueue.cpp：macOS / BSD kqueue]
+    Select[cye_looper_select.cpp：select，依赖平台与构建]
+    Network[cyNetwork：TCP 网络]
+    Server[cyn_tcp_server：多线程 TCP 服务器]
+    Master[master_thread：接受连接]
+    Worker[work_thread：处理读写，epoll]
+    Client[cyn_tcp_client：TCP 客户端]
+    Crypt[cyCrypt：加密]
+    AES[cyr_rijndael：AES]
+    DH[cyr_dhexchange：Diffie-Hellman]
+    Adler[cyr_adler32：Adler32 校验]
+    Xorshift[cyr_xorshift128：随机数生成]
+    Event --> EPOLL
+    Event --> Kqueue
+    Event --> Select
+    Network --> Server
+    Network --> Client
+    Server --> Master
+    Server --> Worker
+    Crypt --> AES
+    Crypt --> DH
+    Crypt --> Adler
+    Crypt --> Xorshift
 ```
 
 ### 6.3 mem_trace —— 内存调试
@@ -1024,22 +1031,15 @@ cyCrypt（加密）
 
 当前可确认的主链是本地摄像头编码；ipcm在本地通道启动时注册媒体输出回调：
 
-```
-外部媒体库：本地摄像头采集/编码
-    │ nv_video_stream_cb / nv_video_stream_recv
-    ↓
-构造 FsFrame_t，按套装 wakeup 状态选择主流路由
-    │ local_start_stream() 已注册输出回调
-    ↓
-dsp 模块（nv_dsp_data_pro）
-    │ 写入通道/码流环形缓冲区（NvNetBuf）
-    ↓
-┌────────────────────────────────────┐
-│ 私有协议预览 / 套装UDP发送          │
-│ 外部录像存储服务消费编码帧          │
-└────────────────────────────────────┘
-
-AI另从VI取NV12，不经过上述压缩帧分发链。
+```mermaid
+flowchart TD
+    A[外部媒体库采集并编码] --> B[nv_video_stream_cb / nv_video_stream_recv]
+    B --> C[构造 FsFrame_t，并按套装 wakeup 状态选择主流路由]
+    C --> D[dsp 模块: nv_dsp_data_pro]
+    D --> E[写入通道和码流 NvNetBuf]
+    E --> F[私有协议预览 / 套装 UDP 发送]
+    E --> G[外部录像存储服务消费编码帧]
+    H[AI 从 VI 获取 NV12] -. 独立输入，不经过压缩帧分发 .-> I[AI 处理]
 ```
 
 套装主流在I帧边界根据wakeup状态切换流1/3。当前DSP明确创建流1、2、3、4的缓冲；8/9是公共宏声明，不能仅凭名字认定另有完整流缓冲。本地视频回调当前固定 `channel=0`。[nvlocal.cc:319](/home/tronlong/lyp/meari/mpc-base/mod/ipcm/src/nvlocal.cc:319)、[nvencode.cc:219](/home/tronlong/lyp/meari/mpc-base/mod/dsp/src/nvencode.cc:219)、[nvencode.cc:281](/home/tronlong/lyp/meari/mpc-base/mod/dsp/src/nvencode.cc:281)。
@@ -1048,63 +1048,59 @@ AI另从VI取NV12，不经过上述压缩帧分发链。
 
 ### 7.2 AI 报警事件处理流程
 
-```
-本地VI原始图像（NV12，子采集通道）
-    │ nv_media_recv_vi_frame()
-    ↓
-外部通用检测器 status_process()
-    │ ROI / 类别配置，返回坐标、score、label、status
-    ↓
-本地过滤：整数(score×100)严格大于阈值
-    │
-    ├── 画框候选 → 最多4框媒体叠加（有独立开关）
-    │
-    └── status非零 → 事件候选
-            │
-            ├── 刷新保持期限 → nn.trig → TRIG_REAL_TIME_ENC
-            │                    连续编码、请求音频、续CPU时间
-            ├── 首个候选 → 按PTZ能力/校准/类别尝试追踪
-            ├── 补光请求 → nvFillLight按电量/日夜/期限等条件处理
-            └── nvaievent：每类去重、<1秒连续确认、触发间隔
-                    ↓
-                确认通过
-                    │
-                    ├── kit模式 → 裁剪NV12目标小图 → 图片流缓冲
-                    │
-                    └── 统一AI事件入队（int_value1携带类别）
-                            ↓
-                        nvevent业务策略
-                            ├── 录像条件通过 → StartMotionRecord
-                            └── 推送条件通过 → 请求独立抓图
-                                                ↓
-                                            图片回调与再次检查
-                                                ├── App消息缓冲
-                                                └── kit允许类别的JPEG缓冲
+```mermaid
+flowchart TD
+    A[本地 VI 原始图像: NV12] --> B[nv_media_recv_vi_frame]
+    B --> C[外部检测器 status_process]
+    C --> D[返回坐标、score、label、status]
+    D --> E[过滤: 整数 score×100 严格大于阈值]
+    E --> F{画框候选?}
+    F -->|是| G[最多 4 框媒体叠加，受独立开关控制]
+    E --> H{status 非零?}
+    H -->|否| Z[不生成事件候选]
+    H -->|是| I[刷新保持期限并触发 TRIG_REAL_TIME_ENC]
+    I --> J[连续编码、请求音频并延长 CPU 时间]
+    I --> K[按 PTZ 能力、校准和类别尝试追踪]
+    I --> L[nvFillLight 按电量、日夜和期限处理补光]
+    I --> M[nvaievent 去重、连续确认和触发间隔检查]
+    M --> N{确认通过?}
+    N -->|否| Z
+    N -->|是| O{kit 模式?}
+    O -->|是| P[裁剪 NV12 目标小图并写图片流缓冲]
+    O -->|否| Q[统一 AI 事件入队，int_value1 携带类别]
+    P --> Q
+    Q --> R[nvevent 业务策略]
+    R --> S{录像条件通过?}
+    S -->|是| T[StartMotionRecord]
+    R --> U{推送条件通过?}
+    U -->|是| V[请求独立抓图]
+    V --> W[图片回调与再次检查]
+    W --> X[App 消息缓冲]
+    W --> Y[kit 允许类别的 JPEG 缓冲]
 ```
 
 有效目标、确认事件和业务输出是三个层次：候选先更新AOV保持期限；事件确认通过后，分别生成套装小图和统一事件；统一事件再进入录像/抓图推送策略。套装NV12小图不经过App推送的120秒门限，报警JPEG则来自另一条抓图支路。各层具体条件见5.5。
 
 ### 7.3 低功耗唤醒流程（AOV）
 
-```
-外部系统恢复CPU运行 → 读取RTC / KEY / PIR等唤醒原因
-    ↓
-AOV协调器汇总业务条件和TRIG_*，恢复所需资源
-    │
-    ├── 主编码任务：按当前模式取单帧或连续出流
-    ├── AI任务：采集/检测，目标有效时刷新保持期限
-    └── 网络/存储等：按各自需求处理业务
-    ↓
-检查CPU连续运行期限
-    ├── 未到：继续扫描与执行，允许各业务刷新期限
-    └── 已到：SUSPENT / FINISH → 等待全部IDLE
-                  ↓
-              再检查AI / MCU / pending
-                  ├── 有需求：返回协调循环
-                  └── 无需求：pps_media_system_suspend(
-                                  PPS_MEDIA_WKUP_ALRAM, suspend_sec)
-                                  ↓
-                              系统休眠，等待下次恢复
+```mermaid
+flowchart TD
+    A[外部系统恢复 CPU] --> B[读取 RTC / KEY / PIR 唤醒原因]
+    B --> C[AOV 协调器汇总业务条件和 TRIG_*，恢复资源]
+    C --> D[主编码任务按模式取单帧或连续出流]
+    C --> E[AI 任务采集与检测，目标有效时刷新保持期限]
+    C --> F[网络、存储等任务按需处理]
+    D --> G[检查 CPU 连续运行期限]
+    E --> G
+    F --> G
+    G --> H{连续运行期限已到?}
+    H -->|否| C
+    H -->|是| I[发送 SUSPENT / FINISH 并等待全部任务 IDLE]
+    I --> J[再次检查 AI / MCU / pending]
+    J --> K{仍有业务需求?}
+    K -->|是| C
+    K -->|否| L[调用 pps_media_system_suspend]
+    L --> M[系统休眠并等待下次恢复]
 ```
 
 图中展示普通AOV恢复后的协作关系；长休眠模式下，无视频需求时不会默认恢复主编码。RTC定时由系统suspend的秒数参数表达，PIR/网络硬件唤醒依赖MCU、驱动和中断。CPU恢复后，用户态定时器和 `TRIG_NET` 才参与需求判断；AI与编码各在线程中执行。模式和错误重试见5.3。
@@ -1113,35 +1109,24 @@ AOV协调器汇总业务条件和TRIG_*，恢复所需资源
 
 配网负责接收、解析连接信息，套装绑定、设备发现和私有TCP则有各自的服务入口。下面分别展示配网分支与产品服务，实线只连接当前已确认的处理环节：
 
-```
-配网入口（按产品配置和编译能力选择）
-    │
-    ├── QR Code扫描
-    │       ↓
-    │   qrcode / zbar读取图像中的字符串
-    │       ↓
-    │   字符串转换、信息解析（兼容普通码及XOR / miniz编码）
-    │       ↓
-    │   保存SSID / 密码 → nv_wpa_connect发起WiFi连接
-    │
-    ├── BLE配网
-    │       ↓
-    │   bluetooth协议处理
-    │       ↓
-    │   MCU WiFi配置接口
-    │
-    └── AP热点配网（原稿列出的方式，完整入口尚未确认）
-            已确认的相关能力：wlan中的hostapd热点启停
-            配网服务、凭据提交与后续连接：需结合产品组件确认
-
-产品模式与通信服务（base和当前配置决定启动路径）
-    │
-    ├── KOA_KIT → wlan_client绑定/上线 + nkit UDP服务
-    ├── KOA_APP → 启动外部run_app.sh
-    └── 其他通信模块
-            ├── discovery：设备发现
-            ├── nets / netclient：私有TCP鉴权、控制与取流
-            └── ipcm：通道配置、控制与本地媒体回调注册
+```mermaid
+flowchart TD
+    A[配网入口: 依产品配置和编译能力选择] --> B{配网方式}
+    B -->|二维码| C[qrcode / zbar 读取图像字符串]
+    C --> D[转换并解析普通码或 XOR / miniz 编码]
+    D --> E[保存 SSID / 密码]
+    E --> F[nv_wpa_connect 发起 Wi-Fi 连接]
+    B -->|BLE| G[bluetooth 协议处理]
+    G --> H[调用 MCU Wi-Fi 配置接口]
+    B -->|AP 热点| I[wlan 中 hostapd 热点启停能力]
+    I -. 配网服务和凭据连接链路待产品组件确认 .-> J[未确认后续流程]
+    K[产品模式与 base 配置] --> L{运行模式}
+    L -->|KOA_KIT| M[wlan_client 绑定 / 上线及 nkit UDP 服务]
+    L -->|KOA_APP| N[启动外部 run_app.sh]
+    L -->|其他| O[启动其他通信模块]
+    O --> P[discovery 设备发现]
+    O --> Q[nets / netclient 私有 TCP 鉴权、控制和取流]
+    O --> R[ipcm 通道配置、控制和本地媒体回调]
 ```
 
 二维码回调已经能追到WiFi连接；BLE通过MCU接口提交凭据，但MCU内部执行不在本仓库中。AP分支没有画处理箭头：热点启停还用于套装自组网，不能据此认定存在“AP → HTTP配网”的完整链路，也不能据此认定产品不支持AP配网。下半图列的是服务职责，服务间没有表示“全部必经”的串行箭头；实际启动顺序见5.1。接口依据见 [nv_wifi_op.cc:31](/home/tronlong/lyp/meari/mpc-base/mod/wlan/src/nv_wifi_op.cc:31)、[nv_common_bt.cc:123](/home/tronlong/lyp/meari/mpc-base/mod/bluetooth/src/nv_common_bt.cc:123)、[pps_device_qrcode.c:60](/home/tronlong/lyp/meari/mpc-base/mod/qrcode/src/pps_device_qrcode.c:60)、[pps_nkit_wlan.c:395](/home/tronlong/lyp/meari/mpc-base/mod/wlan/src/pps_nkit_wlan.c:395)、[nv_base.cc:218](/home/tronlong/lyp/meari/mpc-base/mod/base/src/nv_base.cc:218)。

@@ -52,11 +52,13 @@
 
 ## 核心架构设计
 
-```text
-本机 CAN / MCU / DI → app_mng 共享状态
-                              ├→ batt_stand_client ↔ 换电站 TCP
-                              └→ cmd / can_server → 本机控制接口
-车型与平台宏决定部分解析及 DI/DO 映射
+```mermaid
+flowchart LR
+    input[本机 CAN / MCU / DI] --> state[app_mng 共享状态]
+    state <--> station[batt_stand_client ↔ 换电站 TCP]
+    state --> cmd[cmd / can_server]
+    cmd --> control[本机控制接口]
+    macros[车型与平台宏] -. 决定部分解析及 DI / DO 映射 .-> state
 ```
 
 该目录未纳入标注提交的顶层 apps/CMakeLists.txt；下述流程以独立目标构建并部署为前提。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -78,11 +80,14 @@
 
 ## 关键流程与数据流
 
-~~~text
-本机 CAN / MCU / DI → app_mng 共享状态
-共享状态 ↔ 站端 TCP 连接 / 报文 / 换电状态
-站端 0x02 / 0x04 状态 → 本机控制命令 → 锁销反馈或超时 → 站端结果应答
-~~~
+```mermaid
+flowchart TD
+    input[本机 CAN / MCU / DI] --> state[app_mng 共享状态]
+    state <--> station[站端 TCP 连接 / 报文 / 换电状态]
+    station -->|状态 0x02 / 0x04| command[本机控制命令]
+    command --> feedback[锁销反馈或超时]
+    feedback --> ack[向站端发送结果应答]
+```
 
 [总体逻辑图](#analysis-2)给出参与线程；[站端协议](#analysis-4)、[锁止控制](#analysis-5)、[车辆数据](#analysis-6)分别展开。此路径以该目标单独构建并部署为前提；TCP 收包不等于本机动作完成。
 
@@ -110,25 +115,9 @@
 
 ## 2. 总体逻辑流程图
 
-纯文本版（任何 Markdown 阅读器均可显示）：
+Mermaid 流程图：
 
-```text
-main()
-  │
-  ├─ 同名实例已运行？ ─ 是 → 返回 1
-  │                      否
-  ├─ 日志初始化、清理旧日志
-  ├─ canapp_mng_init：配置 / VIN / ICCID / 共享状态
-  │                      └─ 失败 → 返回 -1
-  ├─ 启动四个分离线程
-  │   ├─ 站端接收：网络检查 → TCP 连接 → 读包解析 ─┐
-  │   ├─ 站端发送：登录/鉴权/心跳 → 发送队列 ───────┤
-  │   ├─ CAN 接收：CAN0/1/2 → 帧解析 ─────────────┤→ app_mng / bcc_ctrl
-  │   └─ 应用消息：GPS 订阅 + MCU/DI 请求 ──────────┘
-  └─ 主线程每约 500 ms：反馈/超时 → 本机控制命令 → 故障判断 → 循环
-```
 
-支持 Mermaid 的阅读器还可显示下图：
 
 ```mermaid
 flowchart TD
@@ -183,28 +172,9 @@ flowchart TD
 
 ## 4. 站端 TCP 与协议状态机
 
-纯文本版：
+Mermaid 流程图：
 
-```text
-接收线程：
-  登录失败？ ─ 是 → 关闭连接 → 等待约 120 秒 → 重置登录状态 ─┐
-      │ 否                                                   │
-      ↓                                                      │
-  检查/配置 bridge0:0 → TCP 连接站端 ─ 失败 → 3 秒后重试 ────┤
-      │ 成功                                                 │
-      ↓                                                      │
-  wifiState=1 → select/read → 解析站端报文 → 有效则继续读取     │
-      │ 读错、断线或约 60 秒无有效响应                         │
-      ↓                                                      │
-  wifiState=0 → 重置登录/鉴权并保留部分换电控制状态 → 3 秒后重试 ┘
 
-发送线程：
-  未连接 → 清空待发队列 → 1 秒后重试
-  已连接 → 按状态安排 登录 → 随机数请求 → 加密应答 → 心跳
-         → 取队列头 → send 完整发送后释放；失败或短写则保留并重试
-```
-
-支持 Mermaid 的阅读器还可显示下图：
 
 ```mermaid
 flowchart TD
@@ -277,26 +247,9 @@ flowchart TD
 
 ## 5. 换电状态与锁止控制
 
-纯文本版：
+Mermaid 流程图：
 
-```text
-站端参数设置（消息 0x8040，参数 ID=0，长度=1）
-  └─ 状态值 0..8？
-       ├─ 否 → 解析错误；注意源码已先写入共享状态
-       └─ 是 → 按状态执行：
-            ├─ 0x02 准备换电 → 唤醒=1、解锁、记录待应答
-            ├─ 0x04 装配中   → 唤醒=1、锁止、记录待应答
-            ├─ 0x07 成功     → 清唤醒/失败，立即应答
-            ├─ 0x08 失败     → 清唤醒，依连接器设失败状态，立即应答
-            └─ 其他有效值   → 立即应答
 
-对 0x02/0x04，主线程周期检查：
-  ├─ 锁销反馈达到目标 → 结果 0 应答，清待应答
-  ├─ 等待约 10 秒超时 → 结果 2 应答，清待应答
-  └─ 其余情况         → 下一轮继续检查
-```
-
-支持 Mermaid 的阅读器还可显示下图：
 
 ```mermaid
 flowchart TD
@@ -413,17 +366,16 @@ MCU 请求体含 `status.io:["mcu"]`，DI 请求体含 `status.io:["di"]`；响�
 
 ### 11.1 先确定故障落在哪一层
 
-```text
-设备问题
-  │
-  ├─ 找不到 bs_client 进程？ → 启动/依赖/配置/日志初始化（11.3）
-  │
-  └─ 进程存在
-       ├─ 无站端连接？ → bridge0:0 → 站端地址/端口 → TCP 重连（11.4）
-       ├─ 已连接但无业务？ → 登录 → 随机数 → 鉴权 → 心跳（11.5）
-       ├─ CAN/BMS/VIN 异常？ → 本机 nanomsg → 帧 ID/车型 → VIN 路径（11.6）
-       ├─ 锁止/解锁异常？ → 参数命令 → 发布命令 → DI/CAN 反馈 → 应答（11.7）
-       └─ 日志/属性/故障上报异常？ → 对应队列、打包与日志路径（11.8）
+```mermaid
+flowchart TD
+    symptom[设备问题] --> process{找不到 bs_client 进程?}
+    process -->|是| startcheck[检查启动、依赖、配置和日志初始化（11.3）]
+    process -->|否| issue{故障表现}
+    issue -->|无站端连接| tcp[检查 bridge0:0、站端地址 / 端口和 TCP 重连（11.4）]
+    issue -->|已连接但无业务| auth[检查登录、随机数、鉴权和心跳（11.5）]
+    issue -->|CAN / BMS / VIN 异常| can[检查本机 nanomsg、帧 ID / 车型和 VIN 路径（11.6）]
+    issue -->|锁止 / 解锁异常| lock[检查参数命令、发布命令、DI / CAN 反馈和应答（11.7）]
+    issue -->|日志 / 属性 / 故障上报异常| data[检查对应队列、打包与日志路径（11.8）]
 ```
 
 **判定原则：** `bs_client` 进程在运行，只能证明入口与部分线程被创建；`/tmp/wifi_state=1` 只能证明代码曾建立 TCP 连接；“登录成功”不等于鉴权成功；“参数应答成功”只说明程序按自己的反馈条件给出结果，不证明物理机构完成动作。按链路逐项收集证据，避免把下游服务、站端或硬件故障直接归因到本进程。[`main.c:276-334`、`batt_stand_client.c:443-518`、`batt_message_parse.c:34-88,130-245`]
@@ -499,14 +451,14 @@ grep -E '^(server_ip|server_port|vehicle_type|enable_vin_request|exchange_state)
 
 这是设备动作链路，先只读观察，不向进程发送 `SIGUSR1/SIGUSR2`，也不直接写 DO 或向站端构造参数命令。排查顺序如下：
 
-```text
-站端确实发出 0x8040 参数命令？
-  → bs_client 收到的参数号、长度、状态值正确？
-  → BCC1_ExchangeState / 唤醒请求 / VCUControl 是否按 0x02 或 0x04 更新？
-  → 26008 的命令接收进程是否收到并转发？
-  → 对应平台 DO 通道及 MCU/VCU 是否执行？
-  → DI（或新底托重卡的 0x98FFD1EF CAN 帧）反馈是否变化？
-  → 本进程给站端的是结果 0、结果 2，还是根本没有应答？
+```mermaid
+flowchart TD
+    command[站端是否发出 0x8040 参数命令?] --> recv[bs_client 收到的参数号、长度和状态值正确?]
+    recv --> update[BCC1_ExchangeState / 唤醒请求 / VCUControl 是否按 0x02 或 0x04 更新?]
+    update --> ipc[26008 命令接收进程是否收到并转发?]
+    ipc --> output[对应平台 DO 通道及 MCU / VCU 是否执行?]
+    output --> feedback[DI 或新底托重卡 0x98FFD1EF CAN 反馈是否变化?]
+    feedback --> ack[本进程给站端的是结果 0、结果 2，还是没有应答?]
 ```
 
 日志对照：`Try UNLOCK`/`Try LOCK` 表示源码进入相应分支；`pin_23`、`pin_30`、`BCC1_LockPin_Sts` 表示输入判定；`unlock success, parm response`、`lock success, parm response` 表示程序认为反馈达标；`unlock/lock timeout, parm response` 表示约 10 秒未达标。若 `can bus no response for parm set!` 出现，源码仅记录错误，没有立即中止该参数设置。自卸车锁止时还有 `Locking in ElecConnect_Sts`/`Failed locking in ElecConnect_Sts` 的连接器条件。[`batt_message_parse.c:34-88,256-356`、`main.c:106-159`]

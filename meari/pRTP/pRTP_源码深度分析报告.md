@@ -487,18 +487,34 @@ README 定位为 VMS 接入 NVR 的客户端。本模块实现 NVNV 命令/媒�
 
 ### 5.5 三条调用路径对照
 
-```text
-旧 prtp 控制接收：
-recv → client.rbuf → pps_pipe_recv → find_one_packet → unpack/校验
-     → package2struct → g_recv_callbacks → nkit 命令处理 → 产品业务回调
-
-旧 prtp 媒体发送：
-上层提交帧 → 查 SN 对应 pipe → 200 KiB 视频分片 → build_media
-     → pack 原样入固定发送环形缓冲 → client_send_pthread → TCP send
-
-NVNV 登录与业务：
-TCP connect → NOCE_REQ/RSP → MD5(user:noce:password) → AUTH_REQ/RSP
-     → LOGIN_REQ/RSP → 命令/预览/回放 → JSON 或 NV_DataHead + 帧数据
+```mermaid
+flowchart TD
+    subgraph Control[旧 prtp 控制接收]
+        A[recv] --> B[client.rbuf]
+        B --> C[pps_pipe_recv]
+        C --> D[find_one_packet]
+        D --> E[unpack / 校验]
+        E --> F[package2struct]
+        F --> G[g_recv_callbacks]
+        G --> H[nkit 命令处理]
+        H --> I[产品业务回调]
+    end
+    subgraph Media[旧 prtp 媒体发送]
+        J[上层提交帧] --> K[查找 SN 对应 pipe]
+        K --> L[按 200 KiB 分片视频]
+        L --> M[build_media]
+        M --> N[pack 并写入固定发送环形缓冲]
+        N --> O[client_send_pthread]
+        O --> P[TCP send]
+    end
+    subgraph NVNV[NVNV 登录与业务]
+        Q[TCP connect] --> R[NOCE_REQ / RSP]
+        R --> S[计算 MD5 user:noce:password]
+        S --> T[AUTH_REQ / RSP]
+        T --> U[LOGIN_REQ / RSP]
+        U --> V[命令 / 预览 / 回放]
+        V --> W[JSON 或 NV_DataHead + 帧数据]
+    end
 ```
 
 旧服务端 rbuf 为每客户端 256 KiB，发送 pipe 为 1 MiB；发送线程每次只推进实际发送的字节数，遇到短发送或失败跳出内层，20 ms 后重试。两个大小分别属于不同方向，不能相加解释成自动扩容队列。[pps_tcp_server.h:27](/home/tronlong/lyp/meari/pRTP/prtp/prtp/inc/pps_tcp_server.h:27)、[pps_tcp_server.c:323](/home/tronlong/lyp/meari/pRTP/prtp/prtp/src/pps_tcp_server.c:323)、[pps_tcp_server.c:377](/home/tronlong/lyp/meari/pRTP/prtp/prtp/src/pps_tcp_server.c:377)。

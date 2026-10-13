@@ -46,19 +46,26 @@
 
 下图按接口分为四条可从六篇文档核对的业务链。图中的箭头是源码中的输入输出或兼容接口，不表示这些应用在同一设备上必定同时启动。
 
-```text
-上游 H.264 生产者 ──> aibox_stream <──本机 UDP──> jtt_808_1078 <──TCP──> 808 平台
-                           └──> SD 卡 MP4                ├──> 录像检索/FTP
-                           └──> 1078/TCP 视频            └──> 告警抓图/附件
-
-上游 BGR 共享内存 ──> sep-faces ── /skes/filter FaceRecognition ──> SKES relay
-BSD/DMS 上游事件 ── /skes/event ──────────────────────────────> SKES relay
-                                                               └──> sound_light_alarm_sep
-                                                                    ├──> 本地 RS485/GPIO
-                                                                    └──> 串口/DO 服务
-
-CAN 发布端 ──> filter_sep ── /skes/filter filter_table ──> SKES relay / 消费者
-AEB 属性、故障/BSD/配重事件 ──> skes-aeb2vcu ── can_frame_t ──> CAN0 TX 服务 ──> VCU
+```mermaid
+flowchart LR
+    h264["上游 H.264 生产者"] --> stream["aibox_stream"]
+    stream <-->|"本机 UDP"| jtt["jtt_808_1078"]
+    jtt <-->|"TCP"| platform["808 平台"]
+    stream --> mp4["SD 卡 MP4"]
+    stream --> video["1078/TCP 视频"]
+    jtt --> search["录像检索/FTP"]
+    jtt --> attach["告警抓图/附件"]
+    bgr["上游 BGR 共享内存"] --> faces["sep-faces"]
+    faces -->|"/skes/filter FaceRecognition"| relay["SKES relay"]
+    events["BSD/DMS 上游事件"] -->|"/skes/event"| relay
+    relay --> alarm["sound_light_alarm_sep"]
+    alarm --> gpio["本地 RS485/GPIO"]
+    alarm --> serialdo["串口/DO 服务"]
+    can["CAN 发布端"] --> filter["filter_sep"]
+    filter -->|"/skes/filter filter_table"| consumers["SKES relay / 消费者"]
+    aeb["AEB 属性、故障/BSD/配重事件"] --> bridge["skes-aeb2vcu"]
+    bridge -->|"can_frame_t"| cantx["CAN0 TX 服务"]
+    cantx --> vcu["VCU"]
 ```
 
 `filter_sep` 发布的 `filter_table` 与 `skes-aeb2vcu` 接受的 `AEB` 属性不是同一种消息，不能只因为都使用 `/skes/filter` 就把二者画成直接调用关系。`sep-faces` 的 `FaceRecognition` 属性符合 `sound_light_alarm_sep` 的输入解析条件；实际到达仍取决于 relay、部署和运行状态。`jtt_808_1078` 与 `aibox_stream` 的 UDP 控制、回复端口分别由两篇报告核对；平台应答与画面送达也是不同层次的结果。

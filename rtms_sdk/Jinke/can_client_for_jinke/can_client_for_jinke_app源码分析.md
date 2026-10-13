@@ -51,11 +51,14 @@
 
 ## 核心架构设计
 
-```text
-本机 CAN → can_server → data_process / scene → MQTT 主题
-配置 / Schema / 点表 ────────┘
-NOT_USED_SCHEMA + USE_JINKE 控制旧 GPS / MCU / 事件路径
-构建宏组合本身还需先满足类型可见性约束
+```mermaid
+flowchart LR
+    can[本机 CAN] --> server[can_server]
+    server --> process[data_process / scene]
+    config[配置 / Schema / 点表] --> process
+    process --> mqtt[MQTT 主题]
+    macros[NOT_USED_SCHEMA + USE_JINKE] -. 控制旧 GPS / MCU / 事件路径 .-> process
+    constraint[构建宏组合] -. 需满足类型可见性约束 .-> process
 ```
 
 顶层 WITH_CAN_CLIENT_FOR_JINKE 默认关闭；部分宏组合在当前源码中存在类型可见性问题，不能把默认选项写成已验证可运行配置。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -77,11 +80,16 @@ NOT_USED_SCHEMA + USE_JINKE 控制旧 GPS / MCU / 事件路径
 
 ## 关键流程与数据流
 
-~~~text
-配置 / 点表 → CAN 接收 → 字段换算与场景更新
-字段 + 场景 → 间隔 / 接收时间 / 变化阈值筛选
-合格字段 → 按 mtyp 编码 → 对应 MQTT 主题
-~~~
+```mermaid
+flowchart TD
+    config[配置 / 点表] --> receive[CAN 接收]
+    receive --> fields[字段换算与场景更新]
+    fields --> filter[按间隔、接收时间和变化阈值筛选]
+    filter --> qualified{有合格字段?}
+    qualified -->|否| receive
+    qualified -->|是| encode[按 mtyp 编码]
+    encode --> topic[发布到对应 MQTT 主题]
+```
 
 这是构建宏使主链路可达时的顺序。先核对[构建条件](#analysis-3)，再顺读[启动图](#analysis-4)、[CAN 图](#analysis-7)、[上报图](#analysis-8)；Schema 和旧事件路径受条件编译限制。
 
@@ -96,7 +104,7 @@ NOT_USED_SCHEMA + USE_JINKE 控制旧 GPS / MCU / 事件路径
 - 结论分为**源码事实**和**条件/边界**：代码未提供金科专用运行点表、目标设备日志和云端回执，本文不给出这些材料才能证明的车型字段、最终部署组合或端到端成功结论。没有执行交叉编译或设备联调。
 - 本文分析的是 `can_client_for_jinke` 这份源码。SDK 其他应用的同名 `can_client` 或其他设备型号的 JSON 配置不能直接代入本项目。
 
-**阅读顺序：**想了解整体流程，先看第 3、6、7、8 节的文本流程图；设备现场排查直接看第 10 节；编译或配置疑问看第 2、4、5 节。所有流程图均使用普通文本代码块，无需 Mermaid 支持。
+**阅读顺序：**想了解整体流程，先看第 3、6、7、8 节的 Mermaid 流程图；设备现场排查直接看第 10 节；编译或配置疑问看第 2、4、5 节。流程图均使用 Mermaid 代码块，需由支持 Mermaid 的 Markdown 阅读器渲染。
 
 <a id="analysis-2"></a>
 
@@ -144,25 +152,31 @@ NOT_USED_SCHEMA + USE_JINKE 控制旧 GPS / MCU / 事件路径
 
 图中步骤来自 `main.c:39-115`，构建分支以宏标出。`can_mng_init()` 内的场景库加载失败不会使主函数直接退出，后续风险见第 9 节。
 
-```text
-main
-  │
-  ├─ 初始化日志、Mosquitto
-  ├─ can_mng_init：分配上下文，确定程序目录，尝试加载 libscene.so
-  │     └─ 分配失败 ──────────────────────────────────────→ 退出 -1
-  ├─ 读取 /opt/conf_ext2.ini 的 mgw 地址
-  │     └─ 读取失败 ──────────────────────────────────────→ 退出 -1
-  ├─ NOT_USED_SCHEMA=ON 且 USE_JINKE=ON：检查日期、初始化事件队列
-  ├─ NOT_USED_SCHEMA=OFF：加载 GeneralParam.json
-  │     └─ 加载失败 ──────────────────────────────────────→ 退出 -1
-  ├─ 加载 Pointsheet_info1.json
-  │     └─ 加载失败 ──────────────────────────────────────→ 退出 -1
-  ├─ 登记 CPActive（超时 10 秒）
-  │     └─ 登记失败 ──────────────────────────────────────→ 退出 -1
-  ├─ 启动保活、CAN、MQTT 线程
-  ├─ NOT_USED_SCHEMA=ON：再启动 GPS/MCU 应用消息线程
-  ├─ 两宏均 ON：再启动日期检查、FEI4 统计线程
-  └─ pthread_join(最后写入的 tid)；若返回则清理 Mosquitto
+```mermaid
+flowchart TD
+    start[main] --> init[初始化日志、Mosquitto]
+    init --> manager[can_mng_init：分配上下文、确定程序目录、尝试加载 libscene.so]
+    manager -->|分配失败| error[退出 -1]
+    manager -->|成功| conf[读取 /opt/conf_ext2.ini 的 mgw 地址]
+    conf -->|读取失败| error
+    conf -->|成功| schema{构建宏组合}
+    schema -->|NOT_USED_SCHEMA=ON 且 USE_JINKE=ON| date[检查日期并初始化事件队列]
+    schema -->|NOT_USED_SCHEMA=OFF| general[加载 GeneralParam.json]
+    general -->|失败| error
+    general -->|成功| points[加载 Pointsheet_info1.json]
+    date --> points
+    points -->|失败| error
+    points -->|成功| active[登记 CPActive，超时 10 秒]
+    active -->|失败| error
+    active -->|成功| threads[启动保活、CAN、MQTT 线程]
+    threads --> gps{NOT_USED_SCHEMA=ON?}
+    gps -->|是| appmsg[启动 GPS / MCU 应用消息线程]
+    gps -->|否| macros{两宏均 ON?}
+    appmsg --> macros
+    macros -->|是| extra[启动日期检查、FEI4 统计线程]
+    macros -->|否| join[pthread_join 最后写入的 tid]
+    extra --> join
+    join -->|若返回| cleanup[清理 Mosquitto]
 ```
 
 `main()` 对 `can_mng_init()`、INI、两份 JSON、`cpactive_add_pinfo()` 有显式失败检查；对 `create_cpactive()` 返回指针、`load_libscene()` 返回值和每次 `pthread_create()` 的返回值没有完整检查。同一个 `pthread_t tid` 反复作为输出参数，最终只等待最后一次赋值的线程 ID。`cpactive_task()` 每 5 秒更新一次访问时间，登记超时为 10 秒；它是进程管理心跳，不是 CAN/MQTT 的数据健康证明。依据：`main.c:24-37,57-112`、`src/can_mng/can_mng.c:98-114`。
@@ -211,19 +225,22 @@ main
 
 `can_frame_t` 按源码字段顺序是 `can_id`（32 位）、`can_dlc`（16 位）、`rsv_ms`（16 位）、`data[8]` 和 `timestamp`（32 位）。两个处理函数都以整个帧结构的地址作为位偏移基准；数据区从第 8 字节即位偏移 64 开始。点表偏移应匹配这个结构，不是直接从 `data[0]` 的位 0 开始。依据：`src/can_server/can_server.h:13-20`、`src/data_process/data_process.c:453-487`、`src/scene_lib/scene_judge.c:35-72`。
 
-```text
-CAN 线程
-  │
-  ├─ 连接 16002 / 16003 / 16004 三个 NN_SUB 端口
-  └─ 循环 nn_poll（最多等待 2000 ms）
-       ├─ 无消息 → 继续等待
-       └─ 有消息 → nn_recv → 按 sizeof(can_frame_t) 切出完整帧
-                                │
-                                ├─ NOT_USED_SCHEMA=ON：parse_special_msg
-                                ├─ parse_common_msg：按通道和 CAN ID 查点表
-                                │    └─ 命中规则才提取字段：位偏移、字节序、符号、缩放
-                                ├─ judge_scene：返回场景名
-                                └─ set_cur_scene → 下一帧；处理完释放消息
+```mermaid
+flowchart TD
+    start[CAN 线程] --> connect[连接 16002 / 16003 / 16004 三个 NN_SUB 端口]
+    connect --> poll[循环 nn_poll，最多等待 2000 ms]
+    poll -->|无消息| poll
+    poll -->|有消息| recv[nn_recv 并按 sizeof(can_frame_t) 切出完整帧]
+    recv --> special{NOT_USED_SCHEMA=ON?}
+    special -->|是| parseSpecial[parse_special_msg]
+    special -->|否| common[parse_common_msg：按通道和 CAN ID 查点表]
+    parseSpecial --> common
+    common -->|命中规则| fields[按位偏移、字节序、符号和缩放提取字段]
+    common -->|未命中| scene[judge_scene 返回场景名]
+    fields --> scene
+    scene --> set[set_cur_scene]
+    set --> free[释放消息并处理下一帧]
+    free --> poll
 ```
 
 普通规则先用通道与 CAN ID 查找，找到后依 `ofs/len/bo` 提取原始整数。数值类型 1/2/3 用 `sign` 做补码符号处理，再按 `raw × sc + pofs` 换算并限幅；类型 7 把原始值按 `int16_t` 转换后同样缩放；类型 4/5 按字节读字符串。处理成功会更新 `time_rcv`，代表本进程收到并解析值的单调时钟时间。依据：`data_process.c:445-568,676-685`。代码未依据 `can_dlc` 限制字段读取长度，点表位宽超出帧结构时存在越界风险。
@@ -236,23 +253,32 @@ CAN 线程
 
 MQTT 线程以 `can_client` 为 Client ID，注册连接、断开、订阅与消息回调。首次 `mosquitto_connect()` 返回成功后启动 `mosquitto_loop_start()`；连接回调把状态设为 `STATUS_CONNACK_RECVD`。默认 Schema 路径随后循环尝试生成并发布一次 CBOR Schema，直至 `mosquitto_publish()` 返回成功。若收到 `local/data/get_schema` 的非空载荷，则再次发布 Schema。依据：`src/mosquitto/client_mosquitto.c:46-179`。这里的“成功”是客户端 API 的返回值，不是业务端确认。
 
-```text
-MQTT 线程 → 连接 INI 指定的 Broker
-  │          └─ 首次 connect 调用失败：每 2 秒重试
-  └─ connect 调用成功 → 启动 Mosquitto 网络循环
-  │
-  ├─ 连接回调失败：回调本身不显式重发连接请求
-  └─ 连接成功
-       ├─ NOT_USED_SCHEMA=OFF：订阅 get_schema，发布一次 CBOR Schema
-       └─ 工作数据循环：遍历点表的 interval 列表
-            ├─ 间隔未到 → 检查下一个间隔
-            └─ 间隔已到 → 按场景、间隔、time_rcv、udif 筛字段
-                 ├─ 无合格字段 → 不发布工作数据
-                 └─ 有合格字段 → 按 mtyp 编码并发布 QoS 0
-                      ├─ 0：普通 JSON → local/data/general_data
-                      ├─ 1：CBOR      → local/data/cbor_general_data
-                      └─ 2：普通 JSON → local/data/gz_general_data（未压缩）
-                      发布后释放载荷 → 继续循环
+```mermaid
+flowchart TD
+    start[MQTT 线程：连接 INI 指定的 Broker] --> connect{首次 connect 调用成功?}
+    connect -->|否| retry[每 2 秒重试]
+    retry --> connect
+    connect -->|是| loop[启动 Mosquitto 网络循环]
+    loop --> callback{连接回调结果}
+    callback -->|失败| noRetry[回调本身不显式重发连接请求]
+    callback -->|成功| schema{NOT_USED_SCHEMA=OFF?}
+    schema -->|是| subscribe[订阅 get_schema 并发布一次 CBOR Schema]
+    schema -->|否| intervals[遍历点表 interval 列表]
+    subscribe --> intervals
+    intervals --> due{间隔已到?}
+    due -->|否| intervals
+    due -->|是| filter[按场景、间隔、time_rcv、udif 筛选字段]
+    filter --> has{存在合格字段?}
+    has -->|否| intervals
+    has -->|是| encode[按 mtyp 编码并以 QoS 0 发布]
+    encode --> type{mtyp}
+    type -->|0| json[普通 JSON：local/data/general_data]
+    type -->|1| cbor[CBOR：local/data/cbor_general_data]
+    type -->|2| gz[普通 JSON，未压缩：local/data/gz_general_data]
+    json --> release[释放载荷并继续循环]
+    cbor --> release
+    gz --> release
+    release --> intervals
 ```
 
 间隔表来自点表中各字段的 `scems`，按整数去重、排序。MQTT 循环以单调时钟判断每个间隔是否到期，到期后立即更新该间隔的 `time_pub`，再生成载荷。对每个字段，筛选需同时满足：当前 `cur_scene` 与字段 `sce[j]` 相符、字段 `interval[j]` 等于当前间隔、`time_rcv != 0`。第一次合格上报通过；后续 `udif=0` 允许周期重复；否则数值差值达到阈值、或字符串变化才通过。字段的 `time_pub` 在生成载荷时更新，不等待 MQTT 或下游确认。依据：`client_mosquitto.c:182-231`、`data_process.c:852-1104`。
@@ -282,16 +308,18 @@ MQTT 线程 → 连接 INI 指定的 Broker
 
 `USE_JINKE=ON` 且 `NOT_USED_SCHEMA=ON` 时，金科扩展按如下流程运行：
 
-```text
-收到 CAN ID 0x215
-  │
-  ├─ 提取工单号、计划/实际深度、耗时和成功标志
-  ├─ 工单号未变化 → 忽略，等待下一帧
-  └─ 工单号变化 → 创建事件并尝试入队
-       ├─ 入队失败 → 等待下一帧（当前代码未释放该事件）
-       └─ 入队成功 → 更新上一工单号和 /media/sdcard/jk_evt_no
-            └─ MQTT 循环出队 → 生成 DrillingCompletionEvent JSON
-                 └─ 发布 local/data/event（QoS 0）
+```mermaid
+flowchart TD
+    frame[收到 CAN ID 0x215] --> extract[提取工单号、计划 / 实际深度、耗时和成功标志]
+    extract --> changed{工单号发生变化?}
+    changed -->|否| wait[忽略并等待下一帧]
+    changed -->|是| event[创建事件并尝试入队]
+    event -->|入队失败| wait
+    event -->|入队成功| persist[更新上一工单号和 /media/sdcard/jk_evt_no]
+    persist --> dequeue[MQTT 循环出队]
+    dequeue --> payload[生成 DrillingCompletionEvent JSON]
+    payload --> publish[发布 local/data/event，QoS 0]
+    publish --> wait
 ```
 
 `0x215` 的 8 字节分别包含工单号、计划深度两字节、实际深度两字节、耗时两字节、成功标志。内存队列用互斥锁保护，`MAX_SIZE=10` 的环形队列以一个空槽区分满/空，最多存放 9 个事件；队列满时入队失败，代码没有在该分支释放刚分配的事件。事件生成函数从队列取出后释放事件对象，再调用 `mosquitto_publish()`；不以 Broker/云端确认作为出队条件。日期检查线程每 10 秒读取本地日号，不同时把上一工单号置零并写入 `/media/sdcard/jk_evt_no`。依据：`can_server.c:20-52,76-100`、`event/jk_event.c:8-98`、`queue/queue.h:4-13`、`queue/queue.c:7-60`、`client_mosquitto.c:233-240`。
@@ -324,20 +352,16 @@ MQTT 线程 → 连接 INI 指定的 Broker
 
 以下命令是**在目标设备上观察现状的示例**，不是已执行的实测结果。设备可能使用 BusyBox，缺少 `ss`、`jq`、`mosquitto_sub`、`journalctl`、`file` 等工具；缺少时保留同一检查目的，用设备已有工具或从部署日志获取证据。先记录设备型号、固件版本、实际 `can_client` 二进制、启动方式与时间，再按下述顺序定位。不要为排查而在正在运行的设备上再启动一个 `can_client`：源码使用固定 MQTT Client ID `can_client`，重复实例会干扰连接判断（`client_mosquitto.c:117`）。
 
-```text
-确认故障时间、设备和固件版本
-  │
-  ├─ can_client 进程不存在
-  │    → 查构建选项、启动方式、INI/JSON、动态库和启动日志
-  └─ 进程存在
-       ├─ CAN 未进入 → 查 16002～16004 的发布者、通道和帧结构
-       └─ CAN 已进入
-            ├─ 字段/场景不满足规则 → 查 CAN ID、ofs/len、sce/scems/udif
-            └─ 字段满足规则
-                 ├─ Broker 上无对应消息 → 查连接日志、mtyp、生成函数
-                 └─ Broker 上有对应消息
-                      ├─ 下游/云端异常 → 查订阅转发进程和远端链路
-                      └─ 内容不符 → 查字段值、时间戳和业务预期
+```mermaid
+flowchart TD
+    symptom[确认故障时间、设备和固件版本] --> process{can_client 进程存在?}
+    process -->|否| startup[查构建选项、启动方式、INI / JSON、动态库和启动日志]
+    process -->|是| can{CAN 是否进入?}
+    can -->|否| source[查 16002～16004 发布者、通道和帧结构]
+    can -->|是| report[沿数据项、场景和 MQTT 上报路径继续排查]
+    startup --> evidence[记录最早失败环节和证据]
+    source --> evidence
+    report --> evidence
 ```
 
 ### 10.1 固定现场证据与确定正在运行的程序

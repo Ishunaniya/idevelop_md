@@ -150,21 +150,21 @@
 
 ## 9. 端到端数据流
 
-```
-[TSP平台] ──MQTT RC40任务JSON──► [mosq_client_task] parse_ota_payload → ota_zip_file_info(url/md5/key/msg_id)
-                                          │ task_receive_flag=1
-                                          ▼
-[主循环] ota_task_info_new → ota_task_info_load
-   ├─ curl 下载升级包 → /usrdata/uds_ota
-   ├─ unzip → /usrdata/uds_ota/ota_file
-   ├─ pase_ota_zip_file → ota_file_info 队列 (hex2bin/s192bin/vcu_uds_crc 转换)
-   └─ uds_new: 按 dev_type 装 f_uds_pre/program/after 指针 + CAN 收发ID
-                                          ▼
-[UDS刷写线程] uds_server 状态机:
-   init(重试/连发会话帧) → connect(0x10 83) → pre → program(0x27安全/0x34下载/0x36块传/0x37退出/0x31擦除) → after(0x11复位) → del_file → suc
-        │ 进度 uds_update_progress                    │ 失败 → exit(1) + 通知MCU(16008)
-        ▼                                             ▼
-[ota_status_send_task] CAN 0x98FF11FC 发仪表(每500ms)   [ota_status_reply] MQTT 回TSP(状态码)
+```mermaid
+flowchart TD
+    TSP[TSP 平台] -->|MQTT RC40 任务 JSON| Mosq[mosq_client_task：parse_ota_payload]
+    Mosq --> Info[ota_zip_file_info：url、md5、key、msg_id]
+    Info -->|task_receive_flag=1| Main[主循环：ota_task_info_new → ota_task_info_load]
+    Main --> Download[curl 下载升级包到 /usrdata/uds_ota]
+    Download --> Unzip[unzip 到 /usrdata/uds_ota/ota_file]
+    Unzip --> Parse[pase_ota_zip_file：转换并填充 ota_file_info 队列]
+    Parse --> Init[uds_new：按 dev_type 设置 UDS 回调及 CAN 收发 ID]
+    Init --> UDS[UDS 刷写线程：uds_server 状态机]
+    UDS --> Steps[init → connect 0x10 83 → pre → program → after 0x11 → del_file → suc]
+    Program[program 阶段：0x27 安全、0x34 下载、0x36 传输、0x37 退出、0x31 擦除] -.-> Steps
+    UDS -->|进度 uds_update_progress| Instrument[ota_status_send_task：每 500ms 发 CAN 0x98FF11FC 到仪表]
+    UDS -->|失败：exit(1) 并通知 MCU 16008| Failure[刷写失败]
+    UDS -->|完成状态| Reply[ota_status_reply：MQTT 状态码回 TSP]
 ```
 
 ---

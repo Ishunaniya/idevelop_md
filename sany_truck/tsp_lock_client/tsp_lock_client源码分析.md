@@ -142,19 +142,27 @@ typedef struct {
 
 ## 8. 端到端数据流
 
-```
-[平台] ──MQTT(主题=phone_number)──► [本机broker] ──► mosq_message_callback
-     解析 0x8F40 → cmd_type(data[1]) → save /opt/lock_cmd.ini → finance_lock_msg 入 recv_msg_list
-                                          │(无锁共享)                      │
-                                          ▼                                ▼(延迟10s)
-                          [锁任务线程] 按 cmd_type            [MQTT主循环] 回 0x8F40 应答 → broker → 平台
-                          send_bind/lock/unlock_to_ecu ──CAN──► 锁车ECU
-                                          ▲ 读 lock_status
-[锁车ECU] ──0x18FF0800 状态──► [CAN线程] lock_status/md5_lock_status
-          ──0x18FFCF00 seed──► respond_handshake(MD5(CRC16(secret)+seed)) ──0x18FFD5FC──► ECU
-          ──0x18FEC1EE 里程 / 0x1AD60E28 校验──► parse_delay_unlock_data ──0x1ACDEB4A──► ECU
-
-[离线自愈] 无网累计 offline_min ≥ 30天 → 强制 CMD_LOCK_LV3 + force_lock.flag
+```mermaid
+flowchart TD
+    Platform[平台] -->|MQTT：主题 phone_number| Broker[本机 broker]
+    Broker --> Callback[mosq_message_callback：解析 0x8F40]
+    Callback --> Cmd[cmd_type：data[1]]
+    Cmd --> Save[保存 /opt/lock_cmd.ini]
+    Cmd --> Queue[finance_lock_msg 入 recv_msg_list]
+    Queue -->|无锁共享| LockTask[锁任务线程：按 cmd_type 处理]
+    Cmd -->|延迟 10s| MainLoop[MQTT 主循环：回复 0x8F40]
+    LockTask --> Send[send_bind / lock / unlock_to_ecu]
+    Send -->|CAN| ECU[锁车 ECU]
+    ECU -->|0x18FF0800 状态| CanThread[CAN 线程]
+    CanThread --> Status[lock_status / md5_lock_status]
+    Status --> LockTask
+    ECU -->|0x18FFCF00 seed| Handshake[respond_handshake：MD5(CRC16(secret) + seed)]
+    Handshake -->|0x18FFD5FC| ECU
+    ECU -->|0x18FEC1EE 里程、0x1AD60E28 校验| DelayUnlock[parse_delay_unlock_data]
+    DelayUnlock -->|0x1ACDEB4A| ECU
+    MainLoop --> Broker
+    Offline[离线自愈：无网累计 offline_min ≥ 30 天] --> Force[强制 CMD_LOCK_LV3 + force_lock.flag]
+    Force --> LockTask
 ```
 
 ---

@@ -11,7 +11,7 @@
    - [专题 2：文件、构建与运行位置](#detail-2)
 2. [二、源码目录总览](#source-tree)
 3. [三、核心架构设计](#architecture)
-   - [专题 3：完整逻辑流程图（普通 Markdown 可显示）](#detail-3)
+   - [专题 3：完整逻辑流程图（Mermaid）](#detail-3)
 4. [四、核心模块深度分析](#modules)
    - [专题 4：数据结构与二进制输入](#detail-4)
    - [专题 5：四个 CAN ID 到五个属性的精确映射](#detail-5)
@@ -75,103 +75,94 @@ filter_sep/
 <a id="architecture"></a>
 ## 三、核心架构设计
 
-```text
-CAN 发布端 16002/16003/16004 ──> CAN 接收线程 ──> curr_dt / valid_dt
-                                                  ├──> 变化发布线程
-                                                  │      └── post/filter_table ──> /skes/filter
-SKES /skes/filter 的 request/query ──> 消息线程 ───┘
-                                                  └── response/query ──> /skes/filter
+```mermaid
+flowchart LR
+    can["CAN 发布端 16002/16003/16004"] --> receiver["CAN 接收线程"] --> state["curr_dt / valid_dt"]
+    state --> publisher["变化发布线程"] --> post["post/filter_table"] --> topic["/skes/filter"]
+    topic --> request["SKES request/query"] --> handler["消息线程"] --> response["response/query"] --> topic
 ```
 
 只有 `0x16D61B96` 档位/车速帧会将 `valid_dt` 置真；发布线程还要求整块状态与 `last_dt` 不同，并在约 200 毫秒循环末尾休眠。查询分支要求主题、外层 `action/type`、内层 `data.type` 和至少一个已知属性名均符合条件。当前 CAN 写侧没有使用读侧所用的 mutex；发送前即更新 `last_dt`，发送失败不会因状态不变而自动重发。流程图、字段映射及消息样例见原第 3～7 节。
 
 <a id="detail-3"></a>
-### 3. 完整逻辑流程图（普通 Markdown 可显示）
+### 3. 完整逻辑流程图（Mermaid）
 
-以下全部采用等宽文本图，普通 Markdown 查看器只需支持代码块；本节后另有逐步文字版流程。
+以下流程图使用 Mermaid；本节后另有逐步文字版流程。
 
 #### 3.1 启动、线程和退出
 
-```text
-main()
-  |
-  +--> 通过 syslog LOG_D 记录编译时间/版本；设置 skes-log DEBUG 级别
-  |
-  +--> filter_pubsub_new()
-  |      |
-  |      +--> malloc 状态对象
-  |      +--> skes_linker_init(): 连接 SUB 19226 / PUB 19225
-  |      +--> 失败：main 返回 -1
-  |
-  +--> filter_pubsub_run()
-  |      |
-  |      +--> 启动 SKES 接收线程 do_sre_msg_poller
-  |      +--> 启动变化上报线程 do_sre_filter_pub
-  |      +--> 失败：main 返回 -1
-  |
-  +--> 清零 filter_mng，初始化 mutex
-  +--> 启动并 detach CAN 接收线程 start_can_server
-  |
-  +--> 每 200 ms 读取 sre->running
-         |
-         +--> true：继续循环
-         +--> false：filter_pubsub_release()，main 返回 0
+```mermaid
+flowchart TD
+    start(["main()"])
+    log["记录编译时间/版本；设置 skes-log DEBUG"]
+    new["filter_pubsub_new()：分配状态并连接 SUB 19226 / PUB 19225"]
+    failnew["初始化失败：main 返回 -1"]
+    run["filter_pubsub_run()：启动 SKES 接收线程和变化上报线程"]
+    failrun["线程启动失败：main 返回 -1"]
+    init["清零 filter_mng；初始化 mutex"]
+    can["启动并 detach CAN 接收线程 start_can_server"]
+    poll{"每 200 ms 检查 sre->running"}
+    keep["running 为 true：继续循环"]
+    release["running 为 false：filter_pubsub_release()；main 返回 0"]
+    start --> log --> new
+    new -->|"失败"| failnew
+    new -->|"成功"| run
+    run -->|"失败"| failrun
+    run -->|"成功"| init --> can --> poll
+    poll -->|"true"| keep --> poll
+    poll -->|"false"| release
 ```
 
 图中顺序严格对应 `src/main.cpp:36-67`，因此上报线程可能在 `filter_mng` 初始化前执行；CAN 线程创建结果未检查。`filter_pubsub_stop()` 虽有定义，入口没有调用它，正常主循环也没有主动把 `running` 置为 false。这里的“退出”只描述源码可见的分支，不表示已有可靠的优雅退出路径。
 
 #### 3.2 CAN 接收、解析与上报
 
-```text
-CAN 接收线程
-  |
-  +--> 依次创建三个 NN_SUB；订阅全部消息；nn_connect(16002/16003/16004)
-  |      +--> 任一步返回错误：线程结束
-  |
-  +--> nn_poll(三个 socket，超时 2000 ms)
-         |
-         +--> 超时：继续轮询
-         +--> 错误：退出接收函数与线程
-         +--> 可读：nn_recv()
-                |
-                +--> 消息按 sizeof(can_frame_t) 分段，尾部不足一帧的字节不解析
-                +--> 每帧清 CAN ID 最高位，再按 ID 更新 curr_dt
-                       |
-                       +--> 0x16D61B96：档位、车速，valid_dt=true
-                       +--> 0x1AD18096：加速踏板；随后落入制动踏板分支
-                       +--> 0x1AD19696：制动踏板
-                       +--> 0x1ED6F396：另一制动踏板
-                       +--> 其他：不更新
-
-变化上报线程（每轮末尾休眠 200 ms）
-  |
-  +--> 复制 curr_dt
-  +--> valid_dt 为 false？---- 是 --> 跳过本轮
-  +--> 与 last_dt 整块相同？-- 是 --> 跳过本轮
-  +--> 先把本次数据复制到 last_dt
-  +--> 组装五项 properties/filter_table JSON
-  +--> skes_send(..., "/skes/filter", ...)
-  +--> 返回循环
+```mermaid
+flowchart TD
+    start(["CAN 接收线程"])
+    connect["创建三个 NN_SUB、订阅全部消息、连接 16002/16003/16004"]
+    poll["nn_poll 三个 socket，超时 2000 ms"]
+    recv["可读：nn_recv()；按 can_frame_t 分段，尾部不足一帧不解析"]
+    parse["清 CAN ID 最高位；按 ID 更新 curr_dt"]
+    start --> connect --> poll
+    connect -->|"任一步失败：线程结束"| stop["线程结束"]
+    poll -->|"超时"| poll
+    poll -->|"错误：退出接收函数与线程"| stop
+    poll -->|"可读"| recv --> parse
+    parse --> gear["0x16D61B96：档位、车速；valid_dt=true"]
+    parse --> accel["0x1AD18096：加速踏板；随后落入制动踏板分支"]
+    parse --> brake["0x1AD19696：制动踏板"]
+    parse --> brake2["0x1ED6F396：另一制动踏板"]
+    parse --> other["其他 ID：不更新"]
+    publish(["变化上报线程：每轮末尾休眠 200 ms"])
+    valid{"valid_dt 为 true？"}
+    changed{"curr_dt 与 last_dt 不同？"}
+    skip["跳过本轮"]
+    save["复制到 last_dt；组装五项 properties/filter_table JSON"]
+    send["skes_send(..., /skes/filter, ...)"]
+    publish --> valid
+    valid -->|"否"| skip --> publish
+    valid -->|"是"| changed
+    changed -->|"否"| skip
+    changed -->|"是"| save --> send --> publish
 ```
 
 接收分支来自 `src/can_server/can_server.cpp:62-140`，上报分支来自 `src/filter_pub/filter_pubsub.cpp:275-420`。图中的“连接”指 `nn_connect()` 调用返回成功，不保证当时已有远端发布者或收到了帧。
 
 #### 3.3 `/skes/filter` 查询分支
 
-```text
-SKES 接收线程 skes_run()
-  -> 回调 on_skes_msg_received()
-  -> 仅 filter 主题进入 on_msg_filter()
-  -> 解析 JSON 和消息头
-  -> 需要 action=request、外层 type=properties、内层 data.type=query
-  -> 遍历 data.data[] 中的 property_name
-       |
-       +--> 至少一个属于五个已知字段？
-              +--> 否：不发送响应
-              +--> 是：在请求项上补 ts / value / result
-                       -> 复制整个请求
-                       -> 改 action=response
-                       -> 向 /skes/filter 发送响应
+```mermaid
+flowchart TD
+    recv["SKES 接收线程 skes_run()"] --> callback["on_skes_msg_received()"]
+    callback --> filter["filter 主题进入 on_msg_filter()"] --> parse["解析 JSON 和消息头"]
+    parse --> header{"action=request、外层 type=properties、内层 data.type=query？"}
+    header -->|"否"| ignore["不发送响应"]
+    header -->|"是"| props["遍历 data.data[] 中的 property_name"]
+    props --> known{"至少一个属于五个已知字段？"}
+    known -->|"否"| ignore
+    known -->|"是"| fill["请求项补 ts / value / result"]
+    fill --> copy["复制整个请求；改 action=response"]
+    copy --> send["向 /skes/filter 发送响应"]
 ```
 
 对应 `src/filter_pub/filter_pubsub.cpp:42-231,250-273`。该函数末尾无论是否成功发送都返回 `-1`，上层回调也返回 `-1`。当前 `skes-linker` 的 `do_skes_recv_msg()` 调用回调后不使用其返回值，因此这个负值不会在该实现中直接改变接收函数的返回结果；见 `skes-3rd-party/skes-linker-git/skes-linker.c:501-527`。
@@ -365,24 +356,18 @@ ps -ef | grep '[s]kes-relay'
 
 `skes-log` 实现会向 stdout 输出；文件输出需要设置路径并启用，而本模块没有调用这两个配置函数（`skes-3rd-party/skes-log/skes-log.c:159-172,334-415`）。设备若用 systemd 可按实际服务查看 `journalctl`；若用 BusyBox/syslog，可看 `logread` 或部署脚本接收 stdout/stderr 的位置。源码没有指定固定的 `filter_sep` 日志文件。
 
-#### 10.3 快速定位图（普通 Markdown 可显示）
+#### 10.3 快速定位图（Mermaid）
 
-```text
-设备故障
-  |
-  +--> filter_sep 无进程或 PID 反复变化？
-  |      +--> 查 sep.ini、skes-sepd、二进制架构/依赖和启动日志
-  |
-  +--> 进程在，但无属性？
-  |      +--> 查三路 CAN 发布端及实际帧；重点确认 0x16D61B96
-  |      +--> 再查 valid_dt 门槛、字段是否变化、relay 19225/19226
-  |
-  +--> 有属性但值不对？
-  |      +--> 保存原始 8 字节；按第 5 节复算；核对协议表/编译平台
-  |
-  +--> 属性正确但下游异常？
-         +--> 查 /skes/filter 的 action、data.type、字段和 msg_id
-         +--> 再查 relay 转发及对应消费者
+```mermaid
+flowchart TD
+    start(["设备故障"])
+    start --> process{"filter_sep 无进程或 PID 反复变化？"}
+    process -->|"是"| pcheck["查 sep.ini、skes-sepd、二进制架构/依赖和启动日志"]
+    process -->|"否"| attr{"进程在，但无属性？"}
+    attr -->|"是"| noattr["查三路 CAN 发布端及实际帧，重点确认 0x16D61B96；再查 valid_dt、字段变化和 relay 19225/19226"]
+    attr -->|"否"| value{"有属性但值不对？"}
+    value -->|"是"| vcheck["保存原始 8 字节；按第 5 节复算；核对协议表/编译平台"]
+    value -->|"否"| downstream["属性正确但下游异常：核对 /skes/filter 的 action、data.type、字段、msg_id、relay 转发及消费者"]
 ```
 
 这是检查顺序，不是自动诊断结论。本程序没有“已收 CAN 帧数”“上报成功数”的统计；需结合上游记录或受控抓包/订阅工具，才能在图中的层次之间作出判断。

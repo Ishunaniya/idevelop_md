@@ -294,27 +294,23 @@ VCU_VehicleHighestWarningLevel, VCU_HVLockSt, SUP_ePTState, BMS1_BatVoltage, BMS
 
 ## 11. 完整数据流（端到端时序）
 
-```
-[真实 CAN 总线]
-      │ (模组上另一进程做桥接)
-      ▼  TCP 127.0.0.1:16002/3/4，自定义 can_frame_t(24B)
-[CAN 线程] can_msg_process
-      ├─ parse_common_msg ── HASH_FIND_INT(can_id) ── set_common_data_item
-      │                         └→ 写 data_item_t.value_int / time_rcv   (按点表位段解析)
-      └─ parse_bms_sn_frame(0x18E1EFF3) → 拼 bms_sn (当前 0f7b 未使用)
-                                   │
-        [GPS 线程] 127.0.0.1:16005 → can_mng->gps_info (每5s)
-                                   │  ← 共享内存(无锁)
-                                   ▼  每 30s
-[MQTT 线程] binary_work_data_generate
-      ├─ Tbox_Volt ← /tmp/mcu_pwr_voltage
-      └─ 21× get_0f6b_work_data(信号名, canid|EFF) ── check_0f6b_data_item ── 回填 data_0f7b_t(156B)
-                                   ▼
-        make_tsp_0f7b_frame: level1头(21B, 含GPS经纬度/时间) + payload
-                                   ▼
-        tsp_cmd: [cmd_id=0f7b|attr|device_id(手机BCD)|seq++] + body + XOR校验 + 转义(7d/7e) + 7e定界
-                                   ▼
-        mosquitto_publish("mqtt_upload_message", qos=0)  →  本机 broker  →  TSP 平台
+```mermaid
+flowchart TD
+    CAN[真实 CAN 总线] -->|外部桥接进程；TCP 16002/3/4，can_frame_t 24B| CanThread[CAN 线程：can_msg_process]
+    CanThread --> Parse[parse_common_msg：按 can_id 查规则并解码]
+    Parse --> Signals[data_item.value_int / time_rcv]
+    CanThread --> BMS[parse_bms_sn_frame：拼接 bms_sn；当前 0f7b 未使用]
+    GPS[GPS 线程：127.0.0.1:16005，每 5s] --> GPSInfo[can_mng->gps_info]
+    Signals -->|无锁共享| MQTT[MQTT 线程：每 30s binary_work_data_generate]
+    GPSInfo -->|无锁共享| MQTT
+    Voltage[/tmp/mcu_pwr_voltage/] --> TboxVoltage[Tbox_Volt]
+    MQTT -->|21 次按信号名和 CAN ID 查询| Payload[data_0f7b_t：156B]
+    TboxVoltage --> Payload
+    Payload --> Frame[make_tsp_0f7b_frame：21B level1 头 + payload]
+    Frame --> Cmd[tsp_cmd：cmd_id 0x0f7b + 设备号 + 序号 + body + XOR + 转义/定界]
+    Cmd --> Publish[mosquitto_publish：mqtt_upload_message，qos=0]
+    Publish --> Broker[本机 broker]
+    Broker --> TSP[TSP 平台]
 ```
 
 ---
@@ -512,43 +508,40 @@ VCU_VehicleHighestWarningLevel, VCU_HVLockSt, SUP_ePTState, BMS1_BatVoltage, BMS
 
 ### 17.1 分层 / 模块依赖图
 
-```
-                              main.c  (入口/单实例/建线程)
-                                 │
-                    ┌────────────┼───────────────────────────┐
-                    ▼            ▼                            ▼
-          [协调层] can_mng ── can_mng_t 总上下文(3线程共享) ──┐
-                    │  tbox_info(身份/broker) · gps_info · data_process_mng
-                    │                                          │
-   ┌────────────────┼───────────────────┐                     │
-   ▼(CAN线程)        ▼(GPS线程)          ▼(MQTT线程)           │
- can_server        gps            mosquitto/client_mosquitto  │
-   │ skt_res         │ skt_res          │                     │
-   └──────┬──────────┘                  │                     │
-          ▼                             ▼                     ▼
-   [数据核心] data_process  ◄───────────┴───── 读侧 ──► [协议] frame ─► tsp_cmd
-     规则树/位段解析/打包                                level1头(21B)   wire帧封装
-          │  ▲                                                              │
-     写侧 │  │ 建树                                                          ▼
-          │  └──── load_pointsheet_json ◄── Pointsheet_info1.json      mosquitto_publish
-          ▼
-   [支撑] common(身份/BCD/时间/hexdump) · list(cc_slist) · cJSON · opt_iniparser · uthash
-
-   [孤立/未编译] scene · scene_lib · log        [遗留/死代码] data_0f6b_t · make_tsp_0f6b_frame · #if 0 打包
+```mermaid
+flowchart TD
+    Main[main.c：入口、单实例、建线程] --> Ctx[can_mng：共享 can_mng_t 上下文]
+    Ctx --- Info[tbox_info、gps_info、data_process_mng]
+    Main --> Can[CAN 线程：can_server + skt_res]
+    Main --> GPS[GPS 线程：gps + skt_res]
+    Main --> MQTT[MQTT 线程：mosquitto / client_mosquitto]
+    Can -->|写入| Process[data_process：规则树、位段解析、信号值]
+    Pointsheet[Pointsheet_info1.json] -->|load_pointsheet_json 建树| Process
+    GPS -->|写入| Ctx
+    MQTT -->|读取信号| Process
+    Process -->|读侧| Frame[frame：level1 头与 payload]
+    Frame --> Protocol[tsp_cmd：wire 帧封装]
+    Protocol --> Publish[mosquitto_publish]
+    Support[支撑：common、list、cJSON、opt_iniparser、uthash] -. 被各模块使用 .-> Main
+    Isolated[孤立/未编译：scene、scene_lib、log]
+    Dead[遗留死代码：data_0f6b_t、make_tsp_0f6b_frame、#if 0 打包]
 ```
 
 ### 17.2 线程模型与共享上下文
 
-```
- main() ──creates──►  can_tid   : start_can_server ─┐
-              (sleep1)  gps_tid  : start_gps_task    ├─ 均传入同一 can_mng*  (main.c:67-71)
-              (sleep1)  mqtt_tid : start_mqtt_task  ─┘
-   │
-   └─ pthread_join ×3 (三线程皆死循环，正常不返回)
-
- 共享写/读（无锁）：
-   CAN线程 ── 写 ──►  data_process_mng.data_rule[]  的 data_item_t.value_*  ◄── 读 ── MQTT线程(每30s)
-   GPS线程 ── 写 ──►  can_mng.gps_info               ◄── 读 ── MQTT线程(帧头经纬度)
+```mermaid
+flowchart TD
+    Main[main()] --> CanThread[can_tid：start_can_server]
+    Main --> GPSThread[gps_tid：start_gps_task]
+    Main --> MQTTThread[mqtt_tid：start_mqtt_task]
+    CanThread -->|同一 can_mng*| Context[共享 can_mng]
+    GPSThread -->|同一 can_mng*| Context
+    MQTTThread -->|同一 can_mng*| Context
+    Main --> Join[pthread_join ×3：线程死循环，正常不返回]
+    CanThread -->|无锁写| Values["data_rule[].data_item.value_*"]
+    Values -->|无锁读，每 30s| MQTTThread
+    GPSThread -->|无锁写| GPSInfo[gps_info]
+    GPSInfo -->|无锁读，填帧头经纬度| MQTTThread
 ```
 
 ### 17.3 运行时数据结构关系（规则树）
@@ -590,36 +583,43 @@ VCU_VehicleHighestWarningLevel, VCU_HVLockSt, SUP_ePTState, BMS1_BatVoltage, BMS
 
 ### 17.5 写侧调用链（CAN 线程，持续）
 
-```
- start_can_server (can_server.c:100)
-   └─ skt_res_new_socket ×3  (16002/3/4, 各重试50次)
-   └─ can_msg_process (can_server.c:45)  ── select(1s) 轮询3fd ─ read(≤1440B) ─ 按24B切帧
-        每帧:
-        ├─ parse_common_msg(mng,&f,f.can_id,chn)      (data_process.c:348)
-        │    └─ HASH_FIND_INT(data_rule[chn], can_id)
-        │         └─ set_common_data_item(rule,msg)   (递归, data_process.c:261)
-        │              └─ 位段解析(大/小端移位+掩码) ─► data_item.value_int/value_string · time_rcv
-        └─ parse_bms_sn_frame(mng,&f)                 (0x18E1EFF3, data_process.c:1941)
-             └─ 拼 bms_sn[24] · 置 bms_frame_recv_flag   (当前 0f7b 未使用其结果)
+```mermaid
+flowchart TD
+    Start[start_can_server] --> Sockets[skt_res_new_socket ×3：16002/3/4，各重试 50 次]
+    Sockets --> Loop[can_msg_process：select 轮询 3 个 fd，每 1s]
+    Loop --> Read[读取最多 1440B，并按 24B 切帧]
+    Read --> Parse[parse_common_msg]
+    Parse --> Find["HASH_FIND_INT：按 can_id 查 data_rule[chn]"]
+    Find --> Set[递归 set_common_data_item]
+    Set --> Bits[位段解析：大小端移位与掩码]
+    Bits --> Values[data_item.value_int / value_string / time_rcv]
+    Read --> BMS[parse_bms_sn_frame：0x18E1EFF3]
+    BMS --> Serial["拼 bms_sn[24] 并置 bms_frame_recv_flag；当前 0f7b 未使用结果"]
 ```
 
 ### 17.6 读侧 + 打包 + 发布调用链（MQTT 线程，每 30s）
 
-```
- start_mqtt_task (client_mosquitto.c:45)  ── connect(local_ip:port) ─ loop_start ─ 每30s:
-   ├─ binary_work_data_generate(mng,&payload_0f7b)          (data_process.c:563) → 返回156
-   │    ├─ read_mcu_power_voltage_mv() ─► payload.Tbox_Volt
-   │    └─ 21× get_0f6b_work_data(mng,&item,"信号名",canid)  (data_process.c:478)
-   │          └─ HASH_FIND_INT(canid|CAN_EFF_FLAG)
-   │               └─ check_0f6b_data_item(rule,item,name)   (按名递归, data_process.c:438)
-   │                    └─ item.value_int ─► payload.<字段> (htons/htonl)
-   ├─ make_tsp_0f7b_frame(can_mng,&payload,156,&len)         (frame.c:59)
-   │    ├─ level1_0f6b_t: version=0 · lat/lon=gps×1e6(htonl) · date=BCD本地时
-   │    ├─ tsp_cmd_attr_new(split=0,enc=0,msg_len=177)
-   │    ├─ tsp_cmd_header_new(cmd_id=0x0f7b, device_id=phone_bcd, seq=serial_num++)
-   │    ├─ tsp_cmd_make → tsp_cmd_frame_make: 逐字节铺头+体 → XOR校验 → 转义(7e/7d) → 首尾0x7e
-   │    └─ hex_dump 打印
-   └─ mosquitto_publish("mqtt_upload_message", frame, qos=0)
+```mermaid
+flowchart TD
+    Start[start_mqtt_task：连接 local_ip:port 并 loop_start] --> Cycle[每 30s 执行一次]
+    Cycle --> Generate[binary_work_data_generate：生成 156B payload]
+    Generate --> Voltage[read_mcu_power_voltage_mv → Tbox_Volt]
+    Generate --> Lookup[21 次 get_0f6b_work_data：按信号名与 CAN ID 查询]
+    Lookup --> Hash[HASH_FIND_INT：canid | CAN_EFF_FLAG]
+    Hash --> Check[check_0f6b_data_item：按名称递归查找]
+    Check --> Field[item.value_int → payload 字段：htons / htonl]
+    Voltage --> TboxVoltage[Tbox_Volt]
+    TboxVoltage --> Payload[data_0f7b_t payload]
+    Field --> Payload
+    Payload --> Frame[make_tsp_0f7b_frame]
+    Frame --> Header[level1 头：GPS × 1e6、BCD 本地时间]
+    Frame --> Attr[tsp_cmd_attr_new：split=0、enc=0、msg_len=177]
+    Frame --> CmdHeader[tsp_cmd_header_new：0x0f7b、phone_bcd、递增序号]
+    Header --> Pack[tsp_cmd_make / tsp_cmd_frame_make：铺头体、XOR、转义与 0x7e 定界]
+    Attr --> Pack
+    CmdHeader --> Pack
+    Pack --> Dump[hex_dump]
+    Pack --> Publish[mosquitto_publish：mqtt_upload_message，qos=0]
 ```
 
 ### 17.7 最终 wire 帧字节布局

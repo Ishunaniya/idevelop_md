@@ -78,45 +78,47 @@ stub-gb-client/
 
 `stub-gb` 是一个 SDK 适配器进程。CAN、GPS 和加密服务经本机 TCP 向它提供数据；常规协议报文由 `stub-linker` 设备事件交给 SDK，防篡改备案则使用单独的国家平台 TCP 连接。企业平台的后续传输不在本仓库内。参见 `stub-gb-client.c:592`、`src/local_skt/local_socket.c:114`、`src/data_signature/data_signature.c:200`、`src/nanomsg/nanomsg_proc.c:70`。
 
-```text
-进程外 CAN0/1/2、GPS TCP 服务
-    ↓
-本进程 local_skt → can_parse / GPS 数据更新 → app_mng → fei_4 或 gb6 状态机
+```mermaid
+flowchart TD
+    Input["进程外 CAN0/1/2、GPS TCP 服务"] --> Local["本进程 local_skt"]
+    Local --> Parse["can_parse / GPS 数据更新"]
+    Parse --> State["app_mng → fei_4 或 gb6 状态机"]
 
-状态机的三条输出：
-  备案帧 0x07
-    → data_signature ↔ 本机加密服务 :16009
-    → 国家平台 TCP → 备案答复校验
+    State --> RegFrame["备案帧 0x07"]
+    RegFrame --> RegSign["data_signature ↔ 本机加密服务 :16009"]
+    RegSign --> National["国家平台 TCP"]
+    National --> RegCheck["备案答复校验"]
 
-  实时链表或历史 SQLite 数据
-    → 在线且本地已登录时由历史优先的调度取出
-    → data_signature ↔ 本机加密服务 :16009
-    → 协议发送链表
+    State --> Data["实时链表或历史 SQLite 数据"]
+    Data --> Eligible{"SCP 心跳、网络均在线且本地已登录？"}
+    Eligible -->|是，历史优先调度| Sign["data_signature ↔ 本机加密服务 :16009"]
+    Eligible -->|否| Store["留在实时队列或 SQLite，等待后续调度"]
+    Sign --> Tx["协议发送链表"]
 
-  登录、登出、拆除报警帧
-    → 协议发送链表
-
-协议发送链表 → nanomsg 设备事件 JSON → stub 消息缓存 deque_msgs
-    → 进程外 stub-linker / SDK → 企业平台后续链路（本仓库外）
+    State --> Control["登录、登出、拆除报警帧"]
+    Control --> Tx
+    Tx --> Event["nanomsg 设备事件 JSON"]
+    Event --> Cache["stub 消息缓存 deque_msgs"]
+    Cache --> SDK["进程外 stub-linker / SDK"]
+    SDK --> Platform["企业平台后续链路（本仓库外）"]
 ```
 
 已备案后，离线或未登录时生成的数据先走历史存储，不会立即进入签名调度。图中依次涉及实时链表或 SQLite 历史记录、签名链表、协议发送链表和 stub 消息缓存；每次出队与最终平台回执是不同事件。登录、登出、拆除报警帧不经过数据签名队列；备案签名结果不进入 SDK 设备事件通道。见 `src/fei_4/fei4.c:626`、`src/gb6/gb6.c:719`、`src/data_signature/data_signature.c:200`。
 
 ### 3.2 启动与并行任务
 
-下列纯文本图可在普通 Markdown 查看器中阅读。
-
-```text
-启动与并行任务（箭头表示调用或数据交接）
-main()
-  ├─ 初始化日志、stub SUB/PUB ──失败──> 退出
-  └─ t4hj_main(车型, 发动机, GPS 时间开关)
-       ├─ 参数非法 ──> Usage / 退出
-       └─ 初始化 VIN、队列、SQLite、芯片 ID
-            ├─ 本机 socket 线程：连接 CAN0/1/2、GPS、加密服务 5 个端口
-            ├─ 签名线程：写加密请求，等待本机加密答复
-            └─ 非四或国六协议线程：备案/登录/采集/补传/登出
-main() 随后启动 pdk_thread_handler()，主线程循环 stub_run() 和定时任务。
+```mermaid
+flowchart TD
+    Start["main()：初始化日志、stub SUB/PUB"] --> StubOK{"stub 初始化成功？"}
+    StubOK -->|否| Exit["退出"]
+    StubOK -->|是| Args["t4hj_main(车型, 发动机, GPS 时间开关)"]
+    Args --> ArgsOK{"参数合法？"}
+    ArgsOK -->|否| Usage["打印 Usage 并退出"]
+    ArgsOK -->|是| Init["初始化 VIN、队列、SQLite、芯片 ID"]
+    Init --> Socket["启动本机 socket 线程：连接 CAN0/1/2、GPS、加密服务"]
+    Init --> Sign["启动签名线程：发送加密请求并等待本机答复"]
+    Init --> Protocol["启动非四或国六协议线程：备案/登录/采集/补传/登出"]
+    Init --> MainLoop["main() 启动 pdk_thread_handler()，循环 stub_run() 和定时任务"]
 ```
 
 报文的分支和缓存生命周期见 3.1 架构图及第五节。
@@ -219,17 +221,33 @@ INI 存 VIN、注册/登录状态及流水号；公共代码提供字节、时�
 
 ### 5.2 备案、登录和失活状态
 
-```text
-CAN 不活跃 ──> 归档实时队列 ──> 如曾登录且 SDK 在线：拆除报警/登出
-    │
-    └─ CAN 恢复 + VIN 已得
-             │
-             ├─ 尚未备案：构造 0x07 -> 签名 -> 国家平台 TCP -> 校验答复
-             │
-             └─ 已备案：SDK 离线 -> 新数据存 SQLite
-                         SDK 在线 + 本地未登录 -> 必要时先登出，再入队登录帧
-                         SDK 在线 + 本地已登录 -> 生成实时数据
-                                                历史优先签名/上报
+```mermaid
+flowchart TD
+    Active{"CAN 是否活跃？"}
+    Active -->|否| Archive["如采集曾激活，归档实时队列"]
+    Archive --> WasLogin{"本地当前已登录且 SCP 心跳、网络均在线？"}
+    WasLogin -->|是| TakeDown["发送拆除报警并尝试登出"]
+    WasLogin -->|否| InactiveEnd["等待 CAN 恢复"]
+    TakeDown --> InactiveEnd
+    Active -->|是| HasVIN{"VIN 已得？"}
+    HasVIN -->|否| WaitVIN["等待 VIN"]
+    HasVIN -->|是| Registered{"已经备案？"}
+    Registered -->|否| Register["构造 0x07 → 签名 → 国家平台 TCP → 校验答复"]
+    Registered -->|是| Online{"SCP 心跳和网络均在线？"}
+    Online -->|否| Backup["新数据存入 SQLite 历史库"]
+    Online -->|是| LoggedIn{"本地已登录？"}
+    LoggedIn -->|否| OldLogin{"INI 记录上次已登录？"}
+    OldLogin -->|是| Logout["尝试登出上次会话"]
+    Logout --> LogoutOK{"登出帧入队成功？"}
+    LogoutOK -->|是| NextCycle["等待下一轮协议循环"]
+    LogoutOK -->|否| Logout
+    NextCycle --> Login["尝试入队登录帧；成功时推进本地登录状态"]
+    OldLogin -->|否| Login
+    Login --> BackupData["当前数据进入备份队列"]
+    LoggedIn -->|是| Realtime["生成实时数据"]
+    Backup --> SignSchedule["在线登录后由历史优先调度签名/上报"]
+    BackupData --> SignSchedule
+    Realtime --> SignSchedule
 ```
 
 这里的“登录”是本地状态机依据入队结果推进，代码没有等企业平台业务确认。备案是直连国家平台并检查答复，和 SDK 事件链路不同。两套协议都把注册、登录、实时数据流水号及日期保存在各自 INI 中；登录/实时流水号随日期变化重置，登录流水号打包前对 `65531` 取模。见 `src/fei_4/fei4.c:588`～`:729`、`src/gb6/gb6.c:681`～`:820`。
@@ -317,19 +335,14 @@ SQLite 表由 `db_create_t4hj_table()` 创建，字段为自增 `id` 与 BLOB `d
 
 本节是依据此提交源码写的现场排查路径。先保留故障发生时的启动命令、日志时间、目标机系统时间和平台回执，再按下面的顺序找第一个异常检查点。只读检查优先；不要先清数据库、改 `registerStat`/`loginStat`、重置配置或反复重启，否则会丢失现场证据。设备的服务名称、日志采集方式和命令是否可用以实际固件为准。
 
-```text
-进程不存在或退出
-  └─ 启动参数 -> stub SUB/PUB 初始化 -> VIN/数据库初始化
-进程在运行，但无采集数据
-  └─ 5 个本机端口 -> CAN 帧边界/通道/车型解析 -> CAN 活跃 -> GPS 队列
-已有采集，不能备案
-  └─ VIN -> 国家平台 TCP -> 加密服务签名 -> 0x07 答复校验 -> registerStat
-已备案，不能登录或发送
-  └─ SCP 心跳 -> 默认网络端点 connected -> 本地登录状态 -> 协议发送队列
-报文显示已发送，平台无数据
-  └─ push_msg() -> stub_msg_reply() -> SDK 后续链路 -> 平台回执
-数据不连续或字段不对
-  └─ SQLite 历史行 -> 签名/删库顺序 -> 组帧字段 -> CAN/GPS 原始值
+```mermaid
+flowchart TD
+    P1["进程不存在或退出"] --> C1["检查启动参数"] --> C2["检查 stub SUB/PUB 初始化"] --> C3["检查 VIN/数据库初始化"]
+    P2["进程在运行，但无采集数据"] --> C4["检查 5 个本机端口"] --> C5["检查 CAN 帧边界、通道和车型解析"] --> C6["检查 CAN 活跃状态"] --> C7["检查 GPS 队列"]
+    P3["已有采集，不能备案"] --> C8["检查 VIN"] --> C9["检查国家平台 TCP"] --> C10["检查加密服务签名"] --> C11["检查 0x07 答复校验和 registerStat"]
+    P4["已备案，不能登录或发送"] --> C12["检查 SCP 心跳"] --> C13["检查默认网络端点 connected"] --> C14["检查本地登录状态"] --> C15["检查协议发送队列"]
+    P5["报文显示已发送，平台无数据"] --> C16["检查 push_msg()"] --> C17["检查 stub_msg_reply()"] --> C18["检查 SDK 后续链路"] --> C19["核对平台回执"]
+    P6["数据不连续或字段不对"] --> C20["检查 SQLite 历史行"] --> C21["核对签名与删库顺序"] --> C22["核对组帧字段"] --> C23["核对 CAN/GPS 原始值"]
 ```
 
 ### 8.2 固定现场证据与只读命令

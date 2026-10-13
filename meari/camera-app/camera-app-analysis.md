@@ -47,32 +47,22 @@
 
 ## 2. 整体架构
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                      应用层 (Application Layer)          │
-│           meari_ipc / tuya_ipc (main entry, SDK胶水层)   │
-├─────────────────────────────────────────────────────────┤
-│                  云端接入层 (Cloud SDK Layer)             │
-│    Tuya SDK (v4/v5)  │  Meari SDK  │  NKIT SDK          │
-├──────────────────────┬──────────────────────────────────┤
-│   协议服务组件层      │        device 功能层              │
-│  (Components Layer)  │     (pps_device Layer)            │
-│  ┌────────────────┐  │  ┌─────────┐  ┌──────────────┐  │
-│  │ RTSP Server    │  │  │ 网络管理 │  │ 媒体管道控制  │  │
-│  │ RTMP (SRS)     │  │  │ 升级OTA  │  │ PTZ云台      │  │
-│  │ ONVIF v1/v2    │  │  │ 存储/录像│  │ 用户认证     │  │
-│  │ REST API(HTTP) │  │  │ GPIO/LED │  │ 加密身份     │  │
-│  │ Shell Server   │  │  │ 看门狗   │  │ 设备发现     │  │
-│  │ Baby Monitor   │  │  │ 设备能力 │  │ ...          │  │
-│  └────────────────┘  │  └─────────┘  └──────────────┘  │
-├──────────────────────┴──────────────────────────────────┤
-│                   公共基础层 (Common Layer)               │
-│    EventHub(事件总线) │ DNS │ Wi-Fi扫描 │ 时间工具        │
-├─────────────────────────────────────────────────────────┤
-│                    HAL 硬件抽象层                         │
-│    arm-himix100-linux  │  ssc333（多平台共用）  │
-└─────────────────────────────────────────────────────────┘
-           ↕ 硬件驱动（Kernel / Driver，不含于本仓库）
+```mermaid
+flowchart TD
+    A[应用层: meari_ipc / tuya_ipc 入口与 SDK 胶水]
+    B[云端接入层: Tuya SDK v4/v5 / Meari SDK / NKIT]
+    C[协议服务组件: RTSP / RTMP / ONVIF / REST / Shell / Baby Monitor]
+    D[设备功能层: 网络 / OTA / 存储 / GPIO / LED / 看门狗 / 媒体 / PTZ / 用户认证 / 发现]
+    E[公共基础层: EventHub / DNS / Wi-Fi 扫描 / 时间工具]
+    F[HAL: arm-himix100-linux / ssc333 多平台实现]
+    G[硬件驱动: Kernel / Driver，不含于本仓库]
+    A --> B
+    A --> C
+    A --> D
+    B --> E
+    C --> E
+    D --> E
+    E --> F --> G
 ```
 
 **核心设计思想**：通过设备 API、HAL 和外部媒体库屏蔽底层差异，通过条件编译（`#ifdef CONFIG_TUYA_SUPPORT` / `CONFIG_MEARI_IPC_SDK` 等）在同一套代码中支持多种云平台与多种 SoC，通过插件表（`ppsdev_init_plugins_t[]`）驱动模块化启动。
@@ -411,9 +401,18 @@ camera-app/
 
 [pps_device/pps_device_base_init.c:39](/home/tronlong/lyp/meari/camera-app/pps_device/pps_device_base_init.c:39) 显示：栈字段乘 1024；优先级仅写入 pthread 属性，未显式设置实时调度策略；属性 setter 的返回值未统一处理。同步 handler 返回值被忽略，日志中的 `OK` 不能证明初始化成功。线程创建失败后也继续后续模块，错误打印使用 `errno`，而 pthread 返回码自身才是准确错误码。
 
-![启动框架与后台任务](assets/startup-framework.png)
-
-[打开原尺寸图片](assets/startup-framework.png) · [图示源文件](assets/startup-framework.mmd)
+```mermaid
+flowchart TD
+    A[main] --> B[遍历 core 表]
+    B --> C[遍历 user 表]
+    C --> D[遍历 after 表]
+    D --> E[主线程 sleep 10000 循环]
+    B -. 创建 detached 线程 .-> F[看门狗、PTZ、SD 等后台任务]
+    C -. 创建 detached 线程 .-> G[网络、RTSP、ONVIF 等后台任务]
+    D -. 创建线程或同步调用 .-> H[云 SDK 与后续任务]
+    F -. 模块内部事件或状态协调 .-> G
+    G -. 联网等待等模块内部条件 .-> H
+```
 
 图中的实线表示主线程提交顺序，不能读成后台任务完成顺序。媒体、SDK、录像等模块另有各自的状态等待；例如 [ipc_app/meari_ipc/main/pps_ipc_sdk.c:2885](/home/tronlong/lyp/meari/camera-app/ipc_app/meari_ipc/main/pps_ipc_sdk.c:2885) 会等待网络连接。
 
@@ -431,72 +430,30 @@ camera-app/
 
 下面补回原报告的逐项树形流程，并按当前源码补齐启动项。`[直调]` 表示主线程调用并等待该函数返回；`[线程]` 表示创建 detached 线程后继续遍历；方括号中的宏是条目的编译条件。图内列出所有条件分支，具体固件只包含宏满足的条目；阶段间没有统一的后台任务完成等待。
 
-```text
-Meari 正常 main()（未定义 CONFIG_DEBUG_FIRMWARE）
-  │
-  ├── Phase 1: core（按表遍历；直调和后台线程混合）
-  │     ├── pps_log_redirect_init()            [直调][LOG_PRINTF_REDIRECT] 日志重定向
-  │     ├── pps_log_report_init()              [直调] 日志报告初始化
-  │     ├── pps_device_system_init()           [直调] 系统/事件基础初始化
-  │     ├── pps_register_signal_handlers()     [直调] 信号注册；SIGSEGV 注册已注释
-  │     ├── pps_watchdog_init()                [线程] 看门狗
-  │     ├── pps_startup_log_init()             [线程] 启动日志
-  │     ├── pps_device_board_init()            [直调] 板级身份及硬件配置
-  │     ├── pps_device_user_info_init()        [直调] 当前函数为空，账户另有静态初值
-  │     ├── pps_settings_init()                [直调] Device 属性配置
-  │     ├── pps_local_music_init()             [线程][CONFIG_LOCAL_MUSIC] 本地音乐
-  │     ├── pps_white_light_init()             [直调] 白光模块
-  │     ├── pps_pet_service_init()             [线程][CONFIG_PET] PET 服务
-  │     ├── pps_ptz_service_init()             [线程] PTZ 云台
-  │     ├── pps_media_service_init()           [直调] 媒体服务
-  │     ├── pps_hg0_module_init()              [线程][CONFIG_BABY_SERIAL] Baby HG0
-  │     ├── pps_record_hg0_conf()              [线程][CONFIG_BABY_SERIAL] HG0 配置
-  │     ├── pps_babymonitor_init()             [线程][CONFIG_BABY_SERIAL] Baby Monitor
-  │     ├── pps_common_bt_pre_init()           [直调][CONFIG_COMMON_BT] 蓝牙预初始化
-  │     ├── pps_watermark_state_obtain_cb_init()[直调][CONFIG_REC_OVERLAY] 水印状态回调
-  │     ├── pps_device_watermark_loop()        [线程][CONFIG_REC_OVERLAY] 水印/OSD
-  │     ├── pps_reboot_cb_init()               [直调] 重启回调
-  │     ├── pps_gpio_event_init()              [线程] GPIO 事件
-  │     ├── pps_led_init()                     [直调] LED
-  │     ├── pps_product_test_init()            [直调][未定义 CONFIG_NO_FACTORY_MODE] 产测
-  │     ├── pps_device_sdcard_init()           [线程] SD 卡管理
-  │     ├── pps_device_recorder_init()         [直调][CONFIG_SD_RECORD 且非 CONFIG_ENABLE_NKIT_ONLY]
-  │     ├── pps_device_storage_init()          [线程][同上] SD 录像管理
-  │     ├── pps_device_event_report()          [线程][CONFIG_MEARI_IPC_SDK] 事件报告
-  │     └── shell_server_open()                [直调] 本地 Unix socket shell
-  │
-  ├── Phase 2: user（core 表遍历结束后；不统一等待其后台任务就绪）
-  │     ├── pps_netmng_service_start()         [线程] 网络管理
-  │     ├── pps_ap_v2_start()                  [线程] AP 配网
-  │     ├── pps_nkit_sdk_init()                [线程][CONFIG_ENABLE_NKIT] NKIT SDK
-  │     ├── pps_nkit_wlan_start()              [线程][CONFIG_ENABLE_NKIT_ONLY] NKIT WLAN
-  │     ├── pps_device_siren_ctrl()            [线程] 报警声光
-  │     ├── pps_flight_service_init()          [直调][CONFIG_FLIGHT_SUPPORT] 泛光
-  │     ├── pps_rgb_color_light_service()      [直调] RGB 灯
-  │     ├── pps_onvif_cfg_init()               [线程][CONFIG_ONVIF_SERVICE] ONVIF 配置
-  │     ├── pps_onvif_start1()                 [线程][CONFIG_ONVIF_SERVICE_V2] ONVIF 服务
-  │     ├── pps_onvif_start2()                 [线程][CONFIG_ONVIF_SERVICE_V2] ONVIF 发现
-  │     ├── pps_rtsp_server_init()             [线程][CONFIG_RTSP_SERVICE] RTSP（8554）
-  │     ├── restful_webserver_init()           [线程][CONFIG_RESTFUL_SERVER] HTTP 服务
-  │     ├── pps_device_discovery_init()        [线程] 局域网发现（UDP 3702/3703）
-  │     ├── pps_device_sleeping_init()         [直调][CONFIG_HOME_AWAY] 离家/休眠
-  │     ├── pps_temp_humidity_init()           [直调] 温湿度
-  │     ├── pps_device_battery_init()          [直调] 电池管理
-  │     ├── music_player_module_init()         [直调][CONFIG_MUSIC] 音乐模块
-  │     ├── pps_charm_service_init()           [线程][CONFIG_DOORBELL] 门铃
-  │     └── pps_pcr_rotation_init()            [线程] 视频方向控制
-  │
-  └── Phase 3: after（user 表遍历结束后；不统一等待其服务就绪）
-        ├── pps_uart_zoom_start()             [线程][CONFIG_ZOOM] ZOOM 串口
-        ├── pps_common_bt_init()              [线程][CONFIG_COMMON_BT] 通用蓝牙
-        ├── pps_mp_sdk_init()                 [线程][CONFIG_MEARI_IPC_SDK] Meari SDK
-        ├── pps_check_p2p_usage()              [线程][CONFIG_ENABLE_BITRATE_AUTO_ADAPTATION]
-        ├── music_player_init_music_list()    [线程][CONFIG_MUSIC] 音乐列表
-        └── "start ok"                        空 handler 标记，不代表所有服务成功就绪
-
-        ↓ 三张表遍历返回后
-        while (1) sleep(10000)                主线程保持运行，后台任务自行协调
+```mermaid
+flowchart TD
+    A[main: Meari 正常模式] --> B
+    subgraph B[Phase 1: core 表顺序遍历]
+        B1["直调: pps_log_redirect_init [LOG_PRINTF_REDIRECT]; pps_log_report_init; pps_device_system_init; pps_register_signal_handlers; pps_device_board_init; pps_device_user_info_init; pps_settings_init; pps_white_light_init; pps_media_service_init; pps_common_bt_pre_init [CONFIG_COMMON_BT]; pps_watermark_state_obtain_cb_init [CONFIG_REC_OVERLAY]; pps_reboot_cb_init; pps_led_init; pps_product_test_init [!CONFIG_NO_FACTORY_MODE]; pps_device_recorder_init [CONFIG_SD_RECORD && !CONFIG_ENABLE_NKIT_ONLY]; shell_server_open"]
+        B2["后台线程: pps_watchdog_init; pps_startup_log_init; pps_local_music_init [CONFIG_LOCAL_MUSIC]; pps_pet_service_init [CONFIG_PET]; pps_ptz_service_init; pps_hg0_module_init / pps_record_hg0_conf / pps_babymonitor_init [CONFIG_BABY_SERIAL]; pps_device_watermark_loop [CONFIG_REC_OVERLAY]; pps_gpio_event_init; pps_device_sdcard_init; pps_device_storage_init [CONFIG_SD_RECORD && !CONFIG_ENABLE_NKIT_ONLY]; pps_device_event_report [CONFIG_MEARI_IPC_SDK]"]
+    end
+    B --> C
+    subgraph C[Phase 2: user 表顺序遍历]
+        C1["后台线程: pps_netmng_service_start; pps_ap_v2_start; pps_nkit_sdk_init [CONFIG_ENABLE_NKIT]; pps_nkit_wlan_start [CONFIG_ENABLE_NKIT_ONLY]; pps_device_siren_ctrl; pps_onvif_cfg_init [CONFIG_ONVIF_SERVICE]; pps_onvif_start1/2 [CONFIG_ONVIF_SERVICE_V2]; pps_rtsp_server_init [CONFIG_RTSP_SERVICE]; restful_webserver_init [CONFIG_RESTFUL_SERVER]; pps_device_discovery_init; pps_charm_service_init [CONFIG_DOORBELL]; pps_pcr_rotation_init"]
+        C2["直调: pps_flight_service_init [CONFIG_FLIGHT_SUPPORT]; pps_rgb_color_light_service; pps_device_sleeping_init [CONFIG_HOME_AWAY]; pps_temp_humidity_init; pps_device_battery_init; music_player_module_init [CONFIG_MUSIC]"]
+    end
+    C --> D
+    subgraph D[Phase 3: after 表顺序遍历]
+        D1["后台线程: pps_uart_zoom_start [CONFIG_ZOOM]; pps_common_bt_init [CONFIG_COMMON_BT]; pps_mp_sdk_init [CONFIG_MEARI_IPC_SDK]; pps_check_p2p_usage [CONFIG_ENABLE_BITRATE_AUTO_ADAPTATION]; music_player_init_music_list [CONFIG_MUSIC]"]
+        D2[start ok: 空 handler 标记，不代表所有服务成功就绪]
+        D1 --> D2
+    end
+    D --> E[三张表遍历返回]
+    E --> F[主线程 while(1) sleep(10000)]
+    E -. 阶段间没有统一等待后台任务就绪 .-> G[后台任务自行协调]
 ```
+
+注：节点中的方括号是对应编译宏条件；执行项按直接调用与后台线程分组，不表示组内先后顺序。具体源码上下文见上方启动表及插件清单。主线程按插件表顺序遍历，并在创建 detached 线程后继续。
 
 ### 5.3 Tuya 启动差异
 
@@ -516,24 +473,30 @@ Tuya core 包含 `pps_tuya_dp_config_init()`、涂鸦媒体/LED 适配，after �
 
 补回原报告的树形视频数据流，包含音频、快照和告警分支。传感器、ISP、编码器位于外部媒体实现；各输出分支取决于编译选择、回调注册和运行状态。
 
-```text
-传感器（Sensor）
-    ↓ 外部 SoC 媒体库：ISP / H.264、H.265 编码（依平台能力）
-pps_device_media 适配（OLD / 1 / 5 分支）
-    ├── 主流 / 子流视频回调 ─┬──→ RTSP circular buffer → RTP → NVR / VLC / 播放客户端
-    │                       ├──→ Meari SDK 回调 → SDK 内部传输 → 手机 App / 云服务
-    │                       ├──→ Tuya SDK ring buffer → SDK 内部传输 → 手机 App / 云服务
-    │                       └──→ SD 录像回调 → 所选录像实现 → 本地存储
-    ├── 音频回调（G.711/AAC 等，依配置）→ RTSP / 云 SDK / SD 录像消费方
-    ├── 快照（JPEG）→ 应用/SDK 快照处理 → 报警图片 / 请求方
-    └── 检测回调 → 应用事件 / EventHub → 告警、录像与追踪联动（按条件）
-
-SRS librtmp 源码另行存在；不能据此把任一 SDK 的云传输固定画成 RTMP。
+```mermaid
+flowchart TD
+    A[传感器] --> B[外部 SoC 媒体库: ISP 与 H.264 / H.265 编码]
+    B --> C[pps_device_media 适配: OLD / 1 / 5]
+    C --> D[主流 / 子流视频回调]
+    D --> E[RTSP circular buffer]
+    E --> F[RTP 到 NVR / VLC / 播放客户端]
+    D --> G[Meari SDK 回调]
+    G --> H[SDK 内部传输到手机 App / 云服务]
+    D --> I[Tuya SDK ring buffer]
+    I --> J[SDK 内部传输到手机 App / 云服务]
+    D --> K[SD 录像回调]
+    K --> L[所选录像实现与本地存储]
+    B --> M[音频回调: G.711 / AAC 等，依配置]
+    M --> N[RTSP / 云 SDK / SD 录像消费方]
+    B --> O[JPEG 快照]
+    O --> P[应用 / SDK 快照处理]
+    P --> Q[报警图片 / 请求方]
+    B --> R[检测回调]
+    R --> S[应用事件 / EventHub]
+    S --> T[告警、录像与追踪联动，按条件触发]
 ```
 
-![媒体分发与云接入](assets/media-distribution.png)
-
-[打开原尺寸图片](assets/media-distribution.png) · [图示源文件](assets/media-distribution.mmd)
+SRS librtmp 源码另行存在；不能据此把任一 SDK 的云传输固定画成 RTMP。
 
 三套媒体实现按 `CONFIG_MEDIA_LIB_VERSION_OLD/1/5` 选择，调用不同外部媒体 API。媒体硬件实现和 AI 算法库不在当前快照中，源码主要可验证其适配、回调注册和参数控制。
 
@@ -547,25 +510,49 @@ RTSP 新实现消费 circular buffer 后向两条 session 发送视频和音频�
 
 下面补回“事件来源 → 事件总线 → 消费方”图，使用实际主业务事件名。箭头表示发布/订阅关系，消费方按构建和运行条件选择，不表示全部产品均同时执行这些动作。
 
-```text
-事件来源                     发布的事件                                 EventHub → 订阅处理
-───────────────────────      ───────────────────────────────────────   ─────────────────────────
-移动检测/应用告警       ───→ PPS_EVENTHUB_MD                         ───→ 录像 / 云录像 / 告警
-人形检测                ───→ PPS_EVENTHUB_PEOPLE_DETECTION           ───→ 应用回调 → 发布 MD / 告警
-PIR 输入                ───→ PPS_EVENTHUB_PIR_EVENT                  ───→ 录像触发
-噪声 / 哭声检测         ───→ PPS_EVENTHUB_DB_ALARM / PPS_EVENTHUB_BCD ───→ 告警 / 条件性录像 / Baby 联动
-SD 挂载                 ───→ PPS_EVENTHUB_SDCARD_MOUNTED             ───→ 录像初始化 / 启动任务
-SD 拔出流程             ───→ PPS_EVENTHUB_SDCARD_START_REMOVE        ───→ 录像停止 / 资源协调
-                         └─→ PPS_EVENTHUB_SDCARD_REMOVED             ───→ 移除完成状态处理
-网络 / SDK 连接状态     ───→ PPS_EVENTHUB_STA_CONNECTED              ───→ 相关网络 / 应用回调
-                         ├─→ PPS_EVENTHUB_STA_GOT_IP                 ───→ IP 状态处理
-                         ├─→ PPS_EVENTHUB_MQTT_CONNECT               ───→ SDK 连接状态处理
-                         └─→ PPS_EVENTHUB_STA_ONLINE                 ───→ 云状态 / 参数与媒体协调
-电池状态                ───→ PPS_EVENTHUB_LOW_BATTERY_WARNING        ───→ 低电上报 / 告警
-Device 配置加载         ───→ PPS_EVENTHUB_SETTING_LOAD_FINISH        ───→ 等配置完成的检测逻辑
-
-第二行中的“发布 MD”为已核验的 Meari 人形检测处理分支，不是 PIR → MD 的统一规则。
+```mermaid
+flowchart LR
+    subgraph Sources[事件来源]
+        A[移动检测 / 应用告警]
+        B[人形检测]
+        C[PIR 输入]
+        D[噪声 / 哭声检测]
+        E[SD 挂载 / 拔出]
+        F[网络 / SDK 连接状态]
+        G[电池状态]
+        H[Device 配置加载]
+    end
+    subgraph Events[实际发布事件]
+        A1[PPS_EVENTHUB_MD]
+        B1[PPS_EVENTHUB_PEOPLE_DETECTION]
+        C1[PPS_EVENTHUB_PIR_EVENT]
+        D1[PPS_EVENTHUB_DB_ALARM / BCD]
+        E1[PPS_EVENTHUB_SDCARD_MOUNTED / START_REMOVE / REMOVED]
+        F1[PPS_EVENTHUB_STA_CONNECTED / GOT_IP / MQTT_CONNECT / STA_ONLINE]
+        G1[PPS_EVENTHUB_LOW_BATTERY_WARNING]
+        H1[PPS_EVENTHUB_SETTING_LOAD_FINISH]
+    end
+    subgraph Consumers[订阅处理]
+        A2[录像 / 云录像 / 告警]
+        B2[应用回调，可发布 MD / 告警]
+        C2[录像触发]
+        D2[告警 / 条件性录像 / Baby 联动]
+        E2[录像初始化、停止及资源协调]
+        F2[网络回调、IP 与 SDK 状态处理、云状态协调]
+        G2[低电上报 / 告警]
+        H2[等待配置完成的检测逻辑]
+    end
+    A --> A1 --> A2
+    B --> B1 --> B2
+    C --> C1 --> C2
+    D --> D1 --> D2
+    E --> E1 --> E2
+    F --> F1 --> F2
+    G --> G1 --> G2
+    H --> H1 --> H2
 ```
+
+人形检测发布 MD 是已核验的 Meari 分支，不是 PIR → MD 的统一规则。
 
 各事件的处理说明见下表。EventHub 内部如何排队、加锁和调用订阅者，仍需外部库实现核验。
 

@@ -52,13 +52,17 @@
 
 ## 核心架构设计
 
-```text
-本机 CAN / Modbus / GPS 发布端 → 订阅模块 → 点表 / 数据点
-                                               ├→ 通用历史存储 → SQLite
-                                               └→ remote_proto（择一）
-                                                   ├→ IEC 101 / IEC 104 / 浙江扩展 → 主站
-                                                   │                       └→ 仅浙江分支：冻结文件 / 定时任务
-                                                   └→ MQTT / 地区分支 → 平台
+```mermaid
+flowchart TD
+    input[本机 CAN / Modbus / GPS 发布端] --> sub[订阅模块]
+    sub --> points[点表 / 数据点]
+    points --> history[通用历史存储 → SQLite]
+    points --> proto[remote_proto：按配置择一]
+    proto --> iec[IEC 101 / IEC 104 / 浙江扩展]
+    iec --> master[主站]
+    iec -->|仅浙江分支| freeze[冻结文件 / 定时任务]
+    proto --> mqtt[MQTT / 地区分支]
+    mqtt --> platform[平台]
 ```
 
 remote_proto 选择对外链路；源文件中的 server 命名不表示该模块直接监听 CAN 或 Modbus 设备。地区配置与设备联调结果需分别核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -80,12 +84,17 @@ remote_proto 选择对外链路；源文件中的 server 命名不表示该模�
 
 ## 关键流程与数据流
 
-~~~text
-配置 / 点表 / SQLite 初始化 → CAN、Modbus、应用消息、存储线程
-共享数据点 → SQLite 历史采样
-remote_proto → IEC 101 / 104（仅浙江分支另启冻结任务）
-             或 MQTT / 地区分支 → 对外发送
-~~~
+```mermaid
+flowchart TD
+    config[配置 / 点表] --> init[SQLite 初始化]
+    init --> threads[启动 CAN、Modbus、应用消息和存储线程]
+    threads --> points[共享数据点]
+    points --> history[SQLite 历史采样]
+    points --> proto[remote_proto]
+    proto -->|IEC 101 / 104| master[主站]
+    proto -->|仅浙江分支| freeze[冻结任务]
+    proto -->|MQTT / 地区分支| platform[对外平台]
+```
 
 [启动与采集图](#analysis-3)给出线程和数据点入口；[IEC 链路](#analysis-5)、[MQTT 分支](#analysis-6)应按实际配置选读；[存储与时间](#analysis-7)区分 SQLite 和浙江冻结。
 

@@ -136,20 +136,27 @@ Makefile 通配的目录：`can_mng, can_server, mosquitto, cJSON, list, opt_ini
 
 ## 8. 端到端数据流
 
-```
-[CAN桥接] 16002/3/4 ─┐            [GPS] 16005
-                     ▼               │
-[local_socket线程] parse_can_msg ────┤
-   ├─ parse_dm1_frame: DM1(0xFECA)/BAM(0xECFF+0xEBFF)/0xEBEA
-   │     └─ enqueue_new_faults / dequeue(全0/全FF) → db_lst(mutex)
-   └─ parse_can_frame: 9个ID → freeze_dat(无锁)
-                     │
-[主循环 1s] handle_fault_data: db_lst ⇄ SQLite(fault_status/history), history_count++
-                     │
-[mqtt线程] 等 /tmp/dial_success → 每~2s 取 1 条 history
-   └─ tsp_frame_generate: 0F4A(帧头+GPS+冻结帧+故障码+BCC+转义) → publish(LOCAL_TOPIC_PUB_HEAVY) → 删该行
-                     ▼
-           本机 broker 127.0.0.1:1883 → TSP 平台
+```mermaid
+flowchart TD
+    CAN[CAN 桥接 16002/3/4] --> Socket[local_socket 线程：parse_can_msg]
+    GPS[GPS 16005] --> GPSInfo[gps_info：共享 GPS 数据]
+    Socket --> DM1[parse_dm1_frame：DM1、BAM、0xEBEA]
+    DM1 --> Queue[enqueue/dequeue 故障队列]
+    Queue --> DBList[db_lst：mutex]
+    Socket --> Freeze[parse_can_frame：9 个 ID]
+    Freeze --> FreezeData[freeze_dat：无锁]
+    DBList --> Main[主循环：每 1s handle_fault_data]
+    FreezeData --> Main
+    Main <--> SQLite[SQLite：fault_status / history]
+    Main --> Count[history_count]
+    Dial[/tmp/dial_success 就绪/] --> MQTT[mqtt 线程：每约 2s 取一条 history]
+    Count --> MQTT
+    MQTT --> Frame[tsp_frame_generate：生成 0F4A 帧]
+    GPSInfo --> Frame
+    Frame --> Publish[publish：LOCAL_TOPIC_PUB_HEAVY]
+    Publish --> Delete[删除已上报行]
+    Publish --> Broker[本机 broker 127.0.0.1:1883]
+    Broker --> TSP[TSP 平台]
 ```
 
 ---

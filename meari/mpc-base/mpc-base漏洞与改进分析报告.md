@@ -621,14 +621,18 @@ cleanup:
 
 当前认证体系存在多个层面的薄弱点，建议系统性加固：
 
-```
-当前认证流程:
-  客户端 → Base64(name:password) → 服务端 strncmp 明文比较
-
-建议认证流程:
-  客户端 → HMAC-SHA256(nonce + password_hash) → 服务端验证
-                                                     ↑
-                              服务端只存储 PBKDF2(password, salt)
+```mermaid
+flowchart TD
+    subgraph Current[当前认证流程]
+        A[客户端] --> B[Base64 name:password]
+        B --> C[服务端 strncmp 明文比较]
+    end
+    subgraph Proposed[建议认证流程]
+        D[服务端存储 PBKDF2 password + salt]
+        E[客户端] --> F[HMAC-SHA256 nonce + password_hash]
+        F --> G[服务端验证签名]
+        D --> G
+    end
 ```
 
 具体改进：

@@ -226,13 +226,15 @@ RPC 承载控制请求，共享映射承载部分媒体和查询数据。图中�
 
 `nv_start_base()` 是库级入口。启动可按以下阶段阅读；具体调用顺序、编译条件和失败处理以紧随其后的表格为准。
 
-```text
-日志 / 信号 / 看门狗 / 硬件
-  → 参数与网络基础设置 / 媒体 / 音频输入
-  → 事件 / 用户 / DSP / IPC
-  → RPC 资源初始化 → 存储启动 → RPC 监听
-  → 预览 / 外设 / 条件启用的智能与网络服务
-  → 备份 / 发现 / NETSDK / 条件启用的 Wi-Fi
+```mermaid
+flowchart TD
+    A[日志、信号、看门狗和硬件] --> B[参数与网络基础设置、媒体和音频输入]
+    B --> C[事件、用户、DSP 和 IPC]
+    C --> D[RPC 资源初始化]
+    D --> E[存储启动]
+    E --> F[RPC 监听]
+    F --> G[预览、外设及条件启用的智能和网络服务]
+    G --> H[备份、发现、NETSDK 及条件启用的 Wi-Fi]
 ```
 
 部分调用遇 `NV_FAILURE` 退出，另有未检查或被下层包装吞掉的失败。看门狗的存在不能证明任意启动失败都会重启进程。
@@ -346,15 +348,18 @@ NV_CHECK(chan < 0 || chan > nv_abi_getchannum() - 1, return NV_FAILURE);
 
 日夜控制可沿实际链路核验：
 
-```text
-nv_set_chan_daynight_mode
-  → nv_ipcm_set_daynight
-  → nv_ipcm_set_daynight_async
-  → 通道命令队列
-  → nv_ipcm_pro_connect / E_IPCM_MSG_SET_DAY_NIGHT
-  → nv_ipcm_set_daynight_do
-  → 连接状态满足时调用 nv_factory_set_dev_day_night
-  → 成功后更新设备缓存并发送 CHG_DAY_NIGHT 事件
+```mermaid
+flowchart TD
+    A[nv_set_chan_daynight_mode] --> B[nv_ipcm_set_daynight]
+    B --> C[nv_ipcm_set_daynight_async]
+    C --> D[通道命令队列]
+    D --> E[nv_ipcm_pro_connect / E_IPCM_MSG_SET_DAY_NIGHT]
+    E --> F[nv_ipcm_set_daynight_do]
+    F --> G{连接状态满足?}
+    G -->|是| H[调用 nv_factory_set_dev_day_night]
+    G -->|否| I[不执行设备设置]
+    H --> J{设备调用成功?}
+    J -->|是| K[更新设备缓存并发送 CHG_DAY_NIGHT 事件]
 ```
 
 [nvipcm.cc:2168](/home/tronlong/lyp/meari/nvr-base/mod/ipcm/src/nvipcm.cc:2168) 说明首层返回值是入队结果；设备未连接时 `_do()` 不执行设置，却仍可能返回成功。调用方必须结合设备状态、事件或再次查询来确认实际效果。
@@ -393,14 +398,14 @@ typedef enum _E_NV_FACTORY_ {
 
 `nvfactory.h/cc` 通过协议回调表分发操作。以下以翻转为例（非 BASE 表项）：
 
-```
-nv_factory_set_dev_flip(handle, factory, status)
-         │
-         ├─ if factory == MEARI  → meari_set_dev_flip(...)
-         ├─ if factory == ONVIF  → onvif_set_dev_flip(...) [当前无下发实现]
-         ├─ if factory == MEARI2 → prtp2_set_dev_flip(...)
-         ├─ if factory == RTSP   → (不支持，返回失败)
-         └─ if factory == NETSDK → msdk_set_dev_flip(...)
+```mermaid
+flowchart TD
+    A[nv_factory_set_dev_flip handle, factory, status] --> B{factory}
+    B -->|MEARI| C[meari_set_dev_flip]
+    B -->|ONVIF| D[onvif_set_dev_flip，当前无下发实现]
+    B -->|MEARI2| E[prtp2_set_dev_flip]
+    B -->|RTSP| F[不支持并返回失败]
+    B -->|NETSDK| G[msdk_set_dev_flip]
 ```
 
 每种操作都定义了对应的回调函数类型（如 `set_dev_flip_callback`），实现了 **面向接口编程**。
@@ -624,13 +629,15 @@ typedef struct nv_status_box_s {
 
 **推理流程**：
 
-```
-已分配 AI 槽位的 NV_AIer
-    │
-    ├─ 从 preview 获取编码子流送 AI 解码器，再向媒体 SDK 取得 YUV
-    ├─ 送入 NN 推理封装（人形或通用检测分支，见下表）
-    ├─ 获取检测结果 nv_objs_t
-    └─ 触发 nv_aievent → nv_event_trigger() → 存储/推送
+```mermaid
+flowchart TD
+    A[已分配 AI 槽位的 NV_AIer] --> B[从 preview 获取编码子流并送 AI 解码器]
+    B --> C[媒体 SDK 取得 YUV]
+    C --> D[送入 NN 推理封装: 人形或通用检测分支]
+    D --> E[获取 nv_objs_t 检测结果]
+    E --> F[触发 nv_aievent]
+    F --> G[nv_event_trigger]
+    G --> H[存储 / 推送处理]
 ```
 
 #### 补充核验：本地 AI 与相机智能事件
@@ -651,12 +658,15 @@ typedef struct nv_status_box_s {
 
 ##### 实际数据路径
 
-```text
-编码码流 → preview 回调 → AI 分配的解码器
-  → pps_media_vdec_recv_frame 取得 YUV
-  → hl_pps_nn_* 封装 / 平台 NN 库
-  → 目标类别及置信度筛选
-  → UI 框数据 + nv_ai_event_trig_status
+```mermaid
+flowchart TD
+    A[编码码流] --> B[preview 回调]
+    B --> C[AI 分配的解码器]
+    C --> D[pps_media_vdec_recv_frame 取得 YUV]
+    D --> E[hl_pps_nn_* 封装 / 平台 NN 库]
+    E --> F[目标类别及置信度筛选]
+    F --> G[UI 框数据]
+    F --> H[nv_ai_event_trig_status]
 ```
 
 本地 AI 有专门的解码资源规划，不应简单描述为“读取当前 UI 窗口已解码的画面”。初始化按板型申请内存池或预开解码器；每个 `NV_AIer` 保存通道、解码器、最近输入/取帧时刻、ROI 等信息。
@@ -773,30 +783,41 @@ STFS 设备内布局概览（512 字节扇区）
 
 #### 5.6.2 存储子系统层次结构
 
-```
-nvDataService（顶层服务入口）
-    │
-    ├─ nvDiskManager（磁盘管理）
-    │       └─ 扫描块设备并按源码规则归类，见下文总线说明
-    │
-    ├─ nvDataVideoRecord（视频录像服务）
-    ├─ nvDataImageRecord（图片存储服务）
-    ├─ nvDataLogSave（系统日志服务）
-    ├─ nvDataPlayback（录像回放服务）
-    ├─ nvDataBackup（U盘备份服务）
-    ├─ nvDataOtaFile（OTA文件管理）
-    └─ nvDataParam（参数存储服务）
-
-存储设备抽象层：
-    ├─ DirectIODev / FileSystemDev（StorageDev 派生的设备读写实现）
-    └─ SDFile（在 StorageDev 上以起点、长度和当前位置表示文件区域）
-
-STFS 文件系统层：
-    ├─ nvRecordFile（录像文件，核心）
-    ├─ nvImageFile（图片文件）
-    ├─ nvEventFile（事件文件）
-    ├─ nvLogFile（日志文件）
-    └─ nvOtaFile（OTA升级文件）
+```mermaid
+flowchart TD
+    DataService[nvDataService：顶层服务入口]
+    DiskManager[nvDiskManager：磁盘管理]
+    Video[nvDataVideoRecord：视频录像]
+    Image[nvDataImageRecord：图片存储]
+    Log[nvDataLogSave：系统日志]
+    Playback[nvDataPlayback：录像回放]
+    Backup[nvDataBackup：U 盘备份]
+    OTA[nvDataOtaFile：OTA 文件管理]
+    Param[nvDataParam：参数存储]
+    DeviceLayer[存储设备抽象层：DirectIODev / FileSystemDev]
+    SDFile[SDFile：设备内文件区域]
+    FS[STFS 文件系统层]
+    Record[nvRecordFile：录像文件]
+    ImageFile[nvImageFile：图片文件]
+    EventFile[nvEventFile：事件文件]
+    LogFile[nvLogFile：日志文件]
+    OTAFile[nvOtaFile：升级文件]
+    DataService --> DiskManager
+    DataService --> Video
+    DataService --> Image
+    DataService --> Log
+    DataService --> Playback
+    DataService --> Backup
+    DataService --> OTA
+    DataService --> Param
+    DataService --> DeviceLayer
+    DeviceLayer --> SDFile
+    DeviceLayer --> FS
+    FS --> Record
+    FS --> ImageFile
+    FS --> EventFile
+    FS --> LogFile
+    FS --> OTAFile
 ```
 
 `SDFile::Open(StorageDev*, offset, fileSize, access_mod)` 的参数与成员明确表示设备内文件区域，见 [SDFile.h](/home/tronlong/lyp/meari/nvr-base/mod/storage/inc/SDFile.h:23)。[FileSystemDev](/home/tronlong/lyp/meari/nvr-base/mod/storage/src/nvDataDevice/nvFileSystemDev.cc:37) 通过 seek/read/write 访问设备，并检查对齐；该类本身不能证明 FAT32/NTFS/exFAT 支持。
@@ -845,17 +866,17 @@ int playbackPlayByFile(int taskId, FILE_INFO* pFileInfo, time_t startTime, time_
 
 [nvDataVideoRecord.cc](/home/tronlong/lyp/meari/nvr-base/mod/storage/src/nvDataVideoRecord.cc:375) 的主要路径：
 
-```text
-INIT
-  ├─ 无可用 STFS：撤销该录像任务的开流需求，等待
-  └─ 有可用 STFS：增加开流需求 → WRITING
-WRITING
-  ├─ 判断录像类型/是否需要录像
-  ├─ 读取连续帧 → VideoWriter → STFSRecordFile
-  ├─ 空间不足或时间跳变：换文件，再尝试写入
-  └─ 磁盘丢失/硬件错误等：STOP
-STOP → 收尾并重新初始化
-DEINIT → 另一收尾分支
+```mermaid
+stateDiagram-v2
+    [*] --> INIT
+    INIT --> INIT: 无可用 STFS，撤销开流需求并等待
+    INIT --> WRITING: 有可用 STFS，增加开流需求
+    WRITING --> WRITING: 判断录像类型 / 需求，读取连续帧并写入 VideoWriter / STFSRecordFile
+    WRITING --> WRITING: 空间不足或时间跳变，换文件后重试
+    WRITING --> STOP: 磁盘丢失 / 硬件错误等
+    STOP --> INIT: 收尾并重新初始化
+    INIT --> DEINIT: 销毁任务
+    WRITING --> DEINIT: 销毁任务
 ```
 
 缓冲读取采用 `RequestReadContinuousFrames()`，写入完成可再次写时调用 `CommitRead()`。没有新录像需求时会调用 `RecordStop()` 并等待；不能把“录像线程存在”当成“正在写盘”。
@@ -952,9 +973,14 @@ sysLogLBA    = 两份索引区尾部按 4096 对齐后换算
 
 #### 5.7.1 架构
 
-```text
-控制请求：调用方 rpcApiClient → Unix 域套接字 → rpcApiServer → 业务接口
-数据交换：生产者 → 文件 mmap 共享缓冲 → 消费者
+```mermaid
+flowchart LR
+    A[控制请求调用方] --> B[rpcApiClient]
+    B --> C[Unix 域套接字]
+    C --> D[rpcApiServer]
+    D --> E[业务接口]
+    F[数据生产者] --> G[文件 mmap 共享缓冲]
+    G --> H[数据消费者]
 ```
 
 RPC 请求/响应与共享数据具有不同的格式和生命周期，不能视作同一条传输通道。
@@ -1064,10 +1090,17 @@ int nv_get_all_online_device(void); // 内部调用 get_all_online_device_async(
 
 文件扩展名为 `.bin` 不代表二进制结构体持久化。[Baseparam](/home/tronlong/lyp/meari/nvr-base/mod/param/src/nvparamhelp.cc:21) 的实际路径为：
 
-```text
-加载：nv_read_file → cJSON_Parse → 子类 json2stru
-失败：defparam → saveconfig
-保存：stru2json → cJSON_PrintBufferedLen → nv_write_file
+```mermaid
+flowchart TD
+    A[加载配置] --> B[nv_read_file]
+    B --> C[cJSON_Parse]
+    C --> D[子类 json2stru]
+    B -->|读取失败| E[defparam]
+    C -->|解析失败| E
+    E --> F[saveconfig]
+    G[保存配置] --> H[stru2json]
+    H --> I[cJSON_PrintBufferedLen]
+    I --> J[nv_write_file]
 ```
 
 `Baseparam::saveconfig()` 未检查 `nv_write_file()` 返回值，固定返回 `NV_SUCCESS`；`defconfig()` 也没有传播保存失败。`nv_write_file` 的实现不在当前目录，无法核实它是否使用临时文件、原子替换或 `fsync`。
@@ -1262,15 +1295,22 @@ RPC 分发中有 `nv_play_audio_up_finish()` 调用，主启动函数本身未�
 
 [nv_device_upgrade.cc](/home/tronlong/lyp/meari/nvr-base/mod/upgrade/src/nv_device_upgrade.cc:183) 管理升级文件/缓冲获取、版本检查、任务互斥、执行和释放：
 
-```text
-检查入口 nv_sys_updatefw_check
-  → 取缓冲 → 固件头解析 / 数据转换 / 取得版本 → 释放与清理
-
-执行入口 nv_sys_updatefw_do
-  → 取得升级占用状态 → 创建任务 nv_sys_updatefw_do_task
-  → 取缓冲 / 读平台与版本信息 → 尝试保存 OTA 文件
-  → NVR: pps_device_upgrade_by_buffer；IPC: nv_ipcm_updatefw
-  → 释放缓冲 / 清理状态 → NVR 成功分支发送重启事件
+```mermaid
+flowchart TD
+    A[检查入口 nv_sys_updatefw_check] --> B[取得缓冲]
+    B --> C[解析固件头、转换数据并取得版本]
+    C --> D[释放资源并清理]
+    E[执行入口 nv_sys_updatefw_do] --> F[取得升级占用状态]
+    F --> G[创建 nv_sys_updatefw_do_task]
+    G --> H[取得缓冲并读取平台 / 版本信息]
+    H --> I[尝试保存 OTA 文件]
+    I --> J{升级目标}
+    J -->|NVR| K[pps_device_upgrade_by_buffer]
+    J -->|IPC| L[nv_ipcm_updatefw]
+    K --> M[释放缓冲并清理状态]
+    L --> M
+    M --> N{NVR 升级成功?}
+    N -->|是| O[发送重启事件]
 ```
 
 [nv_sys_updatefw_do](/home/tronlong/lyp/meari/nvr-base/mod/upgrade/src/nv_device_upgrade.cc:449) 本身没有调用检查入口；`nv_sys_nvr_updatefw_do_check()` 才先比较版本再执行。不能把检查步骤画成所有升级调用必经的统一流程，也不能从这一点推定平台刷写函数没有内部校验。
@@ -1511,41 +1551,26 @@ libnvrbase Build:2024-01-15_main_a1b2c3d P James
 
 ## 12. 模块依赖关系图
 
-```
-                        ┌─────────────────┐
-                        │   nv_base (入口) │
-                        └────────┬────────┘
-         ┌──────────────────┬────┴──────┬──────────────────────┐
-         ▼                  ▼           ▼                       ▼
-   ┌──────────┐      ┌──────────┐  ┌───────────┐        ┌───────────┐
-   │   ipcm   │      │   dsp    │  │  storage  │        │  rpcapi   │
-   │ IP摄像机 │─────▶│ 帧缓冲区 │─▶│(STFS存储) │◀───────│(RPC服务器)│
-   │  管理器  │      └──────────┘  └───────────┘        └───────────┘
-   └──┬───────┘            │                                   ▲
-      │                    │                                   │
-      │                    ├─▶ ┌──────────┐             ┌─────┴─────┐
-      │                    │   │ preview  │             │rpcApiClient│
-      │                    │   │(预览分发)│             │(调用方使用)│
-      │                    │   └──────────┘             └───────────┘
-      │                    │
-      │                    └─▶ ┌──────────┐
-      │                        │    ai    │─▶ ┌──────────┐
-      │                        │(NN推理)  │   │  event   │
-      │                        └──────────┘   │(事件总线)│
-      │                                       └────┬─────┘
-      └───────────────────────────────────────────▶│
-                                                   ▼
-                         ┌──────────────────────────────┐
-                         │ 事件消费者（固定分发调用）      │
-                         │ • nvmsgpush  (消息推送缓冲)  │
-                         │ • nvuimsg    (UI 界面刷新)    │
-                         │ • nvnetmsg   (网络消息)       │
-                         │ • nvsoundlight(声光报警)      │
-                         └──────────────────────────────┘
-
-常见依赖（各模块实际依赖不同）：
-  param（配置参数）、sys（系统服务）、hal（硬件抽象）
-  util/cyclone（事件循环）、util/cjson（JSON）
+```mermaid
+flowchart TD
+    A[nv_base 入口] --> B[ipcm: IP 摄像机管理]
+    A --> C[dsp: 帧缓冲区]
+    A --> D[storage: STFS 存储]
+    A --> E[rpcapi: RPC 服务器]
+    B --> C
+    C --> D
+    D <--> E
+    C --> F[preview: 预览分发]
+    C --> G[ai: NN 推理]
+    G --> H[event: 事件总线]
+    B --> H
+    H --> I[固定事件消费者]
+    I --> J[nvmsgpush: 消息推送缓冲]
+    I --> K[nvuimsg: UI 刷新]
+    I --> L[nvnetmsg: 网络消息]
+    I --> M[nvsoundlight: 声光报警]
+    N[rpcApiClient 调用方] --> E
+    O[常见依赖: param / sys / hal / util-cyclone / util-cjson] -. 各模块按需依赖 .-> A
 ```
 
 ### 补充核验：主要线程与同步关系
@@ -1598,18 +1623,26 @@ flowchart TD
 
 普通事件线程实际调用 `StartMotionRecord`；APP 消息写缓冲不等于云端送达。
 
-```text
-IPC 上报 / NVR 本地 AI / 系统状态
-  ├─ 普通事件 → nv_event_trigger → 有限队列 → nv_event_pro 固定分发
-  │    ├─ 录像条件满足 → StartMotionRecord → 录像任务判断/写盘
-  │    ├─ 抓图与节流条件满足 → IPC 抓图 → 后续图像回调 → APP 消息缓冲
-  │    ├─ 状态通知 → UI 注册回调 / 网络客户端消息
-  │    └─ 对应事件分支 → 声光、重启或日志操作
-  ├─ 带数据推送 → nv_event_trigger_by_data → 开关检查 → APP 消息缓冲
-  └─ AI 图像 → 单独 AI 图像缓冲 → UI / 图像存储
-
-APP 消息缓冲 → 外部消费程序 / 云 SDK → 手机
-               [此段未在当前源码目录完成闭环核验]
+```mermaid
+flowchart TD
+    A[IPC 上报 / NVR 本地 AI / 系统状态] --> B{事件入口}
+    B -->|普通事件| C[nv_event_trigger]
+    C --> D[有限队列]
+    D --> E[nv_event_pro 固定分发]
+    E --> F{事件处理条件}
+    F -->|录像条件满足| G[StartMotionRecord]
+    G --> H[录像任务判断与写盘]
+    F -->|抓图与节流条件满足| I[IPC 抓图]
+    I --> J[图像回调]
+    J --> K[APP 消息缓冲]
+    F -->|状态通知| L[UI 注册回调 / 网络客户端消息]
+    F -->|对应事件分支| M[声光、重启或日志操作]
+    B -->|带数据推送| N[nv_event_trigger_by_data]
+    N --> O[开关检查]
+    O --> K
+    B -->|AI 图像| P[单独 AI 图像缓冲]
+    P --> Q[UI / 图像存储]
+    K -. 消费链未在当前源码目录闭环核验 .-> R[外部消费程序 / 云 SDK / 手机]
 ```
 
 事件条件、推送节流、前端抓图与本地图像记录的差异见 5.4、5.5、5.6 节补充。

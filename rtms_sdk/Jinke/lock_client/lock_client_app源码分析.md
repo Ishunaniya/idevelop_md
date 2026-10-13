@@ -50,11 +50,18 @@
 
 ## 核心架构设计
 
-```text
-配置的 MQTT Broker → 接收队列 → lock 解析 / 映射
-                           ├→ 接收 ACK / 本地发送结果 → 回执队列 → Broker
-                           └→ cmd / nn_send → 本机命令服务 → 锁具
-本机命令回复 → cmd 本地日志或密码状态；不生成硬件完成的 MQTT 回执
+```mermaid
+flowchart TD
+    broker[配置的 MQTT Broker] --> queue[接收队列]
+    queue --> parse[lock 解析 / 映射]
+    parse --> ack[接收 ACK / 本地发送结果]
+    ack --> reply[回执队列]
+    reply --> broker
+    parse --> cmd[cmd / nn_send]
+    cmd --> service[本机命令服务]
+    service --> lock[锁具]
+    command[本机命令回复] --> local[cmd 本地日志或密码状态]
+    local -. 不生成硬件完成的 MQTT 回执 .-> local
 ```
 
 ACK、nn_send 成功、命令服务回复与锁具实际状态是四个不同证据阶段。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -76,12 +83,19 @@ ACK、nn_send 成功、命令服务回复与锁具实际状态是四个不同证
 
 ## 关键流程与数据流
 
-~~~text
-MQTT 指令 → 接收队列 / 接收 ACK
-定时回调 → 解析与命令映射 → nanomsg 发送本机命令
-本地发送结果 → 回执队列 → MQTT 回复主题
-本机服务回复 → 本地日志或密码状态；锁具动作需下游证据
-~~~
+```mermaid
+flowchart TD
+    mqtt[MQTT 指令] --> receive[接收队列]
+    receive --> ack[接收 ACK]
+    timer[定时回调] --> parse[解析与命令映射]
+    receive --> parse
+    parse --> send[nanomsg 发送本机命令]
+    send --> result[本地发送结果]
+    result --> reply[回执队列]
+    reply --> topic[MQTT 回复主题]
+    local[本机服务回复] --> status[本地日志或密码状态]
+    status -. 锁具动作需下游证据 .-> boundary[本机结果不等于硬件完成回执]
+```
 
 依次看[整体结构图](#analysis-2)、[MQTT 生命周期](#analysis-4)、[定时处理图](#analysis-5)和[本机协议](#analysis-6)。接收 ACK、命令发送结果和锁具动作不能合并成一次“执行成功”。
 

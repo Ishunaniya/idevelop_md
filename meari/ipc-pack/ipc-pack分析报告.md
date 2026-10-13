@@ -43,20 +43,21 @@
 
 该仓库汇总各平台的接口头文件、静态库、动态库、驱动、内核、U-Boot、模型、IQ 参数、提示音和启动脚本，通过一个很薄的 `ppsapp` 入口链接业务库，再组成应用镜像和升级包。README 明确要求各模块在各自源码仓库编译后，把导出头文件和库复制进本仓库。来源：[README.md:3](/home/tronlong/lyp/meari/ipc-pack/README.md:3)。
 
-~~~text
-各独立模块源码仓库
-    │ 编译后交付 .h / .a / .so / 可执行程序 / .ko
-    ▼
-ipc-pack
-    ├── include/                        公共接口与数据结构
-    ├── arch/<平台>/include/            平台媒体/NN 接口
-    ├── arch/<平台>/lib/                链接输入
-    ├── nvr_app/main/ppsapp.cc          应用入口与版本回调
-    └── arch/<平台>/pack/ + _common/    固件文件和启动资源
-              │ CMake 链接、清单组装、镜像工具
-              ▼
-    ppsapp / app.img / upgrade.bin / upgrade-for-factory.bin
-~~~
+```mermaid
+flowchart TD
+    A[独立模块源码仓库] -->|编译交付 .h / .a / .so / 可执行程序 / .ko| B[ipc-pack]
+    B --> C[include: 公共接口与数据结构]
+    B --> D[arch/<平台>/include: 平台媒体 / NN 接口]
+    B --> E[arch/<平台>/lib: 链接输入]
+    B --> F[nvr_app/main/ppsapp.cc: 应用入口与版本回调]
+    B --> G[arch/<平台>/pack 与 _common: 固件文件和启动资源]
+    C --> H[CMake 链接、清单组装和镜像工具]
+    D --> H
+    E --> H
+    F --> H
+    G --> H
+    H --> I[ppsapp / app.img / upgrade.bin / upgrade-for-factory.bin]
+```
 
 ### 1.2 本仓库能独立确认与不能独立确认的事项
 
@@ -220,20 +221,20 @@ flowchart TD
 
 ### 4.2 运行期架构
 
-~~~text
-内核/根文件系统启动（大部分仅有镜像，外部入口不可见）
-    │ 调用应用分区 initrun.sh（调用者需由 BSP 核实）
-    ▼
-initrun.sh → sys_cfg → app/init/rcS
-    ├── S00load_ko：挂载 cfg、部署文件、加载驱动、读取工厂参数
-    └── S60ppsapp：
-          ├── cmd_router
-          ├── ppsapp → nv_start_base（libnvrbase.a）
-          ├── run_meari.sh → meari_nvr（按文件存在启动）
-          ├── run_tuya.sh  → tuya（优先于 meari）
-          ├── run_onvif.sh → onvif_server
-          └── run_gb.sh    → nv_gb
-~~~
+```mermaid
+flowchart TD
+    A[内核 / 根文件系统启动，外部入口多数不可见] --> B[应用分区 initrun.sh，调用者需由 BSP 核实]
+    B --> C[sys_cfg]
+    C --> D[app/init/rcS]
+    D --> E[S00load_ko: 挂载 cfg、部署文件、加载驱动、读取工厂参数]
+    D --> F[S60ppsapp]
+    F --> G[cmd_router]
+    F --> H[ppsapp 调用 nv_start_base]
+    F --> I[run_meari.sh: 文件存在时启动 meari_nvr]
+    F --> J[run_tuya.sh: tuya，优先于 meari]
+    F --> K[run_onvif.sh: onvif_server]
+    F --> L[run_gb.sh: nv_gb]
+```
 
 `ppsapp` 和外围服务是多个进程。RPC 头文件定义 Unix 域套接字路径，动态库 `librpcclient.so` 的符号/依赖也存在；共享缓冲接口供跨进程数据交换。接口足以说明集成契约，但不能仅从接口断定每个生产进程何时、怎样取流。
 
@@ -318,11 +319,13 @@ T40 JSON 的 default 中有日间 20 fps、夜间 10 fps、`ChnCnt=2`、`2304x12
 
 `CONFIG_AI` 与 `CONFIG_PD` 在入口编译中按优先级生成：
 
-~~~text
-CONFIG_AI 真 → CONFIG_AI=1, CONFIG_PD=0
-否则 CONFIG_PD 真 → CONFIG_AI=0, CONFIG_PD=1
-否则 → 两者均为 0
-~~~
+```mermaid
+flowchart TD
+    A{CONFIG_AI 为真?} -->|是| B[CONFIG_AI=1, CONFIG_PD=0]
+    A -->|否| C{CONFIG_PD 为真?}
+    C -->|是| D[CONFIG_AI=0, CONFIG_PD=1]
+    C -->|否| E[CONFIG_AI=0, CONFIG_PD=0]
+```
 
 `MD` 是独立宏。模型大小默认 3，可显式设置 4；标签宏分别生成 0/1。源码未证明模型大小数字等同于模型文件大小或通道数。[nvr_app/CMakeLists.txt:344](/home/tronlong/lyp/meari/ipc-pack/nvr_app/CMakeLists.txt:344)、[nvr_app/CMakeLists.txt:407](/home/tronlong/lyp/meari/ipc-pack/nvr_app/CMakeLists.txt:407)。
 
@@ -534,38 +537,33 @@ payload
 
 ### 7.1 从源码入口到固件镜像
 
-~~~text
-菜单说明字符串
-  → 裁剪 _T41NQ_16M 等后缀
-  → VCAMERA_PLATFORM_ID
-  → 拆硬件/软件 ID
-  → 产品 cmake + arch 路由
-  → 生成 version.h
-  → 编译入口、链接预编译库
-  → install/bin/ppsapp
-  → pack/app/ppsapp
-  → 按清单生成 .build/app
-  → .build/packages/app.img
-  → pack 组合内核/U-Boot/应用镜像
-  → TFTPBOOT 下的命名升级包
-~~~
+```mermaid
+flowchart TD
+    A[菜单说明字符串] --> B[裁剪 _T41NQ_16M 等后缀]
+    B --> C[VCAMERA_PLATFORM_ID]
+    C --> D[拆分硬件 / 软件 ID]
+    D --> E[产品 CMake 与 arch 路由]
+    E --> F[生成 version.h]
+    F --> G[编译入口并链接预编译库]
+    G --> H[install/bin/ppsapp]
+    H --> I[pack/app/ppsapp]
+    I --> J[按清单生成 .build/app]
+    J --> K[.build/packages/app.img]
+    K --> L[pack 组合内核 / U-Boot / 应用镜像]
+    L --> M[TFTPBOOT 下的命名升级包]
+```
 
 `.ppstrong` 按产品/构建类型分隔主应用输出，`arch/<平台>/pack/app` 却是同 arch 产品共享的 staging 目录。顺序打包不同产品会覆盖同名应用，脚本没有并发锁；不应同时对同一 arch 的产品执行打包。
 
 ### 7.2 版本信息流
 
-~~~text
-version/version
-  年份、Git 提交数量、OTA_TEST/TATAL_OTA
-              ↓
-gen_version.sh + platform_id.txt + Git 元信息
-              ↓
-构建目录 version.h
-              ↓
-ppsapp.cc / nv_get_version
-              ↓
-libnvrbase 或外部调用者（消费实现不可读）
-~~~
+```mermaid
+flowchart TD
+    A[version/version: 年份、Git 提交数量、OTA_TEST / TATAL_OTA] --> B[gen_version.sh + platform_id.txt + Git 元信息]
+    B --> C[构建目录 version.h]
+    C --> D[ppsapp.cc / nv_get_version]
+    D --> E[libnvrbase 或外部调用者，消费实现不可读]
+```
 
 CMake 的版本任务在构建目录生成头文件，该目录在 include 搜索路径中，优先于后面配置的公共版本目录；安装脚本再复制到 `include/version/version.h`。当前公共版本头是遗留 `6.5.239`、2025-03-14，不应拿它当此次构建后的版本。[nvr_app/CMakeLists.txt:293](/home/tronlong/lyp/meari/ipc-pack/nvr_app/CMakeLists.txt:293)、[nvr_app/CMakeLists.txt:508](/home/tronlong/lyp/meari/ipc-pack/nvr_app/CMakeLists.txt:508)、[nvr_app/mkprj.sh:254](/home/tronlong/lyp/meari/ipc-pack/nvr_app/mkprj.sh:254)。
 
@@ -573,13 +571,13 @@ CMake 的版本任务在构建目录生成头文件，该目录在 include 搜�
 
 本仓库能画出接口层的数据连接关系：
 
-~~~text
-传感器 .ko + IQ + media 配置
-    → 平台媒体 SDK（VI、VENC/AENC 接口）
-    → libnvrbase 内的编码/DSP相关对象（符号确认）
-    → 帧结构与 CRingBuf/数据服务契约
-    → 录像/回放接口，或 meari/ONVIF/GB 外围进程
-~~~
+```mermaid
+flowchart LR
+    A[传感器 .ko + IQ + media 配置] --> B[平台媒体 SDK: VI、VENC / AENC 接口]
+    B --> C[libnvrbase 编码 / DSP 相关对象，符号确认]
+    C --> D[帧结构与 CRingBuf / 数据服务契约]
+    D --> E[录像 / 回放接口或 meari / ONVIF / GB 外围进程]
+```
 
 其中 SDK 具体调用时序、生产者提交缓冲步骤和外围服务实际消费过程没有可读实现。图是交付接口关系，**不是已验证的端到端运行时序**。不能从它推出总带宽、实际帧率、延迟、零拷贝、存储吞吐或无丢帧。
 

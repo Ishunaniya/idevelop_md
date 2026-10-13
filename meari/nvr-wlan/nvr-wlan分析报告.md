@@ -73,26 +73,24 @@
 
 ### 核心定位
 
-~~~text
-NVR 主进程 / 产品 SDK（本目录之外）
-  ├── RPC：设备、WiFi、通道、在线信息、事件、看门狗
-  ├── CShareDataBuf：通道数量与连接状态
-  └── NvNetBuf "app-msg-push"：业务消息
-                    ↕
-             nvr_wlan 独立进程
-  ├── 网络环境初始化：WiFi AP / PoE / 7628
-  ├── hostname 列表与父子拓扑
-  ├── TCP 8045：普通 IPC / 低功耗 CPU 控制连接
-  └── TCP 8046：低功耗 MCU 控制连接
-           ↕                      ↕
-  原生 Socket / ioctl      外部系统命令服务
-                           /var/systemCmd.socket
-                                  ↓
-           hostapd / wpa_cli / udhcpd / iwpriv /
-           ifconfig / route / ifplugd / 产品脚本
-                                  ↓
-                Linux 网卡与产品 WiFi 驱动
-~~~
+```mermaid
+flowchart TD
+    A[NVR 主进程 / 产品 SDK，本目录之外]
+    A --> B[RPC: 设备、Wi-Fi、通道、在线信息、事件、看门狗]
+    A --> C[CShareDataBuf: 通道数量与连接状态]
+    A --> D[NvNetBuf app-msg-push: 业务消息]
+    B <--> E[nvr_wlan 独立进程]
+    C <--> E
+    D <--> E
+    E --> F[网络环境初始化: Wi-Fi AP / PoE / 7628]
+    E --> G[hostname 列表与父子拓扑]
+    E --> H[TCP 8045: 普通 IPC / 低功耗 CPU]
+    E --> I[TCP 8046: 低功耗 MCU]
+    E --> J[本地原生 Socket / ioctl]
+    E --> K[外部系统命令服务: /var/systemCmd.socket]
+    K --> L[hostapd / wpa_cli / udhcpd / iwpriv / ifconfig / route / ifplugd / 产品脚本]
+    L --> M[Linux 网卡与产品 Wi-Fi 驱动]
+```
 
 图中的两条底层路径都存在：TCP 与扫描 ioctl 在本进程执行；`pps_system_cmd` 通过 Unix Socket 交给外部服务执行文本命令。不能将所有网络动作解释为本进程直接调用 `system()`。
 
@@ -630,16 +628,16 @@ PULL_IS_FIRST_CONNECT 应答中的第一个字节在代码里叫 is_qrcode。收
 
 本文件自行 `#define PPS_SYSTEM_CMD`，默认走真实 Unix Socket 客户端，而不是只打印的 #else 桩：
 
-~~~text
-pps_system_cmd(command)
-    → AF_UNIX / SOCK_STREAM
-    → bind 本地 "/var/" + pthread_self 指针格式
-    → chmod 本地 socket 0700
-    → connect /var/systemCmd.socket
-    → 发 native int len + command 字节（长度不含末尾 NUL）
-    → 单次 recv 4 字节返回值
-    → close
-~~~
+```mermaid
+flowchart TD
+    A[pps_system_cmd command] --> B[创建 AF_UNIX / SOCK_STREAM]
+    B --> C[bind 本地 /var/ + pthread_self 指针格式路径]
+    C --> D[chmod 本地 socket 0700]
+    D --> E[connect /var/systemCmd.socket]
+    E --> F[发送 native int 长度和 command 字节，不含末尾 NUL]
+    F --> G[单次 recv 读取 4 字节返回值]
+    G --> H[close]
+```
 
 发送缓冲为1024字节，拒绝 header.len≥1024。writen 使用 `net_base_operate.c` 的完整发送循环；接收返回 int 却只有一次 recv，没有 readn 或完整4字节累积，短读会失败；没有设置该 recv 的响应超时。Unix 客户端 bind 路径在成功/失败退出没有 unlink 清理，下一次相同线程调用开头会先 unlink。[pps_cmd_cli.c:30](/home/tronlong/lyp/meari/nvr-wlan/pps_cmd_cli.c:30)、[pps_cmd_cli.c:106](/home/tronlong/lyp/meari/nvr-wlan/pps_cmd_cli.c:106)。
 
@@ -760,69 +758,92 @@ pps_system_cmd(command)
 
 ### 7.1 启动、配置及失败传播
 
-~~~text
-main
- → 等StorageRPC::is_nvr_start（每2秒，无总超时）
- → 额外等待3秒 → 启动看门狗 → 获取设备信息 → 启动消息线程
- → CShareDataBuf只读对象 → 缓存通道数
- → nv_wlan_init
-     → RPC读network类型 → AP／PoE／7628同步初始化
-         → RPC配置 + ioctl查询／私有扫描
-         → /var/systemCmd.socket → 外部命令执行者 → 网卡/配置/守护程序
-     → 若eth0存在则启动ifplugd → 刷新hostname
- → 分配双TCP服务 → 启动8045/8046监听线程
- → main常驻休眠
-~~~
+```mermaid
+flowchart TD
+    A[main] --> B[等待 StorageRPC::is_nvr_start，每 2 秒轮询且无总超时]
+    B --> C[额外等待 3 秒]
+    C --> D[启动看门狗、获取设备信息并启动消息线程]
+    D --> E[创建只读 CShareDataBuf 并缓存通道数]
+    E --> F[nv_wlan_init]
+    F --> G[RPC 读取 network 类型]
+    G --> H[同步初始化 AP / PoE / 7628]
+    H --> I[RPC 配置与 ioctl 查询 / 私有扫描]
+    I --> J[经 /var/systemCmd.socket 请求外部命令服务]
+    J --> K[外部执行者配置网卡、配置文件和守护程序]
+    K --> L{eth0 存在?}
+    L -->|是| M[启动 ifplugd]
+    L -->|否| N[跳过 ifplugd]
+    M --> O[刷新 hostname]
+    N --> O
+    O --> P[分配双 TCP 服务并启动 8045 / 8046 监听线程]
+    P --> Q[main 常驻休眠]
+```
 
 该链有两种不同故障：内层扫描失败被pps_wifi_init吞掉后仍能进入TCP初始化；PID／AP状态循环卡住则main不能进入TCP初始化。消息线程／看门狗可能已在运行，这时“进程活着”不能代表启动完成。`nv_wlan_init` 多次调用nv_get_nvr_type，而不是获取一次快照；配置在这些RPC之间改变时，不保证按同一类型值选择，未动态构造此时序。
 
 ### 7.2 普通IPC接入及拓扑申请
 
-~~~text
-accept8045 → 清零client、默认类型0、设置首次查询/信息查询标志
- → 分片接收 → 找帧头/长度 → 字节累加校验
- → REG：读取WiFi密码，或接受POE/OTHER前缀 → reg=1
-     → 缓存hostname、类型、协议、媒体端口、comm_mode → REG应答
- → select空闲时查询FIRST_CONNECT
-     → IPC应答is_qrcode+hostname → RPC添加/更新通道
-     → 读取外部hostname列表 → 校验存在性 → 可能安排RESET
- → select空闲时查询GET_INFO → version/model → RPC上报在线
-
-APPLY_CONNECT可另行到达：
- 清理旧父子关系 → parent含"_"视为NVR，或校验IPC父节点容量
- → 修改父指针 → 提交superidx → reg=1 → 返回同意/拒绝
-~~~
+```mermaid
+flowchart TD
+    A[accept 8045] --> B[清零 client，默认类型 0，设置首次查询 / 信息查询标志]
+    B --> C[分片接收]
+    C --> D[查找帧头和长度并校验字节累加和]
+    D --> E{命令}
+    E -->|REG| F[读取 Wi-Fi 密码或接受 POE / OTHER 前缀]
+    F --> G[设置 reg=1 并缓存 hostname、类型、协议、媒体端口、comm_mode]
+    G --> H[发送 REG 应答]
+    H --> I[select 空闲时查询 FIRST_CONNECT]
+    I --> J[IPC 应答 is_qrcode + hostname]
+    J --> K[RPC 添加 / 更新通道]
+    K --> L[读取外部 hostname 列表并校验存在性]
+    L --> M{需要重置?}
+    M -->|是| N[安排 RESET]
+    M -->|否| O[select 空闲时查询 GET_INFO]
+    N --> O
+    O --> P[读取 version / model 并经 RPC 上报在线]
+    E -->|APPLY_CONNECT| Q[清理旧父子关系]
+    Q --> R{parent 含下划线或 IPC 父节点容量有效?}
+    R -->|是| S[修改父指针并提交 superidx]
+    S --> T[设置 reg=1 并返回同意]
+    R -->|否| U[返回拒绝]
+```
 
 上图描述可执行的正常意图，不表示强制先后协议：APPLY能直接置reg；FIRST_CONNECT、GET_LIST等在主switch前没有注册门槛。FIRST_CONNECT提交给RPC的hostname来自payload，而其他后续动作可使用已有client.hostname，两者没有一致性验证。不能把REG成功、RPC请求发出、通道最终添加、媒体在线视作同一个成功事件。[nvr_wlan_protocol.c:219](/home/tronlong/lyp/meari/nvr-wlan/nvr_wlan_protocol.c:219)。
 
 ### 7.3 列表与network开关广播
 
-~~~text
-两个监听线程select超时
- → 读共享通道状态／RPC network开关
- → static last_status检测变化
- → hostname成员变化才通知list更新
- → 锁普通/CPU服务链表，为每个客户端置更新标志
- → 各客户端select空闲、reg=1、非MCU时生成通知帧
- → 发送队列 → IPC回ACK（本地只break，无完成跟踪）
-~~~
+```mermaid
+flowchart TD
+    A[两个监听线程 select 超时] --> B[读取共享通道状态与 RPC network 开关]
+    B --> C[用 static last_status 检测变化]
+    C --> D{hostname 成员变化?}
+    D -->|否| A
+    D -->|是| E[锁普通 / CPU 服务链表并置客户端更新标志]
+    E --> F[客户端 select 空闲、reg=1 且非 MCU 时生成通知帧]
+    F --> G[发送队列]
+    G --> H[IPC 返回 ACK]
+    H --> I[本地只 break，不跟踪完成状态]
+```
 
 列表更新发送的是空负载通知，IPC再发GET_LIST才能取count+hostname/quality的完整列表；不是直接广播完整拓扑。静态变化记录由两个监听线程共享且缺统一锁；这些通知只置g_server链表标志，不置g_mcu_server链表。高accept压力和持续客户端I/O也会延后超时分支调度。[nvr_wlan_tcp_server.c:403](/home/tronlong/lyp/meari/nvr-wlan/nvr_wlan_tcp_server.c:403)、[nvr_wlan_protocol.c:340](/home/tronlong/lyp/meari/nvr-wlan/nvr_wlan_protocol.c:340)。
 
 ### 7.4 电池IPC唤醒、休眠与离线
 
-~~~text
-外部app-msg-push：WAKEUP事件 + channel + 非空payload
- → 消息线程 → channel映射hostname
- → 锁8046链表找MCU → is_update_wakeup=1
- → MCU客户端reg=1且select空闲 → 打包WAKEUP → TCP发送
- → MCU/IPC硬件动作（仓库外）
- → CPU重连8045并完成FIRST_CONNECT
- → 按hostname关联MCU → RPC上报WAKEUP
-
-CPU断线且缓存MCU指针非空 → RPC上报SLEEP
-MCU断线且找不到CPU → RPC上报OFFLINE
-~~~
+```mermaid
+flowchart TD
+    A[外部 app-msg-push: WAKEUP + channel + 非空 payload] --> B[消息线程将 channel 映射为 hostname]
+    B --> C[锁 8046 链表并查找 MCU]
+    C --> D[设置 is_update_wakeup=1]
+    D --> E{MCU 客户端 reg=1 且 select 空闲?}
+    E -->|是| F[打包 WAKEUP 并通过 TCP 发送]
+    E -->|否| G[当前不发送]
+    F --> H[MCU / IPC 硬件动作，仓库外]
+    H --> I[CPU 重连 8045 并完成 FIRST_CONNECT]
+    I --> J[按 hostname 关联 MCU]
+    J --> K[RPC 上报 WAKEUP]
+    L[CPU 断线且缓存 MCU 指针非空] --> M[RPC 上报 SLEEP]
+    N[MCU 断线且找不到 CPU] --> O[RPC 上报 OFFLINE]
+```
 
 “事件被消费”“标志被设置”“帧发出”“收到ACK”“CPU实际唤醒”分别需要不同证据。当前唤醒ACK只日志，不能证明动作完成；MCU指针解绑错误还会破坏从连接存在性推导的睡眠状态，详见5.7。
 

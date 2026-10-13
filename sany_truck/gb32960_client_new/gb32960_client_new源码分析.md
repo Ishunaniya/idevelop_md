@@ -247,25 +247,27 @@ AES128 变体 `gb4_frame_pack_AES128_full()`（`new_energy_frame_pack.c:72-104`�
 
 ## 11. 完整数据流（端到端时序）
 
-```
-物理CAN → 桥接服务 → 本地socket(16002/3/4)
-   → start_can_server 收 can_frame_t
-   → 点表规则树解码 → 树节点 / _battlist / _templist(加锁)
-                          │
-   GPS二进制 → ptr_gps ───┤
-                          ▼
-   gb32960_data_report(每 _intervalReport)：
-       gb32960_get_work_data 拉各字段
-       → 组各数据单元(0x01整车…0x07报警)
-       → gb4_frame_pack_login/real/... 组体
-       → gb4_frame_pack_full(##+头+体+BCC)
-       → data_send_out(iClient) ──TCP──▶ 国标平台
-                          │
-   断网 → pthread_save_history_data → SQLite
-   联网 → 补发(命令0x03) → data_send_out(iClient)
-                          │
-   报警 → gb32960_check_warn_level → _warnLevel
-        → pthread_save_warn_30_data(报警前30s) → 落盘/上报
+```mermaid
+flowchart TD
+    CAN[物理 CAN] --> Bridge[桥接服务]
+    Bridge --> Socket[本地 socket 16002/3/4]
+    Socket --> CanServer[start_can_server：接收 can_frame_t]
+    CanServer --> Decode[点表规则树解码]
+    Decode --> Data[树节点、_battlist、_templist：加锁访问]
+    GPS[GPS 二进制] --> GPSInfo[ptr_gps]
+    Data --> Report[gb32960_data_report：按 _intervalReport 周期]
+    GPSInfo --> Report
+    Report --> GetData[gb32960_get_work_data：读取字段]
+    GetData --> Units[组装数据单元 0x01 至 0x07]
+    Units --> Body[gb4_frame_pack_login/real/...：组帧体]
+    Body --> Frame[gb4_frame_pack_full：## + 头 + 体 + BCC]
+    Frame --> Send[data_send_out：iClient TCP]
+    Send --> Platform[国标平台]
+    Send -->|断网时保存| History[SQLite：pthread_save_history_data]
+    History -->|联网后命令 0x03 补发| Send
+    Warn[报警] --> WarnLevel[gb32960_check_warn_level：_warnLevel]
+    WarnLevel --> WarnData[pthread_save_warn_30_data：保存报警前 30s]
+    WarnData --> Storage[落盘及上报]
 ```
 
 ---
@@ -339,33 +341,33 @@ AES128 变体 `gb4_frame_pack_AES128_full()`（`new_energy_frame_pack.c:72-104`�
 
 ### 17.1 模块依赖
 
-```
-main.c
- ├─ can_mng(总上下文, iClient/battlist/mutex)
- ├─ data_process(点表→规则树→取值)
- ├─ can_server(CAN收→写树/列表)
- ├─ gps(ptr_gps)
- ├─ new_energy/gb32960.c(状态机:登入/实时/补发/报警/历史)
- │    └─ new_energy_frame_pack.c(组帧:##+头+体+BCC / AES128)
- ├─ common(getBCC/toBigEndian/BCD/时间)
- ├─ mosquitto(编入但 start_mqtt_task 从不启动 = 死代码)
- ├─ scene(dlopen libscene.so)
- ├─ opt_iniparser / cJSON / list(基础设施)
- └─ [scene_lib → Makefile:88 独立编成 libscene.so, 不进主二进制]
+```mermaid
+flowchart TD
+    Main[main.c] --> Ctx[can_mng：总上下文、iClient、battlist、mutex]
+    Main --> Process[data_process：点表规则树与取值]
+    Main --> Can[can_server：接收 CAN 并写树/列表]
+    Main --> GPS[gps：ptr_gps]
+    Main --> State[new_energy/gb32960.c：登入、实时、补发、报警、历史状态机]
+    State --> Pack[new_energy_frame_pack.c：## + 头 + 体 + BCC / AES128]
+    Main --> Common[common：BCC、大端、BCD、时间]
+    Main -. 编入但 start_mqtt_task 未启动 .-> MQTT[mosquitto：死代码]
+    Main --> Scene[scene：dlopen libscene.so]
+    Main --> Infra[opt_iniparser、cJSON、list：基础设施]
+    Build[Makefile:88] --> SceneLib[scene_lib：单独编译为 libscene.so]
 ```
 
 ### 17.2 线程与共享上下文
 
-```
-              ┌──────────── can_mng_t(共享) ────────────┐
-gps线程 ──────┤ ptr_gps                                  │
-can_server ───┤ 规则树 / _battlist/_templist(gb32960_mutex)│
-warn_level ───┤ _warnLevel/_warnFlag                     │
-data_report ──┤ iClient(TCP, 无锁) ──▶ 国标平台           │
-history/warn30┤ SQLite / 30s缓冲                          │
-save_log ─────┤ log_msg                                  │
-主循环 ───────┤ acc_status/local_mileage/block_flag      │
-              └─────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    GPS[gps线程] -->|ptr_gps| Ctx[can_mng_t：共享上下文]
+    Can[can_server] -->|规则树、_battlist、_templist：gb32960_mutex| Ctx
+    Warn[warn_level] -->|_warnLevel、_warnFlag| Ctx
+    Report[data_report] -->|iClient：TCP，无锁| Ctx
+    Ctx -->|iClient| Platform[国标平台]
+    History[history / warn30] -->|SQLite、30s 缓冲| Ctx
+    Log[save_log] -->|log_msg| Ctx
+    Main[主循环] -->|acc_status、local_mileage、block_flag| Ctx
 ```
 
 ### 17.3 最终 wire 帧字节布局

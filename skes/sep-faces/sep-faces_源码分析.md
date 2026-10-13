@@ -2,7 +2,7 @@
 
 > 核对对象：`/home/tronlong/lyp/code/skes/skes-apps/sep-faces`，Git 分支 `main_ui`，2026-09-28 本轮核对时 `skes-apps/sep-faces` 目录树哈希为 `6af7866a35fe8b010e56f806613af0fa4331ef40`。目录树哈希用于固定本文对应的源码内容，不受仓库其他目录提交影响；上级 CMake、日志库和消息初始化函数另按本轮工作树核对。本文描述能从本目录源码、配置和上级 CMake 直接确认的行为；目标板上的模型精度、外部服务实现与真实时序未作推断。
 >
-> 本文流程图使用纯文本代码块，普通 Markdown 查看器无需 Mermaid 也可显示；每张图后均有文字版流程。
+> 本文流程图使用 Mermaid；每张图后均有文字版流程。
 
 ## 文档目录
 
@@ -100,14 +100,16 @@ sep-faces/
 <a id="architecture"></a>
 ## 三、核心架构设计
 
-```text
-上游 BGR 共享内存 /picshare4 ──> 读帧 ──> 旋转/检测/对齐/特征
-                                                  └──> 图片内存图库匹配
-                                                        └──> 7 帧/4 票判定
-                                                              └──> /skes/filter
-本地照片 faces/ ── 启动时装载 ────────────────────────> 图片内存图库
-DI 服务 127.0.0.1:38000 ──> 安全带状态/冻结解除 ────────> 发布状态
-SKES 心跳与旧控制消息 ──> 消息线程；旧在线录入命令当前只解析并忽略
+```mermaid
+flowchart LR
+    shm["上游 BGR 共享内存 /picshare4"] --> frame["读帧"] --> infer["旋转/检测/对齐/特征"]
+    photos["本地照片 faces/：启动时装载"] --> gallery["图片内存图库"]
+    infer --> match["图库匹配"]
+    gallery --> match
+    match --> vote["7 帧/4 票判定"] --> filter["/skes/filter"]
+    di["DI 服务 127.0.0.1:38000"] --> seatbelt["安全带状态/冻结解除"] --> pub["发布状态"]
+    messages["SKES 心跳与旧控制消息"] --> msgthread["消息线程"]
+    msgthread --> ignored["旧在线录入命令当前只解析并忽略"]
 ```
 
 `msg_thread`、`loop_thread`、`pub_thread`、`di_thread` 并行执行。识别发布按周期读上次状态，无新帧不保证状态自动清零；只有两个冻结开关同时开启时才会在匹配后冻结，而置冻结前不检查当前安全带值。模型初始化失败可能回退 mock，mock 输出不能用来验收真实人脸识别。启动、投票、发布和冻结的原始条件见原第 3、5、6、7 节。
@@ -115,31 +117,32 @@ SKES 心跳与旧控制消息 ──> 消息线程；旧在线录入命令当前
 <a id="detail-3"></a>
 ### 3. 启动、并行线程和退出流程
 
-#### 3.1 普通 Markdown 可见的流程图
+#### 3.1 Mermaid 流程图
 
-```text
-main()
-  |
-  +--> init_log(): sep-faces.ini 的 [log] level；sep-faces.log
-  +--> 注册 SIGINT/SIGTERM/SIGUSR1；输出版本
-  +--> sep_face_new()
-  |      |
-  |      +--> 读取 config.json，设置 FaceConfig
-  |      +--> 选择 RKNN 或 mock；初始化 FaceEngine
-  |      +--> 从 face_images_dir 建立 image_db
-  |      +--> 读取/恢复旧式 face_db.bin（当前主识别不使用）
-  |      +--> 连接 SKES 发布端 19225 / 订阅端 19226
-  |
-  +--> sep_face_run(): running = true
-  |      +--> msg_thread  : 接收心跳、filter 输入
-  |      +--> loop_thread : 取图、检测、匹配、多帧投票
-  |      +--> pub_thread  : 周期发布识别和安全带状态
-  |      +--> di_thread   : 查询 DI 通道 0，更新安全带/冻结状态
-  |
-  +--> 主线程每 200 ms 检查退出标志
-         SIGUSR1 -> 循环调整日志等级
-         SIGINT/SIGTERM -> sep_face_stop() -> join 四线程
-                         -> sep_face_release() -> 释放 linker/对象
+```mermaid
+flowchart TD
+    start(["main()"])
+    log["init_log()：读取 sep-faces.ini [log] level；写 sep-faces.log"]
+    signals["注册 SIGINT/SIGTERM/SIGUSR1；输出版本"]
+    new["sep_face_new()：读 config.json；选择 RKNN/mock 并初始化引擎；建 image_db；读取旧 face_db.bin；连接发布端 19225 / 订阅端 19226"]
+    run["sep_face_run()：running=true"]
+    msg["msg_thread：接收心跳、filter 输入"]
+    loop["loop_thread：取图、检测、匹配、多帧投票"]
+    pub["pub_thread：周期发布识别和安全带状态"]
+    di["di_thread：查询 DI 通道 0，更新安全带/冻结状态"]
+    check{"主线程每 200 ms 检查退出标志"}
+    adjust["SIGUSR1：循环调整日志等级"]
+    stop["SIGINT/SIGTERM：sep_face_stop()；join 四线程"]
+    release["sep_face_release()：释放 linker/对象"]
+    start --> log --> signals --> new --> run
+    run --> msg
+    run --> loop
+    run --> pub
+    run --> di
+    run --> check
+    check -->|"继续运行"| check
+    check -->|"SIGUSR1"| adjust --> check
+    check -->|"SIGINT/SIGTERM"| stop --> release
 ```
 
 文字版：`main()` 先初始化日志和信号，再调用 `sep_face_new()` 读取配置、准备模型与图库、连接消息端点。`sep_face_run()` 同时启动消息、识别、发布、DI 四个线程。主线程只处理信号与退出；收到 SIGUSR1 改变内存中的日志等级，收到 SIGINT/SIGTERM 后停止线程并释放资源。`src/main.cc` 未使用命令行参数。停止时会等待四个线程退出；DI 线程可能正等待最长 5 秒的接收超时，随后还有每轮 1 秒休眠，因此关闭不一定即时完成。
@@ -190,28 +193,37 @@ mock 后端把画面中心的正方形当作人脸，使用灰度直方图式特
 <a id="detail-6"></a>
 ### 6. 持续识别、投票与状态流转
 
-#### 6.1 普通 Markdown 可见的主循环流程图
+#### 6.1 Mermaid 主循环流程图
 
-```text
-loop_thread / face_loop()
-  |
-  +-- 若 frozen 且两个 freeze 开关都为真 --> 等 50 ms --> 重试
-  |
-  +-- 从 /picshare4 取新帧？ --否--> 等 10 ms --> 重试（发布状态不变）
-  |                         是
-  +-- 旋转画面；检测最佳人脸框？ --否--> code=0，清 face_id/票窗 --> 重试
-  |                             是
-  +-- 图片图库为空或未就绪？ --是--> code=-2，清 face_id/票窗 --> 重试
-  |                            否
-  +-- 特征提取成功？ --否--> code=0，清 face_id/票窗 --> 重试
-  |                     是
-  +-- FaceEngine::match：Top1 分数和 Top1-Top2 差距均过阈值？
-  |       是 -> 当前帧为该 ID 投 1 票；否 -> 当前帧记 0 票
-  |       注：维数错误码 237 也满足 code>0，会误入计票分支
-  +-- 更新至多 7 帧滑动窗口；同一 ID 达到 4 票？
-          |-- 窗口未满 --------> 保持上一发布状态
-          |-- 达标 -----------> code=1、face_id=照片名；清票窗；可能冻结
-          +-- 窗口满但未达标 -> code=-1、清 face_id；可选保存失配图
+```mermaid
+flowchart TD
+    start(["loop_thread / face_loop()"])
+    frozen{"frozen 且两个 freeze 开关都为真？"}
+    noframe{"从 /picshare4 取到新帧？"}
+    detect{"旋转画面后检测到最佳人脸框？"}
+    gallery{"图片图库已就绪且非空？"}
+    feature{"特征提取成功？"}
+    match{"Top1 分数及 Top1-Top2 差距均过阈值？"}
+    vote["匹配通过：当前帧给该 ID 投 1 票；否则记 0 票。错误码 237 也满足 code>0"]
+    count{"至多 7 帧窗口中，同一 ID 达到 4 票？"}
+    keep["窗口未满：保持上一发布状态"]
+    hit["达标：code=1、face_id=照片名；清票窗；可能冻结"]
+    miss["窗口满未达标：code=-1、清 face_id；可选保存失配图"]
+    start --> frozen
+    frozen -->|"是：等待 50 ms"| start
+    frozen -->|"否"| noframe
+    noframe -->|"否：等待 10 ms，状态不变"| start
+    noframe -->|"是"| detect
+    detect -->|"否：code=0，清 face_id/票窗"| start
+    detect -->|"是"| gallery
+    gallery -->|"否：code=-2，清 face_id/票窗"| start
+    gallery -->|"是"| feature
+    feature -->|"否：code=0，清 face_id/票窗"| start
+    feature -->|"是"| match
+    match --> vote --> count
+    count -->|"窗口未满"| keep --> start
+    count -->|"达标"| hit --> start
+    count -->|"窗口满但未达标"| miss --> start
 ```
 
 文字版：识别线程先检查冻结，再取一张新帧并按配置旋转。检测失败发布 0；检测到人脸而图片图库为空发布 -2；提特征失败发布 0。匹配阶段先按图库全部身份计算余弦分数，`top1 >= hit_threshold` 且 `top1-top2 >= margin_threshold` 才给该身份计票。最近 7 帧窗口中的同一身份达到 4 票时发布 1 和照片名；窗口满但无人达标时发布 -1；窗口尚未满时沿用上一发布状态。无新帧时也沿用上一状态。

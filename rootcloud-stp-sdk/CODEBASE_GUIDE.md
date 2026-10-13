@@ -60,40 +60,28 @@
 
 ## 2. 整体架构
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     ROOTCLOUD 云平台                              │
-│                  (MQTT Broker / RCPv4 Server)                    │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ MQTT over TCP/TLS
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                        erk-agent (主进程)                         │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                  erk-core 核心协议栈                         │  │
-│  │                                                            │  │
-│  │  ┌──────────┐   ┌──────────┐   ┌───────────────────────┐  │  │
-│  │  │   ERK    │   │   STP    │   │        RCPv4          │  │  │
-│  │  │ 异步MQTT │◄──│ 协议编   │◄──│ 云端业务协议层         │  │  │
-│  │  │  引擎    │   │  解码层  │   │ (命令/影子/OTA/配置等)  │  │  │
-│  │  └──────────┘   └──────────┘   └───────────────────────┘  │  │
-│  └──────────────────────────────────────────────────────────┬─┘  │
-│                                                             │     │
-│  ┌──────────────────────────────────────────────────────────▼─┐  │
-│  │                    erk-plugins 插件层                        │  │
-│  │                                                             │  │
-│  │   ┌─────────────┐  ┌─────────────┐  ┌──────────────────┐  │  │
-│  │   │ scp-adapter │  │ dtp-adapter │  │ virtual-adapter  │  │  │
-│  │   │ (CAN/J1939) │  │ (通用设备)  │  │ (虚拟/测试)       │  │  │
-│  │   └──────┬──────┘  └──────┬──────┘  └──────────────────┘  │  │
-│  └──────────┼────────────────┼─────────────────────────────────┘  │
-└─────────────┼────────────────┼──────────────────────────────────┘
-              │                │
-    ┌─────────▼──────┐  ┌──────▼────────┐
-    │  CAN 总线设备   │  │  其他工业设备  │
-    │ (J1939/SCP)    │  │ (Modbus等)    │
-    │ 叉车/起重机等   │  │               │
-    └────────────────┘  └───────────────┘
+```mermaid
+flowchart TB
+    Cloud["ROOTCLOUD 云平台<br/>MQTT Broker / RCPv4 Server"]
+    Agent["erk-agent 主进程"]
+    subgraph Core["erk-core 核心协议栈"]
+        ERK["ERK<br/>异步 MQTT 引擎"]
+        STP["STP<br/>协议编解码层"]
+        RCP["RCPv4<br/>云端业务协议层<br/>命令 / 影子 / OTA / 配置"]
+        ERK --> STP --> RCP
+    end
+    subgraph Plugins["erk-plugins 插件层"]
+        SCP["scp-adapter<br/>CAN / J1939"]
+        DTP["dtp-adapter<br/>通用设备"]
+        Virtual["virtual-adapter<br/>虚拟 / 测试"]
+    end
+    CanDev["CAN 总线设备<br/>J1939 / SCP<br/>叉车 / 起重机等"]
+    OtherDev["其他工业设备<br/>Modbus 等"]
+    Cloud <-->|"MQTT over TCP/TLS"| Agent
+    Agent --> Core
+    RCP --> Plugins
+    SCP --> CanDev
+    DTP --> OtherDev
 ```
 
 ### 模块目录速览
@@ -132,16 +120,17 @@ rootcloud-stp-sdk/
 
 `erk-core` 是整个 SDK 的基础，实现了一套从 MQTT 传输到业务协议的**三层协议栈**：
 
-```
-应用/插件层
-    ↕  rcpv4_handle_t API
-第3层：RCPv4   ← 业务语义（命令/影子/OTA/配置/文件传输）
-    ↕  stp_xxx API
-第2层：STP     ← 数据序列化/反序列化（CBOR二进制格式）
-    ↕  erk_mqtt_t API
-第1层：ERK     ← MQTT 连接管理（libev + mosquitto）
-    ↕  TCP/TLS
-云端 MQTT Broker
+```mermaid
+flowchart TB
+    App["应用 / 插件层"]
+    RCP["第 3 层：RCPv4<br/>业务语义：命令 / 影子 / OTA / 配置 / 文件传输"]
+    STP["第 2 层：STP<br/>数据序列化 / 反序列化（CBOR）"]
+    ERK["第 1 层：ERK<br/>MQTT 连接管理（libev + mosquitto）"]
+    Broker["云端 MQTT Broker"]
+    App <-->|"rcpv4_handle_t API"| RCP
+    RCP <-->|"stp_xxx API"| STP
+    STP <-->|"erk_mqtt_t API"| ERK
+    ERK <-->|"TCP / TLS"| Broker
 ```
 
 ---
@@ -306,24 +295,18 @@ RCPv4 兼容多个协议版本：`rcp_type_mqtt_bin_v2v3`（旧版二进制协�
 
 OTA（Over-the-Air）是 RCPv4 最复杂的子系统之一，实现了一套完整的**固件/软件远程升级状态机**：
 
-```
-云端下发 OTA 任务
-        ↓
-  DOWNLOAD（下载包）─── rcpv4-adl（异步下载器）+ curl
-        ↓
-  CHECK（完整性校验）── MD5 / SHA256 校验
-        ↓
-  UNZIP（解压缩）────── minizip
-        ↓
-  TRANS/DISTRIBUTE（分发到子设备）
-        ↓
-  PROGRAMMING（烧写/刷写）── 调用插件的 on_ota 回调
-        ↓
-  SETUP（安装）
-        ↓
-  WAIT_CONFIRM（等待设备确认）
-        ↓
-  DONE / ROLLBACK（完成 或 回滚）
+```mermaid
+flowchart TD
+    Task["云端下发 OTA 任务"] --> Download["DOWNLOAD：下载包<br/>rcpv4-adl 异步下载器 + curl"]
+    Download --> Check["CHECK：完整性校验<br/>MD5 / SHA256"]
+    Check --> Unzip["UNZIP：解压缩<br/>minizip"]
+    Unzip --> Distribute["TRANS / DISTRIBUTE<br/>分发到子设备"]
+    Distribute --> Program["PROGRAMMING：烧写 / 刷写<br/>调用插件 on_ota 回调"]
+    Program --> Setup["SETUP：安装"]
+    Setup --> Confirm["WAIT_CONFIRM：等待设备确认"]
+    Confirm --> Result{"升级结果"}
+    Result -->|确认成功| Done["DONE：完成"]
+    Result -->|失败| Rollback["ROLLBACK：回滚"]
 ```
 
 OTA 子系统支持：
@@ -529,24 +512,15 @@ int device_adapter_release(device_adapter_t *da);
 
 #### 支持的协议栈
 
-```
-三一工程机械 ECU（Electronic Control Unit）
-    │
-    │ CAN 总线（250kbps / 500kbps）
-    ▼
-can-data-link（CAN 硬件抽象层）
-    │ J1939 PDU（SA + PGN + Data）
-    ▼
-j1939-adapter（J1939 协议解析）
-    │
-    ├── j1939-scp（SCP 2.0 自定义扩展）
-    ├── DBC 文件解析（cantools/dbcreader）
-    │
-    ▼
-scp-adapter（数据处理与上报）
-    │
-    ▼
-rcpv4（上报到云端）
+```mermaid
+flowchart TD
+    ECU["三一工程机械 ECU"] -->|"CAN 总线（250 / 500 kbps）"| CAN["can-data-link<br/>CAN 硬件抽象层"]
+    CAN -->|"J1939 PDU（SA + PGN + Data）"| J1939["j1939-adapter<br/>J1939 协议解析"]
+    J1939 --> SCPExt["j1939-scp<br/>SCP 2.0 自定义扩展"]
+    J1939 --> DBC["DBC 文件解析<br/>cantools / dbcreader"]
+    SCPExt --> Adapter["scp-adapter<br/>数据处理与上报"]
+    DBC --> Adapter
+    Adapter --> RCP["rcpv4<br/>上报到云端"]
 ```
 
 #### 核心子组件详解
@@ -674,10 +648,9 @@ scp-adapter 提供了一套 **stub（桩）程序**，模拟实际设备向 scp-
 
 stub 工具通过 **stub-linker 协议**（基于 nanomsg TCP pub/sub）与 scp-adapter 通信：
 
-```
-stub-sany-forklift ──── nanomsg TCP ────► scp-adapter
-  pub data: tcp://127.0.0.1:11226        sub data: tcp://127.0.0.1:11225
-  sub cmd:  tcp://127.0.0.1:11215        pub cmd:  tcp://127.0.0.1:11216
+```mermaid
+flowchart LR
+    Stub["stub-sany-forklift"] <-->|"nanomsg TCP<br/>data: pub 11226 → sub 11225<br/>command: sub 11215 ← pub 11216"| Adapter["scp-adapter"]
 ```
 
 ---
@@ -721,19 +694,18 @@ stub-sany-forklift ──── nanomsg TCP ────► scp-adapter
 
 ### 启动流程
 
-```
-erk-agent 启动
-    │
-    ├── 1. 读取 config.json（日志、MQTT 参数、插件列表）
-    ├── 2. 读取 endpoints.json（云端 MQTT Broker 地址/认证）
-    ├── 3. 初始化 erk-log 日志系统
-    ├── 4. 创建 rcpv4_handle_t（初始化协议栈）
-    ├── 5. 加载 profiles/（thing-profile、data-profile、connection-profile）
-    ├── 6. dlopen 加载插件目录中启用的 .so 插件
-    │      └── 调用各插件的 device_adapter_create()
-    ├── 7. 建立 MQTT 连接（带 TLS 可选）
-    ├── 8. 启动 rcpv4 任务队列
-    └── 9. 进入 erk 事件循环（阻塞）
+```mermaid
+flowchart TD
+    Start(["erk-agent 启动"]) --> Config["读取 config.json<br/>日志、MQTT 参数、插件列表"]
+    Config --> Endpoints["读取 endpoints.json<br/>云端 Broker 地址 / 认证"]
+    Endpoints --> Log["初始化 erk-log 日志系统"]
+    Log --> Handle["创建 rcpv4_handle_t<br/>初始化协议栈"]
+    Handle --> Profiles["加载 profiles/<br/>thing / data / connection profile"]
+    Profiles --> Plugins["dlopen 加载启用的 .so 插件"]
+    Plugins --> Create["调用各插件 device_adapter_create()"]
+    Create --> MQTT["建立 MQTT 连接<br/>可选 TLS"]
+    MQTT --> Queue["启动 rcpv4 任务队列"]
+    Queue --> Loop["进入 erk 事件循环（阻塞）"]
 ```
 
 ### 运行目录结构（安装后）
@@ -930,76 +902,44 @@ Profile 是设备数据点的**元数据描述**，由云端下发并管理版�
 
 ### 上行数据流（设备 → 云端）
 
-```
-物理 CAN 总线
-    │ Linux SocketCAN / 硬件驱动
-    ▼
-can_hw_recv()  [can-data-link.c]
-    │ 原始 CAN 帧（29-bit CAN ID + 8字节数据）
-    ▼
-j1939-adapter  [j1939-adapter-git]
-    │ 解析为 J1939 PDU（SA/PGN/Data）
-    ▼
-scp.c / DBC 解析 [scp.c + cantools]
-    │ 根据 DBC 信号定义，解码为物理量（例: 电池电压=24.5V）
-    │ 同时处理 J1939 诊断消息（DM1~DM14 故障码）
-    ▼
-scp-raw-data-cache [可选]
-    │ 原始数据写本地磁盘（SHA256 签名）
-    ▼
-scp-rule-filter [可选]
-    │ 规则过滤：不满足规则的数据点被丢弃
-    ▼
-scp-adapter 数据组装
-    │ 根据 thing-profile.json 的分组定义，将数据点放入对应 Group
-    ▼
-rcpv4-grouping
-    │ 按 samplePeriod 采样，按 reportPeriod 聚合打包
-    ▼
-STP 编码 [stp_cbor.c]
-    │ 序列化为 CBOR 二进制（可选 gzip 压缩）
-    ▼
-ERK MQTT Publish
-    │ 发布到 MQTT Topic（RCPv4 定义的 Topic 规范）
-    ▼
-ROOTCLOUD 云平台
+```mermaid
+flowchart TD
+    CAN["物理 CAN 总线"] --> Driver["Linux SocketCAN / 硬件驱动"]
+    Driver --> Recv["can_hw_recv()<br/>can-data-link.c"]
+    Recv -->|"原始 CAN 帧<br/>29-bit CAN ID + 8 字节数据"| J1939["j1939-adapter<br/>解析为 J1939 PDU（SA / PGN / Data）"]
+    J1939 --> DBC["scp.c / DBC 解析<br/>解码物理量并处理 DM1–DM14"]
+    DBC --> Cache["scp-raw-data-cache（可选）<br/>本地存储，SHA256 签名"]
+    Cache --> Filter["scp-rule-filter（可选）<br/>过滤不满足规则的数据点"]
+    Filter --> Assemble["scp-adapter 数据组装<br/>按 thing-profile 分组"]
+    Assemble --> Group["rcpv4-grouping<br/>samplePeriod 采样，reportPeriod 聚合"]
+    Group --> STP["STP 编码<br/>CBOR，可选 gzip"]
+    STP --> MQTT["ERK MQTT Publish<br/>发布到 RCPv4 Topic"]
+    MQTT --> Cloud["ROOTCLOUD 云平台"]
 ```
 
 ### 下行数据流（云端 → 设备）
 
-```
-ROOTCLOUD 云平台（下发指令）
-    │ MQTT Subscribe
-    ▼
-ERK MQTT 接收
-    │
-    ▼
-rcpv4-task 任务队列
-    │ 异步分发
-    ▼
-RCPv4 命令路由（按 Topic 类型）
-    │
-    ├── OTA 升级指令   → rcpv4-ota → ADL 下载包 → 插件 on_ota()
-    ├── 配置下发       → rcpv4-cmd-config → 插件 execute_cmd()
-    ├── 影子期望更新   → rcpv4-cmd-shadow → 插件 execute_cmd()
-    ├── 远程动作       → rcpv4-cmd-action → 插件 execute_cmd()
-    ├── 实时数据请求   → rcpv4-cmd-live → 立即采集并上报
-    ├── 时钟同步       → rcpv4-cmd-time → 调整系统时间
-    ├── 锁机命令       → rcpv4-cmd-lock → 插件处理锁定逻辑
-    └── 文件推送       → rcpv4-cmd-file → AUL 上传 / ADL 下载
+```mermaid
+flowchart TD
+    Cloud["ROOTCLOUD 云平台（下发指令）"] -->|"MQTT Subscribe"| ERK["ERK MQTT 接收"]
+    ERK --> Queue["rcpv4-task 任务队列<br/>异步分发"]
+    Queue --> Router{"RCPv4 命令路由<br/>按 Topic 类型"}
+    Router --> OTA["OTA：rcpv4-ota → ADL 下载包 → 插件 on_ota()"]
+    Router --> Config["配置：rcpv4-cmd-config → 插件 execute_cmd()"]
+    Router --> Shadow["影子：rcpv4-cmd-shadow → 插件 execute_cmd()"]
+    Router --> Action["远程动作：rcpv4-cmd-action → 插件 execute_cmd()"]
+    Router --> Live["实时数据：rcpv4-cmd-live → 立即采集并上报"]
+    Router --> Time["时钟同步：rcpv4-cmd-time → 调整系统时间"]
+    Router --> Lock["锁机：rcpv4-cmd-lock → 插件处理锁定逻辑"]
+    Router --> File["文件推送：rcpv4-cmd-file → AUL 上传 / ADL 下载"]
 ```
 
 ### stub 开发调试流（本机模拟）
 
-```
-stub-sany-forklift（模拟器进程）
-    │ nanomsg pub/sub（stub-linker 协议）
-    │ tcp://127.0.0.1:11226 (pub data)
-    ▼
-scp-adapter（SDK进程内的插件）
-    │ tcp://127.0.0.1:11225 (sub data)
-    ▼
-（后续流程与真实 CAN 数据完全相同）
+```mermaid
+flowchart TD
+    Stub["stub-sany-forklift（模拟器进程）"] -->|"nanomsg pub/sub（stub-linker）<br/>127.0.0.1:11226 pub data"| Adapter["scp-adapter（SDK 进程内插件）"]
+    Adapter -->|"127.0.0.1:11225 sub data"| Same["后续流程与真实 CAN 数据相同"]
 ```
 
 ---

@@ -4,7 +4,7 @@
 >
 > 阅读范围：本项目 CMake、启动脚本、路由/认证文件、项目特有 C 代码和当前页面及脚本；随仓库编入的 GoAhead 核心只分析与请求主链有关的入口和职责，`src/paks/`、`src/doc/`、CSS、图片、第三方压缩 JS 不逐行复述。文中 `源码:行号` 均相对于上述源码根目录；四份 `docs/` 设计文档仅作背景，具体行为以代码为准。
 
-本文流程图采用纯文本代码块，按编号和箭头从上往下读；`├─`、`└─` 表示互斥分支。普通 Markdown 查看器即可显示，不需要 Mermaid 扩展。
+本文流程图采用 Mermaid 代码块，按箭头表示处理路径、按分支表示条件结果；需要 Markdown 查看器支持 Mermaid 渲染。
 
 <!-- rtms-analysis-guide:start -->
 
@@ -57,12 +57,15 @@
 
 ## 核心架构设计
 
-```text
-浏览器 → webserver/html → GoAhead 路由 / 认证
-                            ↓
-            goahead.c 注册的 action
-              ├→ action_func.c → 记录 / 配置 / ZIP
-              └→ log_export.c → 内存或 SD 日志 / ZIP
+```mermaid
+flowchart TD
+    browser[浏览器] --> html[webserver / html 页面]
+    html --> route[GoAhead 路由 / 认证]
+    route --> action[goahead.c 注册的 action]
+    action --> files[action_func.c：记录 / 配置 / ZIP]
+    action --> logs[log_export.c：日志导出]
+    files --> response[HTTP 响应或设备文件]
+    logs --> response
 ```
 
 页面可见入口、已注册 action、已编译 GoAhead 处理器和设备上实际启用功能分别核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -84,11 +87,16 @@
 
 ## 关键流程与数据流
 
-~~~text
-start_web.sh → GoAhead / 路由 / 认证 → 已注册 action
-浏览器查询 → 记录或日志列表 → 页面显示 / 单文件下载
-勾选批量导出 → 后台 ZIP 任务 → 进度轮询 → 触发下载
-~~~
+```mermaid
+flowchart TD
+    start[start_web.sh] --> go[GoAhead：路由 / 认证]
+    go --> action[已注册 action]
+    browser[浏览器查询] --> list[记录或日志列表]
+    list --> page[页面显示 / 单文件下载]
+    browser -->|勾选批量导出| task[后台 ZIP 任务]
+    task --> poll[进度轮询]
+    poll --> download[触发下载]
+```
 
 [组件与数据流](#analysis-1)、[启动图](#analysis-3)、[记录查询图](#analysis-4)分别展开。日志批量导出还有独立的任务和进度路径，具体条件见第 4 节。
 
@@ -102,24 +110,19 @@ start_web.sh → GoAhead / 路由 / 认证 → 已注册 action
 
 ### 1.1 组件与数据流
 
-```text
-浏览器（index.html / home.html）
-    |
-    | HTTP 页面、/action/请求
-    v
-GoAhead（路由、认证、静态文件）
-    |
-    | 按 action 名查找注册函数
-    +--> action_func.c（记录、配置、下载）
-    |       +--> conf.c / iniparser --> /opt/conf.ini
-    |       +--> /opt/ 配置文件
-    |       +--> /media/sdcard/ 记录和 ZIP
-    |       +--> 系统 zip 命令
-    |
-    +--> log_export.c（日志查询、导出）
-            +--> /tmp/rtms_log/
-            +--> /media/sdcard/rtms_log/
-            +--> 系统 zip 命令
+```mermaid
+flowchart TD
+    browser[浏览器：index.html / home.html] -->|HTTP 页面或 /action/ 请求| go[GoAhead：路由、认证、静态文件]
+    go -->|按 action 名查找处理函数| dispatch{处理类型}
+    dispatch --> action[action_func.c：记录、配置、下载]
+    action --> conf[conf.c / iniparser → /opt/conf.ini]
+    action --> opt[/opt/ 配置文件]
+    action --> sd[/media/sdcard/ 记录和 ZIP]
+    action --> zip[系统 zip 命令]
+    dispatch --> logs[log_export.c：日志查询、导出]
+    logs --> mem[/tmp/rtms_log/]
+    logs --> sdlogs[/media/sdcard/rtms_log/]
+    logs --> zip
 ```
 
 这里的箭头表示代码调用或文件访问；图中没有画出未在本项目实现的记录生成进程、日志生成进程。GoAhead 核心负责网络、路由、认证、上传和静态文件服务，项目业务层实现查询、下载、打包。依据：`src/src/http.c:229-286`，`src/src/action.c:22-98`，`src/src/goahead.c:328-423`，`src/src/action_func.c:19-40`，`src/src/log_export.c:69-73`。
@@ -168,31 +171,22 @@ CMake 的 TLS 开关默认 mbedTLS 开、OpenSSL 关，二者同时开启会直�
 
 ### 3.1 启动逻辑流程图
 
-```text
-执行 start_web.sh
-    |
-    v
-cd /usrdata/webserver --> killall -9 web_app
-    |
-    v
-每 30 秒检查进程 ----------------------+
-    | 已运行或程序文件不存在            |
-    +-----------------------------------+
-    |
-    | 未运行且程序文件存在
-    v
-后台启动 web_app（传认证文件、记录模式、大小、日志、网页目录、HTTP 端点）
-    |                                   |
-    | 子进程                             +--> 脚本继续每 30 秒检查
-    v
-解析参数 --> websOpen 初始化 GoAhead 并加载 route.txt
-    |
-    +-- 失败 --> 返回错误
-    |
-    +-- 成功 --> 加载 auth.txt --> 监听端点
-                  --> 注册 14 个业务 action --> 初始化日志任务表
-                  --> websServiceEvents 处理请求
-                  --> 收到终止信号 --> websClose
+```mermaid
+flowchart TD
+    start[执行 start_web.sh] --> cd[切换到 /usrdata/webserver]
+    cd --> kill[killall -9 web_app]
+    kill --> monitor[每 30 秒检查进程]
+    monitor -->|已运行或程序文件不存在| monitor
+    monitor -->|未运行且程序文件存在| launch[后台启动 web_app：传入认证、记录模式、大小、日志、网页目录和 HTTP 端点]
+    launch --> monitor
+    launch --> parse[解析参数并调用 websOpen 初始化 GoAhead、加载 route.txt]
+    parse -->|失败| error[返回错误]
+    parse -->|成功| auth[加载 auth.txt 并监听端点]
+    auth --> register[注册 14 个业务 action]
+    register --> tasks[初始化日志任务表]
+    tasks --> serve[websServiceEvents 处理请求]
+    serve --> signal[收到终止信号]
+    signal --> close[websClose]
 ```
 
 脚本先强制结束同名进程，再进入轮询；`killall` 的范围是进程名。脚本设定 `record_mode=dated`、`--max-export-size 50`、`stdout:2`、HTTP 80 端口，未传 `--route`，所以主程序用当前工作目录下的 `route.txt`。主程序默认记录模式与上限也分别是 `dated`、50 MB；`--max-export-size` 只接受 20–100。`websOpen` 完成核心、文件、上传、认证、路由等初始化；`websListen` 后注册业务 action，事件循环处理请求。当前退出路径调用 `websClose()`，没有显式调用 `log_export_deinit()`。依据：`webserver/start_web.sh:3-31`，`src/src/goahead.c:39-40,225-425`，`src/src/http.c:229-286`。
@@ -236,24 +230,24 @@ cd /usrdata/webserver --> killall -9 web_app
 
 ### 4.2 记录查询的逻辑流程图
 
-```text
-[1] queryByDate.js 读取本地起止时间
-    ↓
-[2] 转为 Unix 秒并校验，POST /action/getFileListByDate
-    ↓
-[3] 后端按 g_record_mode 选择一条路径：
-    ├─ dated    → 读 conf.ini 的设备 ID → 遍历日期子目录
-    │             → 解析文件名本地时间 → 按范围筛选
-    ├─ flat-can → 读 conf.ini 的设备 ID → 遍历平铺文件
-    │             → 解析 14 位本地时间；失败则用 mtime
-    └─ erk      → 扫描 erk-root/raw-data
-                  → 解析文件名 UTC 起止时间 → 按区间相交筛选
-    ↓
-[4] 返回 dirPath、fileList 等 JSON
-    ↓
-[5] 前端保存 sessionStorage 并渲染列表
-    ├─ 点文件   → getFile 下载
-    └─ 勾选批量 → 转入 4.4 导出流程
+```mermaid
+flowchart TD
+    start[queryByDate.js 读取本地起止时间] --> convert[转换为 Unix 秒并校验]
+    convert --> post[POST /action/getFileListByDate]
+    post --> mode{后端按 g_record_mode 选择路径}
+    mode -->|dated| dated[读取 conf.ini 设备 ID 并遍历日期子目录]
+    dated --> dateparse[解析文件名本地时间并按范围筛选]
+    mode -->|flat-can| flat[读取 conf.ini 设备 ID 并遍历平铺文件]
+    flat --> flatparse[解析 14 位本地时间；失败时用 mtime]
+    mode -->|erk| erk[扫描 erk-root/raw-data]
+    erk --> erkparse[解析文件名 UTC 起止时间并按区间相交筛选]
+    dateparse --> json[返回 dirPath、fileList 等 JSON]
+    flatparse --> json
+    erkparse --> json
+    json --> render[前端保存 sessionStorage 并渲染列表]
+    render --> choice{用户操作}
+    choice -->|点文件| download[getFile 下载]
+    choice -->|勾选批量| export[转入 4.4 导出流程]
 ```
 
 `dated` 目录名支持 `YYYYMMDD` 和 `YYMMDD`（两位年按 20YY 解释），范围查询先选日期目录，再解析文件名中的时间并按设备本地时区 `mktime` 比较；上限 2000 条。普通 `getFileList` 路径则扫描最多 500 条。`erk` 仅接收 `OM_MODBUS_` 或 `OM_CAN_` 开头且含 `_UTC_` 起止时间的 ZIP 名称，按 UTC 时间区间与查询区间相交判断，展示时转设备本地时间；`flat-can` 在文件名中寻找 14 位时间戳，找不到则用文件修改时间，两者范围查询也最多展示 2000 条，普通列表最多 500 条。依据：`src/src/action_func.c:19-40,675-725,874-939,1020-1224,1230-1687`。
@@ -268,23 +262,26 @@ cd /usrdata/webserver --> killall -9 web_app
 
 ### 4.4 两套批量导出的共同流程与差异
 
-```text
-[1] 页面勾选文件，按最大大小分批
-    ↓
-[2] 选择导出类型：
-    ├─ 记录 → POST batchDownload（dirPath/files/totalSize/zipName）
-    │        → 记录任务表（最多 16 项）→ 后台线程逐个调用 zip
-    │        → 轮询 getBatchDownloadProgress
-    └─ 日志 → POST startLogExport（dirType/files/zipName）
-             → 日志任务表（最多 8 项）→ 后台线程逐个调用 zip
-             → 轮询 getLogExportProgress
-    ↓
-[3] 检查轮询响应：
-    ├─ status=0     → 等待并继续轮询当前任务
-    ├─ status=-1    → 显示 error，结束当前批次
-    └─ status=1 且有 zipFile → getFile 触发 ZIP 下载
-                              → 处理下一批
-                              → 全部批次结束后调用对应 cleanup action
+```mermaid
+flowchart TD
+    select[页面勾选文件并按最大大小分批] --> type{选择导出类型}
+    type -->|记录| records[POST batchDownload：dirPath / files / totalSize / zipName]
+    records --> taskR[记录任务表，最多 16 项]
+    taskR --> zipR[后台线程逐个调用 zip]
+    zipR --> pollR[轮询 getBatchDownloadProgress]
+    type -->|日志| logs[POST startLogExport：dirType / files / zipName]
+    logs --> taskL[日志任务表，最多 8 项]
+    taskL --> zipL[后台线程逐个调用 zip]
+    zipL --> pollL[轮询 getLogExportProgress]
+    pollR --> status{检查轮询响应}
+    pollL --> status
+    status -->|status=0| wait[等待并继续轮询当前任务]
+    wait --> status
+    status -->|status=-1| error[显示 error 并结束当前批次]
+    status -->|status=1 且有 zipFile| download[getFile 触发 ZIP 下载]
+    download --> next[处理下一批]
+    next -->|还有批次| select
+    next -->|全部结束| cleanup[调用对应 cleanup action]
 ```
 
 记录页面在 `home.html` 初始化时调用 `getExportConfig` 读取最大批量大小，默认 50 MB；日志模块也定义了 `fetchExportConfig()`，但当前 `logExport.js` 中没有调用点，因此日志前端实际使用写定的 50 MB。勾选文件后，前端按列表中的大小拆批，超出单批上限的单文件被跳过。ZIP 任务创建后每 500 ms 轮询进度，完成时通过 `getFile` 触发浏览器下载，依次处理下一批，最后请求清理。记录模块从 `queryByDate.js:445-727` 实现，日志模块从 `logExport.js:394-619` 实现。页面触发下载与随后发清理请求之间没有等待浏览器明确确认保存成功的回执，因此“下载完成”的界面文案只表示代码已触发下载动作。
@@ -366,21 +363,19 @@ GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/U
 
 ### 8.1 从现象定位到层次
 
-```text
-浏览器打不开页面
-  -> 先查设备 IP/端口和 web_app 进程
-  -> 再查二进制、libgo.so、route.txt、auth.txt、html/ 是否齐全
-
-页面能打开，但登录或功能异常
-  -> 浏览器开发者工具查看请求 URL、状态码、响应体
-  -> 401/登录失败：查认证与会话
-  -> 404：区分静态文件不存在、action 未注册或路由不匹配
-  -> HTTP 200 但 error/空列表：查对应业务 action 与设备目录
-
-文件列表正常，但导出/下载失败
-  -> 记录 taskId、轮询响应和 zipFile
-  -> 查 zip 命令、目标目录权限/剩余空间、ZIP 是否生成
-  -> 查 getFile 返回与前端清理时序
+```mermaid
+flowchart TD
+    symptom{故障现象}
+    symptom -->|浏览器打不开页面| process[检查设备 IP / 端口和 web_app 进程]
+    process --> files[检查二进制、libgo.so、route.txt、auth.txt 和 html/]
+    symptom -->|页面能打开但登录或功能异常| request[用浏览器开发者工具检查请求 URL、状态码和响应体]
+    request --> status{响应结果}
+    status -->|401 / 登录失败| auth[检查认证与会话]
+    status -->|404| route[区分静态文件缺失、action 未注册或路由不匹配]
+    status -->|HTTP 200 但 error / 空列表| action[检查对应业务 action 与设备目录]
+    symptom -->|文件列表正常但导出 / 下载失败| task[记录 taskId、轮询响应和 zipFile]
+    task --> output[检查 zip 命令、目标目录权限 / 空间和 ZIP 是否生成]
+    output --> download[检查 getFile 返回与前端清理时序]
 ```
 
 先用**首次失败的请求**定位层次：静态页面失败多在监听/部署；登录失败查路由/认证；查询为空查记录模式、配置、目录与时间；打包失败查任务、`zip` 和存储；下载失败查 `getFile` 的实际路径。不要先删除文件、重启服务或清理 ZIP，否则可能丢失任务状态和证据。

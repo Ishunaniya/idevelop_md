@@ -56,39 +56,17 @@
 
 ### 2.1 分层架构图
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                     Cloud SDK Layer                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │
-│  │ Meari SDK│  │ Tuya SDK │  │  DOT SDK │  │  NKIT  │  │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───┬────┘  │
-├───────┴──────────────┴──────────────┴────────────┴───────┤
-│                   Application Layer                       │
-│  pps_app | pps_netmng | pps_event_mng | pps_storage     │
-│  pps_led_ctrl | pps_playback | pps_syslink_msg           │
-├──────────────────────────────────────────────────────────┤
-│                    ppsdk / Device Layer                   │
-│  ppsdev_sdk | ppsdev_config                              │
-│  device_alarm | device_media | device_upgrade | device_ptz│
-│  device_settings | device_sound | device_power | ...     │
-├──────────────────────────────────────────────────────────┤
-│                      Core Layer                           │
-│  pps_eventhub | pps_statem | pps_net | pps_ssl | pps_dns │
-├──────────────────────────────────────────────────────────┤
-│                   Components Layer                        │
-│  mbedtls | mongoose | restful | websrv | rtsp | rtmp     │
-│  discovery | prodtest                                    │
-├──────────────────────────────────────────────────────────┤
-│                      HAL Layer                            │
-│  pps_hal_board | pps_hal_net | pps_hal_flash             │
-│  pps_hal_uart | pps_hal_motor | pps_hal_adc | ...        │
-├──────────────────────────────────────────────────────────┤
-│                     OSAL Layer                            │
-│  pps_mqueue | pps_event | pps_timer                      │
-├──────────────────────────────────────────────────────────┤
-│              Platform / RTOS / OS Layer                   │
-│  HuaweiLiteOS (b6/b9)  │  Linux (b8/b81/b82)            │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[Cloud SDK Layer: Meari / Tuya / DOT / NKIT]
+    B[Application Layer: pps_app / pps_netmng / pps_event_mng / pps_storage / LED / playback / syslink]
+    C[ppsdk / Device Layer: ppsdev_sdk / config / alarm / media / upgrade / PTZ / settings / sound / power]
+    D[Core Layer: eventhub / statem / net / ssl / dns]
+    E[Components Layer: mbedtls / mongoose / restful / websrv / RTSP / RTMP / discovery / prodtest]
+    F[HAL Layer: board / net / flash / UART / motor / ADC]
+    G[OSAL Layer: mqueue / event / timer]
+    H[Platform / RTOS / OS: HuaweiLiteOS b6/b9; Linux b8/b81/b82]
+    A --> B --> C --> D --> E --> F --> G --> H
 ```
 
 ### 2.2 架构设计关键特点
@@ -241,32 +219,33 @@ lecamera_app/
 
 ### 5.1 SDK 对接架构
 
-```text
-┌──────────────────────────────────────────────────────────┐
-│ ppsdk / device：设备能力、配置、媒体、存储、告警、升级     │
-└──────────────────────────┬───────────────────────────────┘
-                           ↕ 设备 API / 注册回调
-       ┌───────────────────┼──────────────────┬─────────────────┐
-       ↕                   ↕                  ↕                 ↕
-┌───────────────┐  ┌────────────────┐  ┌──────────────┐  ┌──────────────┐
-│ apps/meari    │  │ apps/tuya      │  │ apps/dot     │  │ apps/nkit    │
-│ 旧 SDK /     │  │ Tuya 4.x / 5.x │  │ DOT 对接代码 │  │ NKIT 对接代码│
-│ Meari Cloud  │  │                │  │              │  │              │
-└───────┬───────┘  └────────┬───────┘  └──────┬───────┘  └──────┬───────┘
-        ↕                  ↕                 ↕                 ↕
-  对应 SDK 头文件和外部库（由 support_*、分支和平台配置选择）
-        ↕                  ↕                 ↕                 ↕
-  Meari 云服务         Tuya 云服务        DOT 服务          NVR / 中继
+```mermaid
+flowchart TD
+    A[ppsdk / device: 设备能力、配置、媒体、存储、告警、升级]
+    A -->|设备 API / 注册回调| B[apps/meari: 旧 SDK / Meari Cloud]
+    A -->|设备 API / 注册回调| C[apps/tuya: Tuya 4.x / 5.x]
+    A -->|设备 API / 注册回调| D[apps/dot: DOT 对接代码]
+    A -->|设备 API / 注册回调| E[apps/nkit: NKIT 对接代码]
+    B --> F[对应 SDK 头文件和外部库]
+    C --> F
+    D --> F
+    E --> F
+    F --> G[Meari 云服务]
+    F --> H[Tuya 云服务]
+    F --> I[DOT 服务]
+    F --> J[NVR / 中继]
 ```
 
 上图各列表示可选择的对接路径；是否编入及能否组合以构建配置为准。Meari 两种 SDK 复用应用代码，但头文件和库不同；告警、二维码等公共回调槽位不会自动隔离。
 
-```text
-设备能力 / 配置 / 媒体 / 存储（device、ppsdk）
-              ↕ 回调注册与设备 API
-应用对接代码（apps/meari、tuya、dot、nkit）
-              ↕ 各 SDK 的平台头文件和外部库
-云端服务，或 NKIT 对接的 NVR / 中继
+```mermaid
+flowchart TD
+    A[设备能力 / 配置 / 媒体 / 存储: device、ppsdk]
+    B[应用对接代码: apps/meari、tuya、dot、nkit]
+    C[各 SDK 的平台头文件和外部库]
+    D[云端服务或 NKIT 对接的 NVR / 中继]
+    A <-->|回调注册与设备 API| B
+    B --> C --> D
 ```
 
 此图表达调用边界；各 SDK 的实际协议、认证与传输实现需以对应库和版本为准。
@@ -323,21 +302,26 @@ Echo Show RTSP 与 Chromecast RTMP 由独立的 `support_pps_echoshow` / `suppor
 
 **设计目的**：管理 Wi-Fi 连接等异步状态转换
 
-```text
-事件投递 → 当前实例消息队列 → 实例线程
-                              │
-                              ▼
-                  查找当前 state 对应的 callback
-                              │
-                              ▼
-                  业务处理并按条件 set_current_state
+```mermaid
+flowchart TD
+    A[投递事件] --> B[当前实例消息队列]
+    B --> C[实例线程取出事件]
+    C --> D[查找当前 state 对应的 callback]
+    D --> E[业务 callback 处理事件]
+    E --> F{业务条件要求转换状态?}
+    F -->|是| G[调用 pps_statem_set_current_state]
+    F -->|否| H[保持当前状态]
+```
 
-网络状态转换摘录：
-DISCONNECTED ── NET_CONFIG，初始化成功 ──▶ WAIT_CONFIG
-DISCONNECTED ── NET_CONNECT，Wi-Fi 回调成功 ──▶ CONNECTING
-WAIT_CONFIG  ── NET_CONNECT，回调成功 ──▶ CONNECTING
-CONNECTING   ── NET_CONNECTED ──▶ CONNECTED
-CONNECTING / CONNECTED ── NET_DISCONNECT 或 NET_DISCONNECTED ──▶ DISCONNECTED
+```mermaid
+stateDiagram-v2
+    [*] --> DISCONNECTED
+    DISCONNECTED --> WAIT_CONFIG: NET_CONFIG，初始化成功
+    DISCONNECTED --> CONNECTING: NET_CONNECT，Wi-Fi 回调成功
+    WAIT_CONFIG --> CONNECTING: NET_CONNECT，回调成功
+    CONNECTING --> CONNECTED: NET_CONNECTED
+    CONNECTING --> DISCONNECTED: NET_DISCONNECT / NET_DISCONNECTED
+    CONNECTED --> DISCONNECTED: NET_DISCONNECT / NET_DISCONNECTED
 ```
 
 ```
@@ -413,18 +397,18 @@ dev_encrypt_write();
 └──────────────────────────────────────────────────────────┘
   固定头及文件描述：固定 XOR 混淆；文件数据：原样存放
   设备解析器接受 N = 1～16；头部尺寸要求为 64 + 44 × N
+```
 
-升级概览：
-云 SDK / NVR / SD / HTTP 等入口
-        │ 各入口接收并提交升级数据
-        ▼
-pps_device_upgrade → 解混淆并检查包头 → 按文件校验和查分区
-        │
-        ▼
-逐项 Flash 擦写（64 KiB 步长）→ 必要时升级 MCU
-        │
-        ▼
-入口负责后续清理 / 重启（URL 路径见第 10 章）
+```mermaid
+flowchart TD
+    A[云 SDK / NVR / SD / HTTP 等入口接收并提交升级数据] --> B[pps_device_upgrade]
+    B --> C[解混淆并检查包头]
+    C --> D[按文件校验和检查并查找分区]
+    D --> E[逐项 Flash 擦写，步长 64 KiB]
+    E --> F{需要升级 MCU?}
+    F -->|是| G[执行 MCU 升级]
+    F -->|否| H[入口执行后续清理 / 重启]
+    G --> H
 ```
 
 包头由 `tools/pack/pack.h` 定义：固定头 64 字节，每个文件描述 44 字节（文件名 32 字节、offset、file_len、checksum 各 4 字节）。固件 Magic 为 **`0x5354524e`（STRN）**；`0x56565099` 出现在生产信息等其他结构，不能混用。
@@ -437,53 +421,27 @@ pps_device_upgrade → 解混淆并检查包头 → 按文件校验和查分区
 
 ## 7. 系统初始化流程
 
-```
-main() / app_init()
-│
-├─ 1. pps_system_init()
-│   ├─ board_driver_init()          # GPIO/SPI/PWM/按键驱动
-│   ├─ pps_watchdog_init()          # 看门狗（防止死机）
-│   ├─ pps_eventhub_init()          # 创建事件总线线程
-│   ├─ pps_statem_init()            # 初始化状态机框架
-│   ├─ start_syslink_service()      # 启动 MCU UART 通信
-│   ├─ pps_board_init()             # 读取 Flash 启动参数（UUID/SN/MAC）
-│   ├─ dev_cfg_init()               # 加载 Flash 配置参数
-│   ├─ pps_event_mng_init()         # 事件管理模块初始化
-│   ├─ board_adc_light_init()       # ADC 光线传感器
-│   ├─ pps_media_service_init()     # 音视频媒体服务
-│   │   └─ [thread] pps_media_service_start
-│   ├─ board_rootfs_init()          # rootfs 挂载
-│   └─ pps_upgrade_mcu_check/mcu()  # 检查并升级 MCU 固件
-│
-├─ 2. pps_device_init()
-│   ├─ tm_systime_init()            # NTP 时间同步
-│   ├─ pps_device_sound_init()      # 音频播放初始化
-│   ├─ ppsdev_init_config()         # 应用配置加载
-│   ├─ pps_flight_init()            # 飞行/勿扰模式
-│   ├─ pps_device_ptz_init()        # 电机/云台
-│   ├─ pps_netmng_register()        # 注册网络回调（Wi-Fi/4G）
-│   ├─ pps_netmng_init()            # 网络管理初始化
-│   └─ SDK 初始化（按编译宏）
-│       ├─ pps_meari_sdk_init()     # Meari
-│       ├─ pps_tuya_sdk_init()      # Tuya
-│       ├─ dot_sdk_init()           # DOT [独立线程]
-│       └─ pps_nkit_sdk_init()      # NKIT
-│
-└─ 3. pps_service_init()   → 启动各服务线程
-    ├─ [thread] pps_led_service_init        # LED 状态机
-    ├─ [thread] pps_event_alarm_handler     # 告警处理
-    ├─ [thread] pps_event_mng               # 事件管理主循环
-    ├─ [thread] pps_netmng_start            # 启动网络选择，会返回；持续事件处理在 statem
-    ├─ [thread] pps_storage_record_loop     # 录像线程（512K栈）
-    ├─ [thread] pps_storage_disk_init       # SD 卡挂载
-    ├─ [thread] pps_meari_sdk_start         # Meari SDK 主循环（512K栈）
-    ├─ [thread] pps_tuya_sdk_start          # Tuya SDK 主循环（1M栈）
-    ├─ [thread] tuya_upgrade_time           # Tuya 升级时间检查
-    ├─ [thread] tuya_cloud_storage          # Tuya 云存储（1M栈）
-    ├─ [thread] tuya_status_sync            # Tuya 状态同步
-    ├─ [thread] cmcc_user_login             # DOT 登录
-    ├─ [thread] pps_nkit_sdk_start          # NKIT（512K配置栈）
-    └─ init_product_test()                 # 工厂模式才启动 HTTP / discovery
+```mermaid
+flowchart TD
+    A[main / app_init] --> B[pps_system_init]
+    B --> B1[板级驱动、看门狗、eventhub、statem]
+    B1 --> B2[syslink、board、设备配置、事件管理]
+    B2 --> B3[ADC 光照、媒体服务、rootfs、MCU 升级检查]
+    B3 --> C[pps_device_init]
+    C --> C1[时间、音频、应用配置、飞行模式、PTZ]
+    C1 --> C2[注册并初始化 Wi-Fi / 4G 网络管理]
+    C2 --> C3{按编译宏初始化 SDK}
+    C3 -->|Meari| D1[pps_meari_sdk_init]
+    C3 -->|Tuya| D2[pps_tuya_sdk_init]
+    C3 -->|DOT| D3[dot_sdk_init，独立线程]
+    C3 -->|NKIT| D4[pps_nkit_sdk_init]
+    D1 --> E[pps_service_init]
+    D2 --> E
+    D3 --> E
+    D4 --> E
+    E --> F[启动 LED、告警、事件管理、网络和录像服务]
+    F --> G[启动 SD 卡及按配置启用的 SDK 服务线程]
+    G --> H[工厂模式下启动 HTTP / discovery]
 ```
 
 ### 7.1 初始化成功与服务可用的区别
@@ -502,34 +460,24 @@ main() / app_init()
 
 以下文本流程图可直接阅读，无需安装图表渲染插件：
 
-```text
-MCU syslink 消息 / 启动唤醒原因
-        │
-        ▼
-eventhub 发布 MOTION_DETECT
-        │ 派发线程依次调用订阅者，回调自行筛选事件
-        ├─ event_pre_subscriber：记录唤醒事件
-        ├─ 其他订阅者：按各自事件分支处理
-        └─ event_mng_subscriber
-                │
-                ▼
-        event_mng_schedule 业务过滤
-        工厂模式 / PIR 开关 / 休眠等待 / 云台运动 /
-        告警计划 / 20 秒限频 / 录像忙 / PIR 电源
-                ├─ 未通过 → 本次告警不下发
-                └─ 通过
-                    │
-                    ▼
-        pps_event_send_alarm_msg → pir_event
-                    │ 唤醒独立告警线程
-                    ▼
-        pps_event_alarm_handler
-                    ├─ 发布 UPLOAD_PIC_START
-                    └─ 调用所选 SDK 的 alarm handler
-                            ├─ event_snapshot：抓图、按配置做人形检测
-                            │       └─ set_record_flag：本地录像 / 云存储
-                            └─ 上传结果事件：FINISHED / FAIL
-                                    └─ 更新休眠等待 / 缓存补传状态
+```mermaid
+flowchart TD
+    A[MCU syslink 消息或启动唤醒原因] --> B[eventhub 发布 MOTION_DETECT]
+    B --> C[event_pre_subscriber 记录唤醒事件]
+    B --> D[其他订阅者按事件分支处理]
+    B --> E[event_mng_subscriber]
+    E --> F[event_mng_schedule 检查工厂模式、PIR、休眠、云台、计划、限频、录像和电源条件]
+    F --> G{业务过滤通过?}
+    G -->|否| H[本次告警不下发]
+    G -->|是| I[pps_event_send_alarm_msg 写入 pir_event]
+    I --> J[唤醒独立告警线程]
+    J --> K[pps_event_alarm_handler]
+    K --> L[发布 UPLOAD_PIC_START]
+    K --> M[调用所选 SDK 的 alarm handler]
+    M --> N[event_snapshot 抓图并按配置做人形检测]
+    N --> O[set_record_flag: 本地录像 / 云存储]
+    M --> P[发布 FINISHED / FAIL 结果事件]
+    P --> Q[更新休眠等待或缓存补传状态]
 ```
 
 PIR 的重要可见入口是 `pps_syslink_msg.c` 中的 MCU 回调以及 `pps_event_mng()` 对启动唤醒原因的补发。原先从 HAL radar 直接画到所有告警消费者的图省略了关键调度层。
@@ -540,37 +488,24 @@ PIR 的重要可见入口是 `pps_syslink_msg.c` 中的 MCU 回调以及 `pps_ev
 
 ### 8.2 网络状态机转换
 
-```text
-┌─────────────────┐
-│  DISCONNECTED   │
-└────────┬────────┘
-         │ NET_CONFIG，配网初始化成功
-         ▼
-┌─────────────────┐
-│   WAIT_CONFIG   │
-└────────┬────────┘
-         │ NET_CONNECT，停扫码，连接回调成功
-         ▼
-┌─────────────────┐
-│   CONNECTING    │
-└────────┬────────┘
-         │ NET_CONNECTED
-         ▼
-┌─────────────────┐
-│    CONNECTED    │
-└─────────────────┘
-
-补充边与失败分支：
-DISCONNECTED ── NET_CONNECT，Wi-Fi 回调成功 ──▶ CONNECTING
-WAIT_CONFIG ── NET_CONNECT，回调失败 ──▶ DISCONNECTED
-WAIT_CONFIG ── NET_SCAN_AP，扫描失败 ──▶ 3 秒定时器 → 再次扫描
-WAIT_CONFIG ── NET_SCAN_AP，扫描成功 ──▶ 保存凭据 → 提交 NET_CONNECT
-DISCONNECTED ── NET_CONFIG，初始化失败 ──▶ 保持 DISCONNECTED
-DISCONNECTED ── NET_CONNECT，回调失败 ──▶ 保持 DISCONNECTED
-DISCONNECTED ── NET_CONNECT，4G 回调成功 ──▶ CONNECTED
-DISCONNECTED ── NET_CONNECTED 通知 ──▶ CONNECTED
-CONNECTING / CONNECTED ── NET_DISCONNECT 或 NET_DISCONNECTED ──▶ DISCONNECTED
-CONNECTED ── NET_RECONNECT，执行重连回调 ──▶ DISCONNECTED
+```mermaid
+stateDiagram-v2
+    [*] --> DISCONNECTED
+    DISCONNECTED --> WAIT_CONFIG: NET_CONFIG，配网初始化成功
+    DISCONNECTED --> DISCONNECTED: NET_CONFIG，初始化失败
+    DISCONNECTED --> CONNECTING: NET_CONNECT，Wi-Fi 回调成功
+    DISCONNECTED --> DISCONNECTED: NET_CONNECT，Wi-Fi 回调失败
+    DISCONNECTED --> CONNECTED: NET_CONNECT，4G 回调成功
+    DISCONNECTED --> CONNECTED: NET_CONNECTED 通知
+    WAIT_CONFIG --> CONNECTING: NET_CONNECT，停扫码且连接回调成功
+    WAIT_CONFIG --> DISCONNECTED: NET_CONNECT，回调失败
+    WAIT_CONFIG --> WAIT_CONFIG: NET_SCAN_AP，扫描失败，3 秒后重试
+    WAIT_CONFIG --> WAIT_CONFIG: NET_SCAN_AP，扫描成功后保存凭据并提交 NET_CONNECT
+    WAIT_CONFIG --> CONNECTING: 随后处理 NET_CONNECT 且连接回调成功
+    CONNECTING --> CONNECTED: NET_CONNECTED
+    CONNECTING --> DISCONNECTED: NET_DISCONNECT / NET_DISCONNECTED
+    CONNECTED --> DISCONNECTED: NET_DISCONNECT / NET_DISCONNECTED
+    CONNECTED --> DISCONNECTED: NET_RECONNECT，执行重连回调
 ```
 
 图中状态名省略 `PPS_NET_`，事件名省略 `PPS_EVENTHUB_`。WAIT_CONFIG 的连接成功分支进入 CONNECTING；不存在单独注册的 CONFIGING 或 DISCONNECTING 状态。
@@ -596,36 +531,36 @@ CONNECTED ── NET_RECONNECT，执行重连回调 ──▶ DISCONNECTED
 
 ### 9.1 启动网络选择的优先级
 
-```text
-pps_netmng_start()
-    │
-    ├─ 当前已连接？是 → 发布 NET_CHANGED，设为 CONNECTED → 返回
-    │               否
-    ▼
-等待 3 秒供 SD 挂载
-    ├─ 正在升级？是 → 返回
-    │           否
-    ▼
-按下面顺序选择第一个满足条件的分支：
-    ├─ 产线 SD 网络标记存在
-    │       └─ 设置产线类型 / meari0 接口 → init_product_test
-    ├─ 网络类型为 4G
-    │       └─ 直接返回；由 4G 初始化和通知路径维护状态
-    ├─ 产线工具文件存在，且上下文 SSID 非空
-    │       └─ 使用该 Wi-Fi 配置提交连接
-    ├─ 板级支持工厂模式，且当前处于工厂模式
-    │       └─ 使用固定产线热点配置提交连接
-    └─ 普通路径
-            ├─ Tuya 构建 → 此处普通 Wi-Fi 逻辑被条件编译排除
-            └─ 非 Tuya 构建 → 读取已有 Wi-Fi 配置
-                    ├─ SSID 非空 → 提交连接
-                    └─ SSID 为空
-                            ├─ DOT 构建 → 此处配网逻辑被排除
-                            └─ 非 DOT 构建 → 请求配网
-                                    └─ 有网关凭据 → 发布 NET_SCAN_AP
-    │
-    ▼
-返回执行结果；后续连接状态由异步事件更新
+```mermaid
+flowchart TD
+    A[pps_netmng_start] --> B{当前已连接?}
+    B -->|是| C[发布 NET_CHANGED，设置 CONNECTED 并返回]
+    B -->|否| D[等待 3 秒供 SD 挂载]
+    D --> E{正在升级?}
+    E -->|是| R[返回；后续状态由异步事件更新]
+    E -->|否| F{产线 SD 网络标记存在?}
+    F -->|是| G[设置产线类型 / meari0 接口并初始化 product_test]
+    F -->|否| H{网络类型为 4G?}
+    H -->|是| R
+    H -->|否| I{产线工具文件存在且上下文 SSID 非空?}
+    I -->|是| J[使用该 Wi-Fi 配置提交连接]
+    I -->|否| K{板级支持且当前处于工厂模式?}
+    K -->|是| L[使用固定产线热点配置提交连接]
+    K -->|否| M{Tuya 构建?}
+    M -->|是| R
+    M -->|否| N[读取已有 Wi-Fi 配置]
+    N --> O{SSID 非空?}
+    O -->|是| J
+    O -->|否| P{DOT 构建?}
+    P -->|是| R
+    P -->|否| Q[请求配网]
+    Q --> S{存在网关凭据?}
+    S -->|是| T[发布 NET_SCAN_AP]
+    S -->|否| R
+    G --> R
+    J --> R
+    L --> R
+    T --> R
 ```
 
 `pps_netmng_start()` 检查当前网络状态；若已经连接，发布 NET_CHANGED 并返回。否则等待 3 秒供 SD 卡挂载，检查是否正在升级，再依次选择以下路径：
@@ -640,22 +575,21 @@ pps_netmng_start()
 
 ### 9.2 二维码配网与配置保存
 
-```text
-二维码识别结果 → pps_qrcode_get_string 公共入口
-    │
-    ├─ 匹配产线二维码且解析成功
-    │       └─ 设置工厂类型 → 初始化生产测试 → 提交 Wi-Fi 连接
-    └─ 非产线二维码 → 调用当前注册的 SDK 二维码回调
-            ├─ Meari / NKIT
-            │       └─ 解析并适配 s/p/t 字段
-            │               → 保存 Wi-Fi 与 token
-            │               → pps_netmng_wifi_connect
-            │               → NET_CONNECT → 当前状态的连接回调
-            │               → 等待网络通知更新状态
-            ├─ Tuya
-            │       └─ 按需补齐大括号 → 对应版本 / 宏下的 SDK 配网调用
-            └─ DOT
-                    └─ DOT 自有二维码及网络管理流程
+```mermaid
+flowchart TD
+    A[二维码识别结果] --> B[pps_qrcode_get_string 公共入口]
+    B --> C{产线二维码且解析成功?}
+    C -->|是| D[设置工厂类型]
+    D --> E[初始化生产测试并提交 Wi-Fi 连接]
+    C -->|否| F[调用当前注册的 SDK 二维码回调]
+    F --> G{SDK 分支}
+    G -->|Meari / NKIT| H[解析并适配 s / p / t 字段]
+    H --> I[保存 Wi-Fi 与 token]
+    I --> J[pps_netmng_wifi_connect]
+    J --> K[发送 NET_CONNECT 并调用当前状态回调]
+    K --> L[等待网络通知更新状态]
+    G -->|Tuya| M[按需补齐大括号并调用对应版本 / 宏下 SDK 配网]
+    G -->|DOT| N[进入 DOT 自有二维码及网络管理流程]
 ```
 
 二维码首先经过公共产线格式识别，再交给当前注册的 SDK 回调。Meari 与 NKIT 都接受特定 `s/p/t` 字段格式并做新旧格式适配，随后保存 Wi-Fi 与 token，再调用 `pps_netmng_wifi_connect()`；配置保存发生在连接成功之前。不能统一称为严格 JSON，也不能写成连接成功后才保存。
@@ -693,66 +627,50 @@ Tuya 回调自行分配 `length+4` 缓冲区，必要时补 `{}`，并在相应�
 
 URL 升级路径的完整分支图如下；其他入口的接收方式见 10.1 节：
 
-```text
-pps_device_url_upgrade_thread
-    ├─ 未注册下载回调 → 返回失败
-    ▼
-upgrade_ctrl(1)：设置升级标志，停扫码 / DSP，申请缓冲区
-    ├─ 初始化失败 → 返回失败
-    ▼
-调用已注册下载器，回调将数据放入升级缓冲区
-    ├─ 下载失败 ──────────────────────────────────────┐
-    └─ 下载成功                                      │
-            ▼                                        │
-    pps_device_upgrade(buf, size)                    │
-    （URL 线程传容量 size，而非实际接收长度）        │
-            │                                        │
-            ▼                                        │
-    解锁电池 → 卸载 rootfs → 按后端擦除 Wi-Fi 配置   │
-            │                                        │
-            ▼                                        │
-    upgrade_file_parse                               │
-            ├─ 解码固定头，读取 header_length        │
-            ├─ 分配并解码完整头                      │
-            ├─ 检查文件数 / 头大小                   │
-            ├─ 新格式比较平台；旧格式跳过            │
-            ├─ 检查 Magic 0x5354524e / 头累加和      │
-            ├─ 第一遍：文件累加和 / 分区查表，统计大小
-            └─ 第二遍：再查文件 / 分区，逐项擦写 Flash
-                    │                                │
-                    ▼                                │
-    检查 MCU 包版本，必要时通过 syslink 升级 MCU      │
-            │                                        │
-            ├─ 返回成功 ─────────────────────────────┤
-            └─ 返回失败，记录日志 ───────────────────┤
-                                                     ▼
-    upgrade_ctrl(0)：释放缓冲区，清除标志，进度设为 100
-            │
-            ▼
-    sync → 等待 3 秒 → 发布 REBOOT
-
-解析器内的特别分支：
-    文件累加和失败 / 分区名未知 → continue，跳过该项
-    Flash 擦除错误被忽略；连续十次写失败后仍推进 offset
-    因此返回成功、进度 100 和重启都不能证明全部分区写入正确
+```mermaid
+flowchart TD
+    A[pps_device_url_upgrade_thread] --> B{已注册下载回调?}
+    B -->|否| X[返回失败]
+    B -->|是| C[upgrade_ctrl 1: 设置升级状态、停止扫码和 DSP、申请缓冲区]
+    C --> D{初始化成功?}
+    D -->|否| X
+    D -->|是| E[调用下载器并写入升级缓冲区]
+    E --> F{下载成功?}
+    F -->|否| R[记录失败并进入清理]
+    F -->|是| G[pps_device_upgrade(buf, size)，此处 size 是容量]
+    G --> H[解锁电池、卸载 rootfs、按后端擦除 Wi-Fi 配置]
+    H --> I[解码固定头并读取 header_length]
+    I --> J[分配并解码完整头]
+    J --> K[检查文件数、头大小、格式和平台条件]
+    K --> L[检查 Magic 0x5354524e 与头累加和]
+    L --> M[第一遍检查文件累加和和分区并统计大小]
+    M --> N[第二遍查分区并逐项擦写 Flash]
+    N --> O{MCU 包版本需要升级?}
+    O -->|是| P[通过 syslink 升级 MCU]
+    O -->|否| Q[升级流程结束]
+    P --> Q
+    Q --> R
+    R --> S[upgrade_ctrl 0: 释放缓冲、清除状态、进度设为 100]
+    S --> T[sync，等待 3 秒并发布 REBOOT]
+    M -. 文件累加和失败或分区名未知时跳过该项 .-> U[继续处理后续条目]
+    N -. 擦除错误被忽略；连续十次写失败后仍推进 offset .-> V[可能出现未完整写入]
 ```
 
-```text
-upgrade_ctrl(1)
-  → 设置升级状态、清零进度
-  → 停止二维码/媒体 DSP，申请 BOOT_UPGRADE_SIZE 缓冲区
-  → 部分 Linux 配置卸载 /app
-接收升级包
-  → pps_device_upgrade(buf, size)
-  → 解锁电池、卸载 rootfs、按后端擦除 Wi-Fi 配置
-  → 解混淆头，读取 header_length / file_nums
-  → 检查文件数、头部大小、平台条件、Magic、头累加和
-  → 按每项 offset / file_len 检查数据累加和
-  → 按文件名查分区，逐项擦除及写入
-  → 检查 Flash 中 MCU 包版本，必要时通过 syslink 升级 MCU
-upgrade_ctrl(0)
-  → 释放 DSP 缓冲区，清除升级状态，进度设置为 100
-URL 路径再 sync、等待 3 秒并发布 REBOOT
+```mermaid
+flowchart TD
+    A[upgrade_ctrl 1] --> B[设置升级状态并清零进度]
+    B --> C[停止二维码和媒体 DSP，申请升级缓冲区]
+    C --> D[接收升级包]
+    D --> E[pps_device_upgrade]
+    E --> F[解锁电池、卸载 rootfs、按后端擦除 Wi-Fi 配置]
+    F --> G[解混淆并校验包头、平台条件和头累加和]
+    G --> H[逐项检查数据累加和、查分区并擦写]
+    H --> I{MCU 包版本需要升级?}
+    I -->|是| J[通过 syslink 升级 MCU]
+    I -->|否| K[完成设备升级]
+    J --> K
+    K --> L[upgrade_ctrl 0: 释放缓冲区、清状态、进度置 100]
+    L --> M[URL 路径 sync，等待 3 秒并发布 REBOOT]
 ```
 
 平台比较只在新格式分支执行；`debug != 1 && major_version == 0` 被当作旧格式，跳过平台比较。解析器没有使用 `factory_id` 实施厂商匹配，也没有完整签名或防降级机制。`upgrade_boot()` 使用 **64 KiB** 擦写步长，并按最后剩余数据调整写入大小；`BACKUP_WRITE_UNIT=32 KiB` 只是未使用的宏。Linux HAL 内部还会回读比较。
@@ -794,33 +712,20 @@ URL 线程向 `pps_device_upgrade()` 传入的是缓冲区容量 `size`，没有
 
 ### 11.2 pack / unpack 与构建脚本
 
-```text
-mkprj package
-    │
-    ▼
-build_project → 生成版本信息 → make -j5
-    │
-    ▼
-Makefile：链接 ppsapp → strip → 复制至所选平台 pack/app
-    │
-    ▼
-按 b6 / b8* / b9 选择 arch/<平台>/pack
-    │
-    ▼
-pack.sh <平台> <版本> <厂商> <构建类型>  [快照缺失]
-    └─ 厂商为 prodtest 时，继续调用 packimg_project
-
-mkprj packimg / packimg_project
-    │
-    ▼
-同样选择平台 pack 目录
-    │
-    ▼
-buildimg.sh platform=... out=camera-... factory=...  [快照缺失]
-
-可见的独立工具 tools/pack/pack.c：
-    输入文件 → 构建文件描述 / 累加和 → XOR 包头 → 输出升级包
-    （因 pack.sh 缺失，无法确认主打包脚本如何调用此工具）
+```mermaid
+flowchart TD
+    A[mkprj package] --> B[build_project 生成版本信息并执行 make -j5]
+    B --> C[Makefile 链接 ppsapp、strip 并复制到平台 pack/app]
+    C --> D[按 b6 / b8* / b9 选择 arch/<平台>/pack]
+    D --> E[pack.sh 平台 / 版本 / 厂商 / 构建类型，当前快照缺失]
+    E --> F{厂商为 prodtest?}
+    F -->|是| G[继续调用 packimg_project]
+    F -->|否| H[package 流程结束]
+    I[mkprj packimg / packimg_project] --> J[选择平台 pack 目录]
+    J --> K[buildimg.sh，当前快照缺失]
+    L[tools/pack/pack.c 独立工具] --> M[输入文件、文件描述和累加和]
+    M --> N[XOR 包头]
+    N --> O[输出升级包]
 ```
 
 `tools/pack/pack.c` 提供文件打包、头描述和字节累加和实现，`unpack.c` 提供对应解包。`mkprj package` 先构建应用，再进入平台 `pack/` 执行 `pack.sh`；`mkprj packimg` 调用 `buildimg.sh`。当前快照三个平台都没有 `pack/`，因此不能核验最终镜像布局、实际输出名或 `$TFTPBOOT` 拷贝动作。README 中的流程属于工程设计说明。
@@ -829,27 +734,15 @@ buildimg.sh platform=... out=camera-... factory=...  [快照缺失]
 
 ### 11.3 buildconf 的组合方式
 
-```text
-scripts/build.env（平台 / 厂商 / 分支 / 构建类型）
-    │
-    ▼
-platform_<平台>.conf
-    │ 先设置平台能力与 support_*
-    ▼
-factory_<厂商>.conf
-    │ 可覆盖此前 support_* 设置
-    ▼
-分支选择（meari / tuya4.x / tuya5.x / dot 等）
-    │
-    ▼
-构建类型（release / debug）
-    │
-    ▼
-Makefile 按最终值选择 ARCH_DIR、源码、宏、SDK 头文件与库
-
-当前配置：b8 + neutral_nkit + meari + release
-    → mips-zeratul-linux 适配 + NKIT 对接
-    → 完整链接与打包仍依赖快照外的库和平台 pack 文件
+```mermaid
+flowchart TD
+    A[scripts/build.env: 平台 / 厂商 / 分支 / 构建类型] --> B[platform_<平台>.conf 设置平台能力与 support_*]
+    B --> C[factory_<厂商>.conf，可覆盖此前 support_*]
+    C --> D[分支选择: meari / tuya4.x / tuya5.x / dot 等]
+    D --> E[构建类型: release / debug]
+    E --> F[Makefile 按最终值选择 ARCH_DIR、源码、宏、SDK 头文件和库]
+    G[当前配置: b8 + neutral_nkit + meari + release] --> H[mips-zeratul-linux 适配 + NKIT 对接]
+    H --> I[完整链接和打包依赖快照外的库及平台 pack 文件]
 ```
 
 平台配置先 include，厂商配置后 include，后者可以覆盖前者的 `support_*`。分支进一步设置正式/开发服务宏、Tuya 版本或 DOT，构建类型设置 release/debug。不能把平台 × 厂商 × 分支菜单的笛卡尔积视为全部可构建产品。
@@ -1091,21 +984,19 @@ strcpy/sprintf/strcat 三项合计 505；与初版 572 的口径不能直接比�
 
 ### 15.1 配置如何生效
 
-```text
-mkprj init_env
-  → 非 config 子命令先 source scripts/build.env
-  → 未指定时选择 platform、branch、factory、release/debug
-  → 读取 scripts/version
-  → 写回 build.env，并创建 .out/<platform-id>/<branch>/<type>
-build_project
-  → 导出 VCAMERA_*，生成 version.h，执行 make -j5
-Makefile
-  → 选择 ARCH_DIR / BSP config.mk
-  → include platform_<type>.conf
-  → include factory_<factory>.conf
-  → 按 support_* 加入源文件、CONFIG_* 和链接库
-  → 按 branch/type 加入对应宏
-  → 链接、strip、复制到 arch/.../pack/app，移除根目录临时目标
+```mermaid
+flowchart TD
+    A[mkprj init_env] --> B[非 config 子命令 source scripts/build.env]
+    B --> C[未指定时选择 platform / branch / factory / release-debug]
+    C --> D[读取 scripts/version]
+    D --> E[写回 build.env 并创建 .out/<platform-id>/<branch>/<type>]
+    E --> F[build_project 导出 VCAMERA_*、生成 version.h 并执行 make -j5]
+    F --> G[Makefile 选择 ARCH_DIR / BSP config.mk]
+    G --> H[include platform_<type>.conf 与 factory_<factory>.conf]
+    H --> I[按 support_* 加入源文件、CONFIG_* 和链接库]
+    I --> J[按 branch / type 加入对应宏]
+    J --> K[链接、strip 并复制到 arch/.../pack]
+    K --> L[移除根目录临时目标]
 ```
 
 `mkprj config` 会写配置并创建目录，不能作为只读核验命令。本次使用 `make -n`，显式指定平台 ID、输出目录与构建变量，没有执行编译、strip、复制或清理动作。
@@ -1219,14 +1110,13 @@ RESET 走单独的配置重置、媒体/SDK和 MCU 相关处理，不能只等�
 
 ### 17.2 录像数据路径
 
-```text
-媒体视频 / G711U / AAC 回调
-  → 构造 pps_record_avframe_t
-  → pps_record_write_avframe(group)
-  → 外部 storage 组件的录像管理循环
-SD 挂载 / 格式化 / 拔卡 / 满盘回调
-  → 更新 sd_mount_done、发布 eventhub 事件
-  → 控制 job 和回放，必要时检查 SD 升级文件
+```mermaid
+flowchart TD
+    A[媒体视频 / G711U / AAC 回调] --> B[构造 pps_record_avframe_t]
+    B --> C[pps_record_write_avframe group]
+    C --> D[外部 storage 组件录像管理循环]
+    E[SD 挂载 / 格式化 / 拔卡 / 满盘回调] --> F[更新 sd_mount_done 并发布 eventhub 事件]
+    F --> G[控制 job 与回放，必要时检查 SD 升级文件]
 ```
 
 录像 group 使用 licence_id 与 serial_no 组合。视频轨为 H.264；通常使用 MP4、AAC 和 G711U，不同 Tuya OEM 分支选择 private 格式与 G711U。视频和音频回调过滤 `datetime < 1570983860` 的帧，因此未有效校时可能表现为录像无帧，不能直接判定 SD 写失败。

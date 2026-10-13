@@ -72,23 +72,17 @@
 
 ### 2.1 系统架构位置
 
-```
-三方系统架构：
 
-  云平台 SCP ←──── stub-linker TCP 11215/11216/11225 ────► stub-sany-forklift
-                                                                    │
-                                    ┌───────────────────────────────┤
-                                    │         nanomsg IPC           │
-                                    ▼                               ▼
-                            CAN 驱动进程                      CMD 代理进程
-                          (ports 16002~16004)              (ports 16008/26008)
-                                    │                               │
-                                    ▼                               ▼
-                                CAN 总线                        SPI 总线
-                                    │                               │
-                                    └──────────────────┬────────────┘
-                                                       ▼
-                                                   MCU 硬件
+
+```mermaid
+flowchart TD
+    SCP[云平台 SCP] <-->|stub-linker TCP 11215/11216/11225| Stub[stub-sany-forklift]
+    Stub -->|nanomsg IPC| CANProc[CAN 驱动进程<br/>ports 16002–16004]
+    Stub -->|nanomsg IPC| CMDProc[CMD 代理进程<br/>ports 16008/26008]
+    CANProc --> CANBus[CAN 总线]
+    CMDProc --> SPI[SPI 总线]
+    CANBus --> MCU[MCU 硬件]
+    SPI --> MCU
 ```
 
 ### 2.2 核心功能列表
@@ -209,33 +203,33 @@ tools/stub-forklift/
 
 ### 5.1 进程内部模块划分
 
-```
-stub-sany-forklift 进程内部结构
 
-┌────────────────────────────────────────────────────────────────┐
-│                       main thread（主线程）                      │
-│  ① stub_run()           轮询 SCP SUB socket，触发消息入队        │
-│  ② run_pub_tasks()      执行定时任务（每10s 或 180s 一次）         │
-│  ③ handle_stub_msgs()   消费云端消息队列，按 topic 分发处理       │
-│  ④ handle_msg_caches()  把待发消息队列全部发给云端               │
-│  ⑤ usleep(10ms)         主循环节流                              │
-└───────────────────────────────┬────────────────────────────────┘
-                                │ pthread_create
-              ┌─────────────────┴──────────────────┐
-              ▼                                     ▼
-┌──────────────────────────┐          ┌────────────────────────────┐
-│    nn_recv_thread         │          │    timer_task_thread        │
-│  （IO 接收线程）           │          │  （定时任务线程，libev驱动）  │
-│                          │          │                            │
-│  nn_poll(6路fd, 2000ms)  │          │  ev_timer(1s, repeat=1s): │
-│  ├─ CAN0 fd (16002)      │          │    timer_task()           │
-│  ├─ CAN1 fd (16003)      │          │    ├─ STUB_TEST_INJECT注入 │
-│  ├─ CAN2 fd (16004)      │          │    ├─ handle_cmd_timeout() │
-│  ├─ GPS  fd (16005)      │          │    └─ 每6次: 查锁状态+MCU  │
-│  ├─ MCU REQ fd (38000)   │          │                            │
-│  └─ CMD  fd (16008)      │          │  ev_timer(60s, repeat=600s)│
-└──────────────────────────┘          │    sync_time_to_mcu()     │
-                                      └────────────────────────────┘
+
+```mermaid
+flowchart TB
+    subgraph Main[主线程]
+        A[stub_run：轮询 SCP SUB] --> B[run_pub_tasks：执行定时任务]
+        B --> C[handle_stub_msgs：消费并分发消息]
+        C --> D[handle_msg_caches：发送待发消息]
+        D --> E[usleep 10ms]
+        E --> A
+    end
+    subgraph IO[nn_recv_thread：IO 接收线程]
+        P[nn_poll：6 路 fd，2000ms]
+        P --> Can[CAN0/1/2：16002/16003/16004]
+        P --> GPS[GPS：16005]
+        P --> MCU[MCU REQ：38000]
+        P --> CMD[CMD：16008]
+    end
+    subgraph Timer[timer_task_thread：libev]
+        T[每 1s：timer_task]
+        T --> Inject[STUB_TEST_INJECT 注入]
+        T --> Timeout[handle_cmd_timeout]
+        T --> Query[每 6 次查询锁状态和 MCU]
+        Sync[每 600s：sync_time_to_mcu]
+    end
+    Main -. pthread_create .-> IO
+    Main -. pthread_create .-> Timer
 ```
 
 ### 5.2 `stub_ro_handle_t` —— 程序的全局"总控制台"
@@ -322,39 +316,19 @@ typedef struct {
 
 ## 6. nanomsg 通信端口全貌
 
-```
-本进程连接的所有 nanomsg 端口（全部作为 CLIENT 连接到服务端）
 
-  ─── CAN 数据（MCU → 本进程）────────────────────────────────────
-  tcp://127.0.0.1:16002  SUB  ← CAN0 原始帧数据流
-  tcp://127.0.0.1:16003  SUB  ← CAN1 原始帧数据流
-  tcp://127.0.0.1:16004  SUB  ← CAN2 原始帧数据流
 
-  ─── CAN 数据（本进程 → MCU）────────────────────────────────────
-  tcp://127.0.0.1:26002  PUB  → CAN0 发送（当前代码未实际使用发送）
-  tcp://127.0.0.1:26003  PUB  → CAN1 发送（当前代码未实际使用发送）
-  tcp://127.0.0.1:26004  PUB  → CAN2 发送（当前代码未实际使用发送）
-
-  ─── GPS 定位数据 ─────────────────────────────────────────────────
-  tcp://127.0.0.1:16005  SUB  ← GPS 模块 JSON 定位数据
-
-  ─── CMD 指令通道（锁机/参数配置等）──────────────────────────────
-  tcp://127.0.0.1:16008  SUB  ← MCU 的 CMD 回包（密码返回、锁机状态等）
-  tcp://127.0.0.1:26008  PUB  → 向 MCU 发送 CMD 命令（锁机指令、时间同步等）
-
-  ─── MCU 状态查询 ─────────────────────────────────────────────────
-  tcp://127.0.0.1:38000  REQ  ↔ REQ/REP 模式，查询 acc_stat、电压、版本
-
-  ─── 云平台 SCP（通过 stub-linker 框架封装）─────────────────────
-  tcp://127.0.0.1:11215  PUB  → 向 SCP 发布消息（心跳回复、指令结果、GPS等）
-  tcp://127.0.0.1:11216  SUB  ← 从 SCP 接收消息（锁机命令、参数设置等）
-  tcp://127.0.0.1:11225  PUB  → 向 SCP 发布设备数据（CAN 原始帧、工况数据）
-
-端口命名规律：
-  1XXXX = 接收方向（别的进程发给本进程）
-  2XXXX = 发送方向（本进程发给别的进程）
-  3XXXX = REQ/REP 双向查询
-  112XX = SCP 云平台通道
+```mermaid
+flowchart LR
+    CAN[MCU CAN 总线] -->|SUB 16002/16003/16004| Stub[本进程]
+    Stub -.->|PUB 26002/26003/26004：当前未实际使用| CAN
+    GPS[GPS 模块 JSON] -->|SUB 16005| Stub
+    MCU[MCU CMD 回包] -->|SUB 16008| Stub
+    Stub -->|PUB 26008：CMD 和时间同步| MCU
+    Stub <-->|REQ/REP 38000：状态、电压、版本| MCU
+    SCP[SCP 云平台] -->|SUB 11216| Stub
+    Stub -->|PUB 11215：命令结果、心跳、GPS| SCP
+    Stub -->|PUB 11225：CAN 和工况数据| SCP
 ```
 
 ---
@@ -547,35 +521,22 @@ typedef struct stub_ro_task_entry {
 
 ### 8.1 main() 函数流程
 
-```
-main()
-  │
-  ├─ init_log()                      # 初始化日志（文件路径/tmp/stub-forklift.log，最大2MB）
-  ├─ signal(SIGUSR1, sig_handler)    # 注册动态调整日志级别的信号
-  ├─ [STUB_TEST_INJECT] signal(SIGUSR2, sig_handler)  # 注册测试注入信号
-  │
-  ├─ stub_ro_new()                   # ★ 创建总控制台
-  │    ├─ load_pointsheet_json()     #   加载点表
-  │    ├─ rcpv4_gen_uuid()           #   生成实例 UUID
-  │    ├─ get_tbox_id()              #   从 /opt/conf.ini 读取 TBox ID
-  │    ├─ get_material_code()        #   从 material_code.ini 读取物料编码
-  │    ├─ stub_ro_lock_init()        #   初始化互斥锁
-  │    ├─ scp_online_info_init()     #   初始化心跳消息对象
-  │    ├─ list_new() × 2             #   创建消息队列（list_stub_msgs、list_msg_caches）
-  │    ├─ stub_new/connect() × 3     #   建立 SCP SUB(11216)/PUB(11215)/PUB(11225) 连接
-  │    └─ connect_nn_sock()          #   建立 nanomsg CAN/GPS/CMD/MCU 连接
-  │
-  ├─ pthread_create(timer_task_thread)   # 启动定时器线程（libev 驱动）
-  ├─ sleep(2)                            # 等待子线程初始化完成
-  ├─ pthread_create(nn_recv_thread)      # 启动 IO 接收线程
-  │
-  └─ while(1) {
-        stub_run(handle_sub_cmd)         # 驱动 SCP SUB socket，触发 on_stub_msg_received 回调
-        run_pub_tasks(tasks, n)          # 执行定时发布任务列表
-        handle_stub_msgs(handle_sub_cmd) # 处理从 SCP 收到的待处理消息
-        handle_msg_caches(stub_ro_handle)# 把待发送队列的消息全部发给 SCP
-        usleep(10 * 1000)                # 主循环节流 10ms
-     }
+
+
+```mermaid
+flowchart TD
+    Start([main]) --> Log[初始化日志并注册信号]
+    Log --> New[stub_ro_new：加载点表、读取配置、初始化队列和连接]
+    New --> Timer[启动 timer_task_thread]
+    Timer --> Delay[sleep 2s]
+    Delay --> IO[启动 nn_recv_thread]
+    IO --> Loop{{主循环}}
+    Loop --> Run[stub_run：处理 SCP SUB 回调]
+    Run --> Tasks[run_pub_tasks：执行定时任务]
+    Tasks --> Incoming[handle_stub_msgs：消费下行消息]
+    Incoming --> Outgoing[handle_msg_caches：发送上行消息]
+    Outgoing --> Wait[usleep 10ms]
+    Wait --> Loop
 ```
 
 ### 8.2 定时任务列表
@@ -709,38 +670,21 @@ static void sync_time_to_mcu(struct ev_loop *loop, ev_timer *w, int revents) {
 
 ### 10.1 阶段一：获取锁机密码
 
-```
-程序启动后，每 10s 执行 request_lock_passwd()（仅在未获取时）
-  │
-  ├─ 构造 cmd_request_t {
-  │    pid     = getpid()
-  │    cmd_tag = CMD_TAG_PASS_RD (200)
-  │    cmd_idx = global_cmd_idx++
-  │    cmd_len = 0                 ← 不携带参数
-  │  }
-  │
-  │ nn_send(nn_pub_cmd_fd, ...) → port 26008
-  │
-  ▼ CMD 代理进程 → SPI → MCU
-  │
-  │ MCU 生成 6 字节随机数 RAND，携带在回包里
-  ▼
-  handle_cmd_msg() 在 port 16008 收到：
-  cmd_request_t {
-    cmd_tag = CMD_TAG_PASS_RD (200)
-    cmd_len = 8
-    cmd_bytes[0..5] = RAND（6字节随机密码）
-    cmd_bytes[6]    = valid（有效性标志，代码不单独检查此字节）
-    cmd_bytes[7]    = rsv
-  }
-  │ 判断条件：cmd_len == 8（满足即认为有效）
-  ▼
-  存储到：
-    stub_handle->lock_cmd_password[6] = cmd_bytes[0..5]  ← 取前6字节作为密码
-    stub_handle->lock_cmd_password_is_valid = true
-  │
-  ▼
-  之后 request_lock_passwd() 检测到 is_valid=true，不再发送请求
+
+
+```mermaid
+flowchart TD
+    Tick[每 10s 调用 request_lock_passwd] --> Valid{密码已获取？}
+    Valid -->|是| Skip[不再请求]
+    Valid -->|否| Build[构造 CMD_TAG_PASS_RD 200<br/>cmd_len=0，cmd_idx 自增]
+    Build --> Send[nn_send 到 port 26008]
+    Send --> MCU[CMD 代理经 SPI 请求 MCU]
+    MCU --> Rand[MCU 返回 6 字节 RAND]
+    Rand --> Receive[port 16008 收到回包]
+    Receive --> Length{cmd_len == 8？}
+    Length -->|否| Retry[后续周期继续请求]
+    Length -->|是| Save[保存 cmd_bytes[0..5] 为密码<br/>设置 is_valid=true]
+    Save --> Valid
 ```
 
 ### 10.2 阶段二：云端锁机命令进入
@@ -789,79 +733,66 @@ static void sync_time_to_mcu(struct ev_loop *loop, ev_timer *w, int revents) {
 
 **消息路由：**
 
-```
-on_stub_msg_received()（SCP 回调，在主线程 stub_run 里触发）
-  │ 将消息 copy 到 list_stub_msgs（加 mutex 锁保护）
-  ▼
-主线程 handle_stub_msgs()
-  │ 取出消息，调用 do_handle_stub_msg()
-  ▼
-on_stub_msg_lock_dev()
-  │
-  ├─ 校验 msg_id、type、cmd 等字段
-  │
-  ├─ cmd == "lock" 或 "unlock"：
-  │    创建 lock_cmd_info_t {
-  │      timeout      = get_tick_count() + 30000  ← 队列超时30秒
-  │      lock_bind_type = lock_bind_type_lock
-  │      lock         = json["data"]["lock"]
-  │      level        = json["data"]["level"]
-  │      msg_id       = strdup(msg_id)
-  │      msg          = cJSON_Duplicate(json["data"]["msg"])
-  │      last_lock    = current_locked（执行前状态快照）
-  │    }
-  │    → do_save_lock_cmd_info() → list_lock_cmd_infoes 队列
-  │
-  └─ cmd == "set"：
-       parse_lock_cmd_to_pdk_lock_cmd() 解析 lockEnable.remote 字段
-       创建 lock_cmd_info_t {
-         lock_bind_type = lock_bind_type_bind
-         bind = (lockEnable.remote == 1)
-       }
-       → do_save_lock_cmd_info() → list_lock_cmd_infoes 队列
+
+
+```mermaid
+flowchart TD
+    Callback[on_stub_msg_received：SCP 回调] --> Copy[加锁并复制消息到 list_stub_msgs]
+    Copy --> Consume[主线程 handle_stub_msgs 取出消息]
+    Consume --> Dispatch[do_handle_stub_msg 分发到 on_stub_msg_lock_dev]
+    Dispatch --> Valid{msg_id、type、cmd 有效？}
+    Valid -->|否| Reject[拒绝或忽略]
+    Valid -->|是| Type{cmd 类型？}
+    Type -->|lock / unlock| Lock[创建锁机命令信息：lock、level、msg_id、msg、last_lock]
+    Type -->|set| Bind[解析 lockEnable.remote，创建绑定命令信息]
+    Lock --> Queue[do_save_lock_cmd_info：入 list_lock_cmd_infoes，等待超时 30s]
+    Bind --> Queue
 ```
 
 ### 10.3 阶段三：定时器驱动执行（锁机状态机）
 
 `timer_task_thread` 每 1 秒调用 `handle_cmd_timeout()`：
 
-```
-handle_cmd_timeout()
-  │
-  ├─ 遍历 list_lock_cmd_infoes 队列：
-  │    ├─ 如果超时（now >= lci->timeout）：
-  │    │    → 回复云端"超时失败"
-  │    │    → 从队列删除，释放内存
-  │    │
-  │    └─ 如果 current_lci == NULL（没有命令在执行）：
-  │         从队列取出队头 lci
-  │         lci->timeout = get_tick_count() + 60000  ← 执行超时60秒
-  │         current_lci = lci
-  │         do_run_lock_cmd_internal(lci)             ← 发送 CMD 给 MCU
-  │
-  └─ 检查 current_lci（正在执行的命令）：
-       ├─ 超时（now >= lci->timeout + 10000ms）：
-       │    → 回复云端"执行超时失败"
-       │    → current_lci = NULL，释放内存
-       │
-       └─ 检查状态是否匹配预期：
-            锁机命令：current_locked==lci->lock AND current_level==lci->level
-            绑定命令：current_binded == lci->bind
-            匹配成功 → 回复云端"成功"，current_lci = NULL，释放内存
+
+
+```mermaid
+flowchart TD
+    Tick[handle_cmd_timeout 每秒执行] --> Queue{待执行队列有命令？}
+    Queue -->|有| Wait{入队等待超过 30s？}
+    Wait -->|是| QFail[失败回复并删除过期命令]
+    QFail --> Queue
+    Wait -->|否| Busy{current_lci 为空？}
+    Busy -->|是| Start[取队头，执行超时设为 now + 60s]
+    Start --> Send[设置 current_lci 并发送 CMD]
+    Busy -->|否| Running
+    Queue -->|无| Running{检查 current_lci}
+    Send --> Running
+    Running -->|无命令| End([本轮结束])
+    Running -->|执行中| Expired{now >= timeout + 10s？}
+    Expired -->|是| Fail[回复执行超时失败，清空 current_lci]
+    Expired -->|否| Match{MCU 锁机/绑定状态符合预期？}
+    Match -->|是| Success[回复成功，清空 current_lci]
+    Match -->|否| End
+    Fail --> End
+    Success --> End
 ```
 
 **`do_run_lock_cmd_internal(lci)` 发送锁机 CMD：**
 
-```
-├─ lock_bind_type == lock_bind_type_lock：
-│    ├─ lock==true, level==1 → send_lock_msg(lock_cmd_one_lock = 0x31)
-│    ├─ lock==true, level==2 → send_lock_msg(lock_cmd_two_lock = 0x32)
-│    ├─ lock==true, level==3 → 【当前已注释禁用】直接回复 lock_error_param 并返回 -1
-│    └─ lock==false           → send_lock_msg(lock_cmd_unlock = 0x40)
-│
-└─ lock_bind_type == lock_bind_type_bind：
-     ├─ bind==true  → send_lock_msg(lock_cmd_bind   = 0x10)
-     └─ bind==false → send_lock_msg(lock_cmd_unbind = 0x20)
+
+
+```mermaid
+flowchart TD
+    Start[do_run_lock_cmd_internal] --> Type{命令类型}
+    Type -->|锁机/解锁| Lock{lock 为 true？}
+    Lock -->|是| Level{level}
+    Level -->|1| L1[发送一级锁机 0x31]
+    Level -->|2| L2[发送二级锁机 0x32]
+    Level -->|3| L3[当前禁用：回复 lock_error_param 并返回 -1]
+    Lock -->|否| Unlock[发送解锁 0x40]
+    Type -->|绑定/解绑| Bind{bind 为 true？}
+    Bind -->|是| B1[发送绑定 0x10]
+    Bind -->|否| B0[发送解绑 0x20]
 ```
 
 **`send_lock_msg(cmd_param)` 构造发送包：**
@@ -884,34 +815,28 @@ cmd_bytes 数据（8字节）：
 
 MCU 收到锁机命令后，立即通过 CMD 代理返回"是否接受"：
 
-```
-handle_cmd_msg() 收到 CMD_TAG_LOCK (202) 回包：
-  cmd_bytes[0] = error（0=接受，非0=拒绝）
-  cmd_len = 4
 
-  ├─ error != 0（MCU 拒绝）：
-  │    → do_reply_lock_cmd_response_from_cache(lock_error_failed, "lock cmd rejected by io_mng")
-  │    → current_lci = NULL（立即结束命令）
-  │
-  └─ error == 0（MCU 接受）：
-       → 等待后续 CMD_TAG_LOCK_STATUS_REPLY 状态上报
+
+```mermaid
+flowchart TD
+    Reply[收到 CMD_TAG_LOCK 202 回包] --> Error{cmd_bytes[0] 非 0？}
+    Error -->|是：MCU 拒绝| Fail[回复失败并清空 current_lci]
+    Error -->|否：MCU 接受| Wait[等待 CMD_TAG_LOCK_STATUS_REPLY 状态上报]
 ```
 
 ### 10.5 阶段五：锁机状态更新
 
 MCU 执行锁机完成后，主动通过 CMD 代理推送当前状态：
 
-```
-handle_cmd_msg() 收到 CMD_TAG_LOCK_STATUS_REPLY (204) 回包：
-  cmd_bytes[0] = lock_cmd    （触发此状态的命令类型）
-  cmd_bytes[1] = lock_result （0=成功，非0=失败）
-  cmd_bytes[2] = bind_status （0=解绑，1=绑定）
-  cmd_bytes[3] = lock_status （0=解锁，1=一级，2=二级，3=三级）
 
-  更新全局状态：
-    current_binded = bind_status
-    current_locked = (lock_status > 0)
-    current_level  = lock_status
+
+```mermaid
+flowchart TD
+    Reply[收到 CMD_TAG_LOCK_STATUS_REPLY 204] --> Decode[读取 lock_cmd、lock_result、bind_status、lock_status]
+    Decode --> Update[更新 current_binded、current_locked、current_level]
+    Update --> Match{当前命令状态符合预期？}
+    Match -->|是| Success[下次 handle_cmd_timeout 回复成功并清空 current_lci]
+    Match -->|否| Continue[继续等待或按超时处理]
 ```
 
 下一次 `handle_cmd_timeout()` 检测到状态与命令预期匹配时，自动回复云端成功并清空 `current_lci`。
@@ -947,35 +872,30 @@ handle_cmd_msg() 收到 CMD_TAG_LOCK_STATUS_REPLY (204) 回包：
 
 ### 10.7 完整锁机时序图
 
-```
-SCP云端    stub-sany-forklift              CMD代理进程           MCU
-  │                │                            │                  │
-  │──lock cmd──►  │                            │                  │
-  │               │ [每10s] request_lock_passwd │                  │
-  │               │──CMD_TAG_PASS_RD(200)──────►│──SPI──────────► │
-  │               │                            │◄──RAND[6B]+rsv── │
-  │               │◄──cmd_len=8, RAND[6B]──────│                  │
-  │               │  password[6] = RAND[0..5]  │                  │
-  │               │  is_valid = true            │                  │
-  │               │                            │                  │
-  │──lock_dev──►  │                            │                  │
-  │  cmd=lock     │ [timer_task 1s]             │                  │
-  │  level=1      │ handle_cmd_timeout()        │                  │
-  │               │ do_run_lock_cmd_internal()  │                  │
-  │               │──CMD_TAG_LOCK(202)─────────►│──SPI──────────► │
-  │               │  [password(6B)][0x31][0]   │                  │ 执行一级锁机
-  │               │                            │◄──接受(error=0)── │
-  │               │◄──CMD_TAG_LOCK(202)────────│                  │
-  │               │  cmd_bytes[0]=0(接受)       │                  │
-  │               │                            │◄──执行完成通知─── │
-  │               │◄──CMD_TAG_LOCK_STATUS(204)─│                  │
-  │               │  bind=1,lock=1(一级)        │                  │
-  │               │  current_locked=true        │                  │
-  │               │  current_level=1            │                  │
-  │               │ [下次timer_task检测到匹配]   │                  │
-  │◄──response────│                            │                  │
-  │  code=0,      │                            │                  │
-  │  locked=true  │                            │                  │
+
+
+```mermaid
+sequenceDiagram
+    participant SCP as SCP 云端
+    participant Stub as stub-sany-forklift
+    participant Proxy as CMD 代理进程
+    participant MCU
+    SCP->>Stub: 下发 lock_dev（cmd=lock，level=1）
+    loop 每 10s 直到获取密码
+        Stub->>Proxy: CMD_TAG_PASS_RD(200)，port 26008
+        Proxy->>MCU: SPI 请求
+        MCU-->>Proxy: RAND[6B]
+        Proxy-->>Stub: 回包 cmd_len=8
+        Note over Stub: 保存 RAND[0..5]，is_valid=true
+    end
+    Stub->>Proxy: CMD_TAG_LOCK(202)，密码 + 0x31
+    Proxy->>MCU: SPI 一级锁机命令
+    MCU-->>Proxy: 接受确认 error=0
+    Proxy-->>Stub: CMD_TAG_LOCK(202)
+    MCU-->>Proxy: CMD_TAG_LOCK_STATUS_REPLY(204)，lock=1，level=1
+    Proxy-->>Stub: 状态推送
+    Note over Stub: 更新状态，定时检查发现状态匹配
+    Stub-->>SCP: 成功回复（code=0，locked=true）
 ```
 
 ---
@@ -1247,23 +1167,18 @@ MCU 收到后主动推送当前锁机状态（见 10.5 节），触发 `handle_c
 
 ### 14.1 SCP 消息下行（云端 → 本程序）
 
-```
-SCP → port 11216 → stub-linker → on_stub_msg_received() 回调
-  │
-  │ 线程安全地将消息 copy 入 list_stub_msgs：
-  │   mce = calloc(1, sizeof(msg_cache_entry_t))
-  │   mce->msg = malloc(msg_len)
-  │   memcpy(mce->msg, msg, msg_len)
-  │   pthread_mutex_lock(&mutex)
-  │   list_add_last(list_stub_msgs, mce)
-  │   pthread_mutex_unlock(&mutex)
-  │
-  ▼
-主线程 handle_stub_msgs()
-  │ 每轮循环清空 list_stub_msgs：
-  │   pthread_mutex_lock → list_remove_first → unlock → do_handle_stub_msg()
-  ▼
-do_handle_stub_msg() 按 topic_type 分发：
+
+
+```mermaid
+flowchart TD
+    SCP[SCP] -->|port 11216| Linker[stub-linker]
+    Linker --> Callback[on_stub_msg_received]
+    Callback --> Copy[复制消息到 msg_cache_entry_t]
+    Copy --> Lock[加互斥锁并追加 list_stub_msgs 队尾]
+    Lock --> Unlock[释放互斥锁]
+    Unlock --> Consume[主线程取队头并解锁]
+    Consume --> Dispatch[do_handle_stub_msg 按 topic_type 分发]
+    Dispatch --> Topics[heartbeat、version、network_metric、lock_dev、cmd_dev、info_dev、notify_dev]
 ```
 
 | topic_type | 处理函数 | 功能描述 |
@@ -1282,21 +1197,23 @@ do_handle_stub_msg() 按 topic_type 分发：
 
 所有上行消息先通过 `push_msg()` 入队，主线程每轮 `handle_msg_caches()` 清空队列：
 
-```
-push_msg(topic_type, msg, len)
-  │
-  ├─ 如果 list_msg_caches 达到 1024 条上限：
-  │    丢弃队头最旧消息（打印警告日志）
-  │
-  ├─ 分配 msg_cache_entry_t，复制消息内容
-  │
-  └─ 根据 topic_type 决定插入位置：
-       锁机回复/OTA/命令回复 → list_add_first()（插队头）
-       其他 → list_add()（追加队尾）
 
-handle_msg_caches()
-  │ 循环取出队头消息
-  └─ stub_msg_reply(handle_pub_cmd, topic_type, msg, len) → SCP port 11215
+
+```mermaid
+flowchart TD
+    Push[push_msg] --> Limit{队列达到 1024 条？}
+    Limit -->|是| Drop[丢弃队头最旧消息并记录警告]
+    Limit -->|否| Copy[分配条目并复制消息]
+    Drop --> Copy
+    Copy --> Priority{锁机回复、OTA 或命令回复？}
+    Priority -->|是| Head[list_add_first：插入队头]
+    Priority -->|否| Tail[list_add：追加队尾]
+    Head --> Drain[handle_msg_caches 取队头]
+    Tail --> Drain
+    Drain --> Reply[stub_msg_reply 发往 SCP port 11215]
+    Reply --> More{还有待发消息？}
+    More -->|是| Drain
+    More -->|否| End([本轮完成])
 ```
 
 ### 14.3 `on_stub_msg_cmd_dev` 指令处理
@@ -1438,49 +1355,47 @@ typedef struct data_process_mng {
 
 #### 加载流程（`load_pointsheet_json`）
 
-```
-load_pointsheet_json()
-  │
-  ├─ rcpv4_get_file_data() 读取整个 JSON 文件到内存
-  ├─ cJSON_Parse() 解析 JSON
-  ├─ 提取顶层字段 (mver, sver, pver, mtyp)
-  │
-  └─ 遍历 dev[] 数组（按 slot 分 CAN 通道）：
-       遍历 msg[] 数组：
-         get_common_data_rule()   ← 递归构建规则树
-           │
-           ├─ 解析 typ/ofs/len/val 字段
-           ├─ 解析 val 字段（'#' 前缀→十六进制，否则→十进制）
-           ├─ 如果有 rls[] 数组：递归调用 get_common_data_rule()
-           └─ 如果有 pts[] 数组：逐个创建 data_item_t
-                解析 ofs/len/bo/udif/ptyp/sign/index/pofs/sc/nm
-         │
-         HASH_ADD_INT(data_rule[port], value, data_rule)   ← 以 val 为 key 加入哈希表
+
+
+```mermaid
+flowchart TD
+    Start[load_pointsheet_json] --> Read[读取 JSON 文件到内存]
+    Read --> Parse[cJSON_Parse]
+    Parse --> Fields[提取 mver、sver、pver、mtyp]
+    Fields --> Devs[遍历 dev 数组和 CAN slot]
+    Devs --> Msgs[遍历 msg 数组]
+    Msgs --> Rule[get_common_data_rule：递归构造规则树]
+    Rule --> Details[解析 typ、ofs、len、val]
+    Details --> Child{存在 rls 子规则？}
+    Child -->|是| Rule
+    Child -->|否| Points{存在 pts 数据点？}
+    Points -->|是| Items[创建 data_item_t 并解析字段]
+    Points -->|否| Hash[HASH_ADD_INT：按 val 加入通道哈希表]
+    Items --> Hash
+    Hash --> More{还有 msg？}
+    More -->|是| Msgs
+    More -->|否| End([加载完成])
 ```
 
 #### 解析流程（`parse_common_msg`，每收到一帧 CAN 数据时调用）
 
-```
-parse_common_msg(data_process_mng, frame_data, can_id, can_port)
-  │
-  ├─ HASH_FIND_INT(data_rule[can_port], can_id, target_rule)
-  │    ← 用 CAN ID 快速查找对应的解析规则（O(1)）
-  │
-  └─ 如果找到：set_common_data_item(target_rule, frame_data)
-       │
-       ├─ 如果规则有 data_item_list（叶节点）：
-       │    对每个 data_item：
-       │      ① 根据 byte_order 提取位域值
-       │         小端（Intel）：按字节序 from start_byte 拼接，右移 start_bit，掩码截取
-       │         大端（Motorola）：按倒序拼接，右移并截取
-       │      ② 处理有符号数（补码展开）
-       │      ③ 计算物理值：value_double = raw_value * param_scale + param_offset
-       │      ④ 字符串类型：直接 memcpy（并处理大端字节序翻转）
-       │      ⑤ 更新 data_item.time_rcv = get_tick_count()（标记"已接收过"）
-       │
-       └─ 如果规则有 data_sub_rule_list（分支节点）：
-            对每个子规则：从帧数据中读取对应位置的值
-            如果值 == 子规则的 value → 递归调用 set_common_data_item(子规则)
+
+
+```mermaid
+flowchart TD
+    Start[parse_common_msg：帧数据、CAN ID、通道] --> Find[HASH_FIND_INT 查找 CAN 规则]
+    Find --> Found{找到规则？}
+    Found -->|否| Skip[跳过点表解析]
+    Found -->|是| Set[set_common_data_item]
+    Set --> Kind{节点类型}
+    Kind -->|叶节点 data_item_list| Extract[按 Intel/Motorola 字节序提取位域]
+    Extract --> Signed[按需展开有符号补码]
+    Signed --> Physical[计算 raw × scale + offset]
+    Physical --> Stamp[更新 time_rcv]
+    Kind -->|分支 data_sub_rule_list| Child[读取字段并匹配子规则 value]
+    Child -->|匹配| Recurse[递归处理子规则]
+    Recurse --> Kind
+    Child -->|不匹配| End([检查下一条规则])
 ```
 
 #### 数值编解码细节
@@ -1819,84 +1734,26 @@ e3c735d  国内机器人叉车初始版本提交
 
 ## 23. 关键函数调用关系总图
 
-```
-main()
-├── init_log()                          初始化日志系统（/tmp/stub-forklift.log，2MB）
-├── signal(SIGUSR1, sig_handler)        日志级别动态切换
-├── [STUB_TEST_INJECT] signal(SIGUSR2, sig_handler)
-│
-├── stub_ro_new()
-│   ├── load_pointsheet_json()          ← data_process.c，加载点表到 data_rule 哈希表
-│   │   └── get_common_data_rule()      递归构建规则树（含子规则和数据点）
-│   ├── rcpv4_gen_uuid()               生成 instance_uuid
-│   ├── get_tbox_id()                  读 /opt/conf.ini
-│   ├── get_material_code()            读 material_code.ini
-│   ├── scp_online_info_init()         初始化心跳对象
-│   ├── stub_new/connect(11215/16/25) 建立 SCP 连接
-│   └── connect_nn_sock()              建立 CAN/GPS/CMD/MCU nanomsg 连接
-│       ├── sub_client_new(16002/3/4)  ← nn_sock.c
-│       ├── pub_client_new(26002/3/4)  ← nn_sock.c
-│       ├── sub_client_new(16005/8)    ← nn_sock.c
-│       ├── pub_client_new(26008)      ← nn_sock.c
-│       └── req_client_new(38000)      ← nn_sock.c
-│
-├── pthread_create(timer_task_thread)
-│   └── ev_run(loop)
-│       ├── timer_task() [每1秒]
-│       │   ├── [TEST] on_stub_msg_lock_dev()  测试注入
-│       │   ├── handle_cmd_timeout()           锁机状态机驱动
-│       │   │   ├── list_lock_cmd_infoes → do_run_lock_cmd_internal() → send_lock_msg() → nn_send(26008)
-│       │   │   └── current_lci 状态检查 → do_reply_lock_cmd_response_from_cache() → push_msg()
-│       │   ├── send_req_lock_status() [6s]    → nn_send(26008, CMD_TAG_LOCK_STATUS_REPLY)
-│       │   └── req_mcu_info() [6s]            → nn_send(38000)
-│       └── sync_time_to_mcu() [600s]
-│           └── set_mcu_time() → nn_send(26008, CMD_TIME_SET)
-│
-├── pthread_create(nn_recv_thread)
-│   └── nn_poll(6路fd, 2000ms)
-│       ├── handle_can_msg(port)        接收CAN帧
-│       │   ├── parse_common_msg()      ← data_process.c，点表解析
-│       │   │   └── set_common_data_item()   位域提取 + 物理值计算
-│       │   ├── parse_0x31B_msg()       软件版本/VIN码解析
-│       │   └── stub_msg_reply(11225, raw_data)  上报原始CAN帧
-│       ├── handle_gps_msg()            接收GPS JSON
-│       │   └── parse_gps_info()        更新 gps_info
-│       ├── handle_mcu_reply_msg()      接收MCU REP
-│       │   └── 更新 acc_status/pwr_volt/mcu_ver
-│       └── handle_cmd_msg()            接收CMD回包
-│           ├── CMD_TAG_PASS_RD (200)   → 存储6字节锁机密码
-│           ├── CMD_TAG_LOCK (202)      → 检查MCU是否接受锁机命令
-│           └── CMD_TAG_LOCK_STATUS_REPLY (204) → 更新 current_locked/binded/level
-│
-└── while(1) 主循环（10ms/轮）
-    ├── stub_run(handle_sub_cmd)        驱动 SCP SUB，触发回调 on_stub_msg_received
-    │   └── on_stub_msg_received()      将消息 copy 入 list_stub_msgs（mutex 保护）
-    │
-    ├── run_pub_tasks(tasks, n)         定时任务列表
-    │   ├── report_condition_info [10s]  → push_msg(11225, filter_table GPS)
-    │   ├── report_location [10s]        → stub_msg_reply(11215, GPS tbox)
-    │   ├── report_dtp_msg [10s]         → stub_msg_reply(11225, data_table CAN)
-    │   │   └── iterate_data_rule()     遍历点表 data_item.time_rcv != 0 的项
-    │   │       └── add_extra_info_to_dtp() 附加 VIN/版本/电压
-    │   ├── request_stub_network_status [10s] → push_msg(11215, network_metric request)
-    │   ├── request_stub_version [10s]        → push_msg(11215, version request)
-    │   ├── broadcast_stub_version [180s]     → push_msg(11215, module version broadcast)
-    │   ├── request_stub_heartbeat [180s]     → push_msg(11215, keep_alive request)
-    │   ├── request_dev_info [180s]           → push_msg(info_dev, req_dev_param_info)
-    │   ├── report_dev_info [180s]            → push_msg(info_dev, parts_info)
-    │   └── request_lock_passwd [10s]         → nn_send(26008, CMD_TAG_PASS_RD)（未获取时）
-    │
-    ├── handle_stub_msgs(handle_sub_cmd)   消费 list_stub_msgs
-    │   └── do_handle_stub_msg() → 按 topic 分发：
-    │       ├── heartbeat      → on_stub_msg_heartbeat()    更新 soi.is_online
-    │       ├── version        → on_stub_msg_version()      协议版本协商
-    │       ├── network_metric → on_stub_msg_network_metric() 更新网络状态
-    │       ├── lock_dev       → on_stub_msg_lock_dev()     ★ 解析锁机命令→入队
-    │       ├── cmd_dev        → on_stub_msg_cmd_dev()      车辆参数设置
-    │       ├── info_dev       → on_stub_msg_info_dev()     仅日志
-    │       └── notify_dev     → on_stub_msg_notify_dev()   仅日志
-    │
-    └── handle_msg_caches()             清空发送队列 → stub_msg_reply(11215)
+
+
+```mermaid
+flowchart TD
+    Main([main]) --> Setup[初始化日志和信号]
+    Setup --> New[stub_ro_new：加载点表、UUID、设备信息、锁、队列]
+    New --> Scp[建立 SCP 11215/11216/11225 连接]
+    New --> Nano[建立 CAN、GPS、CMD、MCU nanomsg 连接]
+    Scp --> Threads[启动 timer_task_thread 和 nn_recv_thread]
+    Nano --> Threads
+    Threads --> Timer[定时器：每秒处理锁机超时和状态<br/>每 6 秒查询状态/MCU，每 600 秒同步时间]
+    Threads --> IO[IO 接收：CAN 点表和 0x31B 解析、GPS 更新<br/>MCU 状态和 CMD 回包处理]
+    Threads --> Loop{{主线程循环：约每 10ms}}
+    Loop --> Run[stub_run：接收 SCP 消息并入队]
+    Run --> Tasks[run_pub_tasks：定时上报、心跳、版本、查询、密码请求]
+    Tasks --> Incoming[handle_stub_msgs：按 topic 分发，锁机命令入队]
+    Incoming --> Outgoing[handle_msg_caches：经 11215 发往 SCP]
+    Outgoing --> Loop
+    IO --> DTP[CAN 原始数据和定时工况数据上报到 11225]
+    Timer --> Outgoing
 ```
 
 ---
@@ -2265,319 +2122,112 @@ static int stub_ro_release(stub_ro_handle_t *ro_handle) {
 
 ### 26.1 `stub_ro_new` 初始化序列图
 
-```
-main()
-  │
-  ▼
-stub_ro_new()
-  │
-  ├─①─ calloc(stub_ro_handle_t)
-  │      └─ 全部字段清零（bool=false, int=0, ptr=NULL）
-  │
-  ├─②─ load_pointsheet_json("Pointsheet_info1.json")
-  │      ├─ rcpv4_get_file_data() 读文件到内存（~774KB）
-  │      ├─ cJSON_Parse() 解析 JSON
-  │      ├─ 提取 mver/sver/pver/mtyp
-  │      └─ 遍历 dev[] → 每个 slot → 每条 msg：
-  │           get_common_data_rule()（递归）→ HASH_ADD_INT(data_rule[slot])
-  │           [失败仅警告，不阻断后续初始化]
-  │
-  ├─③─ rcpv4_gen_uuid(&instance_uuid)          （e2fsprogs，每次启动不同）
-  │
-  ├─④─ get_tbox_id()                            读 /opt/conf.ini [dev] id
-  │      └─ 失败则 tbox_id=NULL（后续上报跳过）
-  │
-  ├─⑤─ get_material_code()                      读 material_code.ini [code] material_code
-  │      └─ 失败则 material_code=NULL（上报时用默认值 "140902000105B"）
-  │
-  ├─⑥─ stub_ro_lock_init()                      pthread_mutex_init(&mutex)
-  │
-  ├─⑦─ scp_online_info_init()
-  │      ├─ rcpv4_gen_uuid(&soi.hb.hdr.msg_id)  心跳消息固定 msg_id
-  │      ├─ soi.hb.hdr.action = request
-  │      ├─ soi.hb.hdr.type   = "keep_alive"
-  │      ├─ soi.hb.name       = "stub-forklift"
-  │      └─ soi.hb.uuid       = instance_uuid
-  │
-  ├─⑧─ list_new(&list_stub_msgs)                收 SCP 消息的线程安全队列
-  │     list_new(&list_msg_caches)               发给 SCP 的消息缓冲队列
-  │
-  ├─⑨─ stub-linker SCP 连接（3 个 handle）
-  │      ├─ stub_new(handle_sub_cmd, SUB)
-  │      │   stub_connect("tcp://127.0.0.1:11216")
-  │      │   stub_set_msg_cb(on_stub_msg_received)   注册消息回调
-  │      │   stub_set_filter("")                      订阅所有 topic
-  │      │   [失败 → goto release]
-  │      ├─ stub_new(handle_pub_cmd, PUB)
-  │      │   stub_connect("tcp://127.0.0.1:11215")
-  │      │   [失败 → goto release]
-  │      └─ stub_new(handle_pub_data, PUB)
-  │          stub_connect("tcp://127.0.0.1:11225")
-  │          [失败 → goto release]
-  │
-  ├─⑩─ connect_nn_sock()                        nanomsg 原生连接
-  │      ├─ sub_client_new(16002) → nn_sub_can_fd[0]
-  │      ├─ pub_client_new(26002) → nn_pub_can_fd[0]
-  │      ├─ sub_client_new(16003) → nn_sub_can_fd[1]
-  │      ├─ pub_client_new(26003) → nn_pub_can_fd[1]
-  │      ├─ sub_client_new(16004) → nn_sub_can_fd[2]
-  │      ├─ pub_client_new(26004) → nn_pub_can_fd[2]
-  │      ├─ sub_client_new(16005) → nn_sub_gps_fd
-  │      ├─ sub_client_new(16008) → nn_sub_cmd_fd
-  │      ├─ pub_client_new(26008) → nn_pub_cmd_fd
-  │      └─ req_client_new(38000) → nn_req_mcu_fd
-  │         [任一失败 → goto release]
-  │
-  ├─⑪─ stub_set_private_data(handle_sub_cmd,  stub_handle)
-  │     stub_set_private_data(handle_pub_cmd,  stub_handle)
-  │     stub_set_private_data(handle_pub_data, stub_handle)
-  │     [使回调函数能通过 stub_get_private_data() 拿到全局状态指针]
-  │
-  └─ 返回 stub_handle（成功）或 NULL（任一步失败后 stub_ro_release 清理）
 
-release（失败路径）:
-  stub_ro_release(stub_handle) → 释放已分配的所有资源 → return NULL
+
+```mermaid
+flowchart TD
+    Main([main]) --> Alloc[calloc stub_ro_handle_t]
+    Alloc --> Points[加载点表并递归构建 data_rule 哈希表]
+    Points -. 失败仅警告 .-> Uuid
+    Points --> Uuid[生成 instance_uuid]
+    Uuid --> Device[读取 TBox ID 和物料编码]
+    Device --> Mutex[初始化互斥锁和心跳对象]
+    Mutex --> Queues[创建两个消息队列]
+    Queues --> Sub[建立 SCP SUB 11216 并注册回调]
+    Sub --> A{成功？}
+    A -->|否| Release[stub_ro_release 清理资源]
+    A -->|是| Pub[建立 SCP PUB 11215 和 11225]
+    Pub --> B{成功？}
+    B -->|否| Release
+    B -->|是| Nano[建立 CAN、GPS、CMD、MCU nanomsg sockets]
+    Nano --> C{全部成功？}
+    C -->|否| Release
+    C -->|是| Private[设置 SCP handles 的私有数据]
+    Private --> Ready([返回 stub_handle])
+    Release --> Failed([返回 NULL])
 ```
 
 ---
 
 ### 26.2 锁机状态机状态转换图
 
-```
-                     ┌─────────────────────────────────────────────┐
-                     │               状态总览                        │
-                     └─────────────────────────────────────────────┘
 
-  ┌──────────────────────────────────────────────────────────────────────────────┐
-  │                          S0: 未就绪                                           │
-  │            lock_cmd_password_is_valid = false                                │
-  │            无法执行任何锁机命令                                                │
-  └───────────────────────────────┬──────────────────────────────────────────────┘
-                                  │  每10s: request_lock_passwd() 发 CMD_TAG_PASS_RD
-                                  │  IO线程收到 CMD_TAG_PASS_RD 回包 cmd_len==8
-                                  ▼
-  ┌──────────────────────────────────────────────────────────────────────────────┐
-  │                          S1: 空闲就绪                                          │
-  │            lock_cmd_password_is_valid = true                                 │
-  │            current_lci = NULL                                                │
-  │            list_lock_cmd_infoes 为空                                          │
-  └──────┬────────────────────────┬──────────────────────────────────────────────┘
-         │                        │
-         │ 云端下发 lock_dev 消息  │ 队列有命令 AND current_lci==NULL
-         │ on_stub_msg_lock_dev() │ handle_cmd_timeout() 检测到
-         │ 创建 lci，入队          │ 从队头取出 lci
-         ▼                        ▼
-  ┌──────────────────────────────────────────────────────────────────────────────┐
-  │                          S2: 等待执行                                          │
-  │            list_lock_cmd_infoes.size > 0                                     │
-  │            current_lci = NULL                                                │
-  │            lci 在队列中等待，timeout = 入队时刻 + 30s                          │
-  └───────────────────────────────┬──────────────────────────────────────────────┘
-                                  │ handle_cmd_timeout() 取出队头 lci
-                                  │ lci->timeout 重置为 now + 60s
-                                  │ current_lci = lci
-                                  │ do_run_lock_cmd_internal() → send_lock_msg()
-                                  ▼
-  ┌──────────────────────────────────────────────────────────────────────────────┐
-  │                          S3: 执行中                                            │
-  │            current_lci != NULL                                               │
-  │            已向 MCU 发送 CMD_TAG_LOCK 命令                                    │
-  │            等待 MCU 的两种回包：接受确认 or 状态推送                            │
-  └──────┬───────────────────────────────────────────────────┬────────────────────┘
-         │                                                   │
-         │ [MCU拒绝] IO线程收到                              │ [MCU接受] IO线程收到
-         │ CMD_TAG_LOCK(202) cmd_bytes[0]!=0                 │ CMD_TAG_LOCK(202) cmd_bytes[0]==0
-         │                                                   │
-         ▼                                                   ▼
-  ┌──────────────────┐                          ┌──────────────────────────────────┐
-  │ 立即失败回复       │                          │ 继续等待状态推送                    │
-  │ lock_error_failed │                          │ CMD_TAG_LOCK_STATUS_REPLY(204)   │
-  │ current_lci=NULL  │                          │ 更新 current_locked/level/binded │
-  └──────────────────┘                          └──────────────┬───────────────────┘
-         │                                                     │
-         ▼                                           ┌─────────┴──────────┐
-       [→S1]                                         │                    │
-                                              状态匹配预期          状态不匹配
-                                         (lock==current_locked     继续等待
-                                         AND level==current_level)
-                                                     │
-                                                     ▼
-                                          ┌──────────────────────┐
-                                          │ 成功回复 SCP           │
-                                          │ lock_error_success    │
-                                          │ current_lci = NULL    │
-                                          └──────────┬───────────┘
-                                                     │
-                                                     ▼
-                                                   [→S1]
 
-  ─────────────── 超时路径（从 S2 和 S3 都可能触发）────────────────
-
-  S2 中 lci 超时（now >= lci->timeout，即入队后 30s 未被取到执行）：
-    → do_reply_lock_cmd_response_from_cache(lock_error_failed, "run lock command timeout")
-    → 从队列删除，释放内存 → 继续检查下一条
-
-  S3 中 current_lci 超时（now >= lci->timeout + 10s，即发出命令后 70s 无响应）：
-    → do_reply_lock_cmd_response_from_cache(lock_error_failed, "run lock command timeout")
-    → current_lci = NULL → [→S1]
-
-  ─────────────── 特殊情况：level==3 ──────────────────────────────
-
-  do_run_lock_cmd_internal() 中 level==3 分支被注释：
-    → 直接调用 do_reply_lock_msg_response(lock_error_param, "unsupported lock level")
-    → 返回 -1
-    → handle_cmd_timeout() 检测到 ret<0 → do_release_lock_cmd_info(lci)
-    → current_lci = NULL → [→S1]
+```mermaid
+stateDiagram-v2
+    [*] --> S0: 启动，密码未就绪
+    S0: 未就绪
+    S1: 空闲就绪，密码有效且无活动命令
+    S2: 等待执行，入队超时 30s
+    S3: 执行中，已发送 CMD_TAG_LOCK
+    Failed: MCU 拒绝，清空 current_lci
+    Success: 状态匹配，回复成功
+    QueueTimeout: 入队超时，失败回复并删除命令
+    ExecTimeout: 执行超时，失败回复并清空 current_lci
+    Unsupported: level=3 当前禁用，回复参数错误
+    S0 --> S1: 收到密码回包 cmd_len=8
+    S1 --> S2: 收到云端 lock_dev 命令
+    S2 --> S3: 取队头并发送 CMD，执行超时 60s
+    S2 --> QueueTimeout: 等待超过 30s
+    S3 --> Failed: MCU 回包 error 非 0
+    S3 --> S3: MCU 接受，等待状态推送
+    S3 --> Success: 锁机/绑定状态符合预期
+    S3 --> ExecTimeout: 执行约 70s 仍未完成
+    S3 --> Unsupported: level=3 分支
+    Failed --> S1: 队列为空
+    Failed --> S2: 队列仍有命令
+    Success --> S1: 队列为空
+    Success --> S2: 队列仍有命令
+    QueueTimeout --> S1: 队列为空
+    QueueTimeout --> S2: 队列仍有命令
+    ExecTimeout --> S1: 队列为空
+    ExecTimeout --> S2: 队列仍有命令
+    Unsupported --> S1: 队列为空
+    Unsupported --> S2: 队列仍有命令
 ```
 
 ---
 
 ### 26.3 CAN 数据从接收到上报的完整流程图
 
-```
-                        CAN 总线（MCU 发出）
-                               │
-                               │ 每帧 20 字节（can_frame_t）
-                               ▼
-                 nanomsg SUB port 16002/16003/16004
-                               │
-                               │ nn_recv(..., NN_DONTWAIT)
-                               │ 返回 len 字节（可含多帧）
-                               ▼
-              ┌────────────────────────────────────┐
-              │    handle_can_msg(handle, port)     │  ← IO 接收线程
-              └────────────────┬───────────────────┘
-                               │
-                    size = len / sizeof(can_frame_t)
-                    分配 stub_can_msg_t[size] 数组
-                               │
-                    ┌──────────┴──────────┐
-                    │  循环处理每一帧 n    │
-                    └──────────┬──────────┘
-                               │
-              ┌────────────────▼────────────────────┐
-              │  parse_common_msg()                  │
-              │  ← data_process.c                   │
-              │                                      │
-              │  HASH_FIND_INT(data_rule[port],      │
-              │                frame.can_id, target) │
-              │  ├─ 找不到：返回 -1，跳过该帧          │
-              │  └─ 找到 target_rule：                │
-              │      set_common_data_item()          │
-              │        ├─ 有 data_item_list（叶节点）：│
-              │        │   对每个 data_item：          │
-              │        │   ① 位域提取（按字节序）       │
-              │        │   ② 有符号数补码展开           │
-              │        │   ③ 物理值 = raw*sc + pofs    │
-              │        │   ④ time_rcv = get_tick_count │
-              │        └─ 有 data_sub_rule_list：      │
-              │            逐个比对子规则 value         │
-              │            匹配则递归调用               │
-              └─────────────────────────────────────┘
-                               │
-              ┌────────────────▼────────────────────┐
-              │  parse_0x31B_msg()                   │
-              │  若 can_id != 0x31B → 直接跳过        │
-              │  data[0]==0x06 → memcpy 软件版本(7B)  │
-              │  data[0]==0x07 → memcpy VIN[0..6]    │
-              │  data[0]==0x08 → memcpy VIN[7..13]   │
-              │  data[0]==0x09 → memcpy VIN[14..16]  │
-              └─────────────────────────────────────┘
-                               │
-              过滤扩展帧：can_id>>28 > 9 → continue（不上报）
-                               │
-              填充 can_msg[valid_cnt]：
-                ts, bus_id, frame_type=data
-                id_type（标准帧/扩展帧）
-                id, length, data[8]
-              valid_cnt++
-                               │
-                    ┌──────────┴──────────┐
-                    │ 所有帧处理完成        │
-                    └──────────┬──────────┘
-                               │
-              if valid_cnt > 0：
-                               │
-              ┌────────────────▼────────────────────┐
-              │  stub_can_msg_entry_make_from()      │
-              │  → 将 can_msg[] 打包成               │
-              │    stub_can_msg_entry_t 结构体        │
-              │                                      │
-              │  stub_msg_entry_new(                 │
-              │    ts, stub_msg_type_can,            │
-              │    can_msg_entry, size)              │
-              │  → 封装为 stub_msg_entry_t           │
-              └─────────────────────────────────────┘
-                               │
-              stub_msg_reply(handle_pub_data,
-                             stub_topic_type_data_dev_raw_data,
-                             msg_entry, entry_size)
-                               │
-                               ▼
-              SCP port 11225（原始 CAN 帧实时上报）
-                               │
-              ┌────────────────┴────────────────────┐
-              │ 统计：                               │
-              │ can_msg_recv_cnt[port]++             │
-              │ can_msg_success/fail_cnt[port] += n  │
-              └─────────────────────────────────────┘
-                               │
-              nn_freemsg(msg)   free(can_msg)
 
-──────────── 每 10 秒：工况数据汇总上报（主线程）────────────────
 
-              report_dtp_msg()
-                               │
-              dtp_msg_header_make(&json, "", ts, post, "properties")
-              stub_msg_body_make(json, Object)
-              json_msg["type"] = "data_table"
-              json_data_tables = []
-                               │
-              iterate_data_rule(ro_handle, json_data_tables)
-                               │
-                    ┌──────────┴──────────────────┐
-                    │ for i in [0, 1, 2]（3路CAN） │
-                    └──────────┬──────────────────┘
-                               │
-              json_data_points = []
-                               │
-              HASH_ITER(hh, data_rule[i], rule, tmp)
-                               │
-              check_data_item_value_json(rule, json_data_points, ts)
-                    │
-                    ├─ rule 有 data_item_list：
-                    │   对每个 data_item：
-                    │   if data_item->time_rcv != 0（曾接收过）：
-                    │     构造 JSON 数据点对象：
-                    │     { ts, index, name, data_type, value }
-                    │     ─ INTEGER → data_type="int32"
-                    │     ─ NUMBER  → data_type="double"
-                    │     ─ BOOL    → data_type="boolean"
-                    │     ─ STRING  → data_type="string"
-                    │     加入 json_data_points[]
-                    │
-                    └─ rule 有 data_sub_rule_list：递归处理
-                               │
-              if i == 0：
-                add_extra_info_to_dtp()        ← 仅 CAN0 通道额外附加
-                  ├─ 软件版本非空 → index=106, name="St0001", string
-                  ├─ VIN码17字节 → index=107, name="St0002", string
-                  └─ pwr_volt>0  → index=61,  name="Nu0013", double (×0.001)
-                               │
-              if json_data_points 非空：
-                构造 data_table 条目：
-                { index=i+1, name="table1",
-                  channel_id=i+1, ts, data_points }
-                加入 json_data_tables[]
-                               │
-              if json_data_tables 非空：
-                cJSON_PrintUnformatted(json)
-                stub_msg_reply(handle_pub_data,
-                               stub_topic_type_data_dev_data,
-                               payload, len)
-                               │
-                               ▼
-              SCP port 11225（data_table 工况汇总上报）
+```mermaid
+flowchart TD
+    Bus[CAN 总线：can_frame_t，每帧 20 字节] --> Sub[nanomsg SUB 16002/16003/16004]
+    Sub --> Recv[nn_recv 非阻塞接收，可能含多帧]
+    Recv --> Handle[handle_can_msg：计算帧数并分配数组]
+    Handle --> Rule[parse_common_msg：按 CAN ID 查规则]
+    Rule --> Found{找到点表规则？}
+    Found -->|是| Decode[提取位域、补码展开、计算物理值并更新时间]
+    Found -->|否| Special
+    Decode --> Special[0x31B 专项解析：软件版本和 VIN 分段]
+    Special --> Filter{扩展帧 can_id>>28 > 9？}
+    Filter -->|是| Skip[跳过该帧]
+    Filter -->|否| Fill[填充 CAN ID、类型、长度和帧数据]
+    Skip --> More{还有帧？}
+    Fill --> More
+    More -->|是| Rule
+    More -->|否| Valid{valid_cnt > 0？}
+    Valid -->|否| Free[释放接收消息和数组]
+    Valid -->|是| Pack[打包 stub_can_msg_entry_t]
+    Pack --> Raw[原始帧上报 SCP port 11225]
+    Raw --> Stats[更新接收、成功和失败计数]
+    Stats --> Free
+    Timer[每 10s：report_dtp_msg] --> Json[创建 data_table JSON]
+    Json --> Iterate[遍历 CAN0/1/2 点表规则和子规则]
+    Iterate --> Received{数据项 time_rcv 非 0？}
+    Received -->|是| Point[添加 ts、index、name、data_type、value]
+    Received -->|否| MoreItem{还有数据项？}
+    Point --> MoreItem
+    MoreItem -->|是| Iterate
+    MoreItem -->|否| IsCan0{当前通道是 CAN0？}
+    IsCan0 -->|是| Extra[附加非空软件版本、VIN、有效 MCU 电压]
+    IsCan0 -->|否| Table[非空数据点组成 data_table 条目]
+    Extra --> Table
+    Table --> Any{存在数据表条目？}
+    Any -->|是| DTP[data_dev_data 上报至 SCP 11225]
+    Any -->|否| End([本周期结束])
 ```
 
 ---
@@ -2586,119 +2236,43 @@ release（失败路径）:
 
 本程序有两个消息队列，分属不同方向、不同线程角色：
 
-```
-═══════════════════════════════════════════════════════════════════════
-         list_stub_msgs —— SCP 下行消息队列（云端 → 本程序）
-═══════════════════════════════════════════════════════════════════════
 
-  生产者：IO 接收侧（由 stub-linker 框架在 stub_run() 内触发回调）
-  ──────────────────────────────────────────────────────────────────
 
-  SCP port 11216 收到消息
-        │
-        ▼
-  on_stub_msg_received(handle, topic_type, msg, msg_len)
-  [此回调在主线程 stub_run() 调用栈内执行]
-        │
-        ├─ calloc(msg_cache_entry_t)
-        ├─ malloc(msg_len)，memcpy(msg, msg_len)
-        ├─ mce->topic_type = topic_type
-        │
-        ├─ stub_ro_try_lock()   ← 自旋等待互斥锁（最多 20s 打印死锁警告）
-        │
-        ├─ list_add_last(list_stub_msgs, mce)   ← 追加到队尾
-        │
-        └─ stub_ro_unlock()
-
-  消费者：主线程（在主循环 handle_stub_msgs() 中）
-  ──────────────────────────────────────────────────────────────────
-
-  handle_stub_msgs()
-        │
-        while list_size(list_stub_msgs) > 0：
-          │
-          ├─ stub_ro_try_lock()
-          ├─ list_remove_first(list_stub_msgs, &mce)   ← 取队头
-          ├─ stub_ro_unlock()
-          │
-          ├─ do_handle_stub_msg(handle, mce->topic_type, mce->msg, mce->len)
-          │    ├─ heartbeat      → on_stub_msg_heartbeat()
-          │    ├─ version        → on_stub_msg_version()
-          │    ├─ network_metric → on_stub_msg_network_metric()
-          │    ├─ lock_dev       → on_stub_msg_lock_dev()  →  list_lock_cmd_infoes 入队
-          │    ├─ cmd_dev        → on_stub_msg_cmd_dev()
-          │    ├─ info_dev       → on_stub_msg_info_dev()
-          │    └─ notify_dev     → on_stub_msg_notify_dev()
-          │
-          └─ release_msg(mce)   ← 释放缓存条目和消息内容
-
-  队列特性：无上限（依赖内存）；FIFO；mutex 保护
-
-═══════════════════════════════════════════════════════════════════════
-         list_msg_caches —— SCP 上行消息队列（本程序 → 云端）
-═══════════════════════════════════════════════════════════════════════
-
-  生产者（多处调用 push_msg()，均在主线程或定时器线程）
-  ──────────────────────────────────────────────────────────────────
-
-  调用来源                               topic_type             插入位置
-  ─────────────────────────────────────  ─────────────────────  ────────
-  do_reply_lock_msg_response()           lock_dev               队头（优先）
-  do_cmd_reply()                         cmd_dev                队头（优先）
-  report_dtp_msg()                       data_dev_data          队尾
-  report_condition_info()                data_filter_data       队尾
-  report_dev_info()                      info_dev               队尾
-  request_dev_info()                     info_dev               队尾
-  request_stub_heartbeat()               heartbeat              队尾
-  request_stub_version()                 version                队尾
-  broadcast_stub_version()               version                队尾
-  request_stub_network_status()          network_metric         队尾
-  do_config_action_request()（死代码）    config_dev             队尾
-
-  push_msg() 内部逻辑：
-        │
-        ├─ if list_size >= 1024：
-        │    list_remove_first()，release_msg()  ← 丢弃最旧消息并警告
-        │
-        ├─ calloc(msg_cache_entry_t)，malloc(len)，memcpy
-        │
-        └─ switch(topic_type)：
-             lock_dev / ota_dev / cmd_dev → list_add_first()  ← 插队头
-             其他                         → list_add()         ← 追加队尾
-
-  消费者：主线程（在主循环 handle_msg_caches() 中）
-  ──────────────────────────────────────────────────────────────────
-
-  handle_msg_caches()
-        │
-        while list_size(list_msg_caches) > 0：
-          │
-          ├─ list_remove_first(list_msg_caches, &mce)   ← 取队头（最高优先级）
-          │
-          ├─ stub_msg_reply(handle_pub_cmd, mce->topic_type, mce->msg, mce->len)
-          │    └─ 通过 stub-linker 发送到 SCP port 11215
-          │
-          ├─ 打印结果日志（succeeded/failed）
-          │
-          └─ release_msg(mce)
-
-  队列特性：上限 1024；优先队列（锁机/OTA/命令回复在头部）；单线程读写，无需锁
-
-═══════════════════════════════════════════════════════════════════════
-         list_lock_cmd_infoes —— 锁机命令执行队列
-═══════════════════════════════════════════════════════════════════════
-
-  生产者：主线程 on_stub_msg_lock_dev()
-        │ do_save_lock_cmd_info(ro_handle, lci)
-        └─ list_add(list_lock_cmd_infoes, lci)   ← 追加队尾
-
-  消费者：定时器线程 handle_cmd_timeout()（每1秒）
-        │ LIST_FOREACH(list_lock_cmd_infoes)
-        ├─ 超时（now >= lci->timeout）→ 直接失败回复，从队列删除
-        └─ current_lci==NULL → list_remove()，设 current_lci=lci，开始执行
-
-  队列特性：上限 1000；FIFO；
-            ⚠ 跨线程读写（主线程写、定时器线程读）无互斥锁保护
+```mermaid
+flowchart LR
+    subgraph Down[SCP 下行 list_stub_msgs：FIFO，mutex 保护]
+        SCPIn[SCP port 11216] --> Callback[on_stub_msg_received：复制消息]
+        Callback --> Enqueue[加锁并 list_add_last]
+        Enqueue --> Take[主线程 handle_stub_msgs：加锁取队头，再解锁]
+        Take --> Dispatch[do_handle_stub_msg 按 topic 分发]
+        Dispatch --> Topics[heartbeat、version、network_metric、lock_dev、cmd_dev、info_dev、notify_dev]
+        Dispatch --> Release[release_msg 释放缓存]
+        Dispatch --> LockEntry[lock_dev 转交锁机命令队列]
+    end
+    subgraph Up[SCP 上行 list_msg_caches：上限 1024，优先队列]
+        Producer[上报和回复函数调用 push_msg] --> Full{达到 1024 条？}
+        Full -->|是| Drop[丢弃最旧消息]
+        Full -->|否| Copy[复制消息条目]
+        Drop --> Copy
+        Copy --> Priority{lock_dev、ota_dev、cmd_dev？}
+        Priority -->|是| Head[list_add_first]
+        Priority -->|否| Tail[list_add]
+        Head --> Consume[主线程 handle_msg_caches 取队头]
+        Tail --> Consume
+        Consume --> Send[stub_msg_reply 至 SCP port 11215]
+        Send --> Free[记录结果并释放缓存]
+    end
+    subgraph Lock[锁机队列 list_lock_cmd_infoes：FIFO，上限 1000]
+        LockProducer[主线程 on_stub_msg_lock_dev] --> Save[do_save_lock_cmd_info / list_add]
+        LockEntry --> LockQueue[list_lock_cmd_infoes]
+        Save --> LockQueue
+        LockQueue --> Timer[定时器线程每秒 handle_cmd_timeout]
+        Timer --> Expire{命令超时？}
+        Expire -->|是| Fail[失败回复并移除]
+        Expire -->|否且 current_lci 为空| Start[取队头并开始执行]
+        Note[主线程写、定时器线程读，当前无互斥锁保护]
+        Timer -.-> Note
+    end
 ```
 
 ---

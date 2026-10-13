@@ -194,45 +194,34 @@ nvr-mearicloud/
 
 **启动序列（按代码顺序）：**
 
-```
-main()
-  │
-  ├─ nvr_init_signals()          # 注册信号处理（SIGINT/SIGTERM → nvr_exit_handler）
-  ├─ set_media_info()            # 初始化媒体参数（分辨率/码率/编码类型）
-  ├─ nv_tuya_wait_nvr_start()    # 阻塞等待底层NVR基础系统就绪
-  ├─ nv_tuya_init_share()        # 打开共享状态并读取通道数
-  ├─ nv_tuya_init_nvr_ipclist()  # 初始化子设备（IPC摄像头）参数列表
-  ├─ nv_tuya_start_preview()     # 启动预览流缓冲区
-  ├─ nv_tuya_start_speak()       # 启动对讲缓冲区
-  ├─ sleep(2)                    # 等待稳定
-  ├─ init_play_id()              # 初始化回放会话ID管理
-  ├─ pps_device_board_init()     # 初始化板级身份及能力信息
-  ├─ restful_webserver_init()    # 启动本地HTTP服务（80端口）
-  │
-  └─ 云端注册循环（while(1)）
-      ├─ pps_device_get_token()      # 从文件(/home/cfg/device.token)读token
-      ├─ pps_register_init()         # 向Meari云注册设备，获取context（含签名、服务器域名等）
-      ├─ nvr_mnsdk_init()            # 填充mnsdk_settings_t配置
-      └─ mnsdk_init()                # 初始化云端SDK（成功则break出循环）
-           失败 → sleep(5) → retry
-  │
-  ├─ nvr_init_dp_data()          # 分配能力/属性缓存、唤醒信号量存储及搜索数据
-  ├─ pthread_create(check_channel_thread)    # 通道连接状态检测线程
-  ├─ pthread_create(motion_detect_thread)   # 告警侦测线程
-  ├─ pthread_create(online_status_thread)   # 设备与SDK服务端连接状态检测线程
-  │
-  └─ while(1) sleep(60)          # 主线程守护循环
+```mermaid
+flowchart TD
+    A[main] --> B[注册信号处理]
+    B --> C[设置媒体参数]
+    C --> D[等待底层 NVR 就绪]
+    D --> E[初始化共享状态、IPC 列表、预览和对讲缓冲]
+    E --> F[等待 2 秒]
+    F --> G[初始化回放 ID、板级信息和 HTTP 服务]
+    G --> H[读取 token]
+    H --> I[向 Meari 云注册并获取 context]
+    I --> J[填充 mnsdk_settings_t]
+    J --> K{mnsdk_init 成功?}
+    K -->|否| L[等待 5 秒]
+    L --> H
+    K -->|是| M[分配 DP 缓存、唤醒数据和搜索数据]
+    M --> N[创建通道检测、告警侦测和在线状态线程]
+    N --> O[主线程每 60 秒休眠]
 ```
 
 **退出清理（nvr_exit_handler）：**
 
-```
-nvr_exit_handler()
-  ├─ nvr_deinit_dp_data()    # 释放DP数据
-  ├─ live_stop_all()         # 停止所有预览推流线程
-  ├─ playback_release()      # 释放回放资源
-  ├─ mnsdk_release()         # 释放云端SDK
-  └─ pthread_cancel(3个线程)
+```mermaid
+flowchart TD
+    A[nvr_exit_handler] --> B[释放 DP 数据]
+    B --> C[停止所有预览推流线程]
+    C --> D[释放回放资源]
+    D --> E[释放云端 SDK]
+    E --> F[取消 3 个后台线程]
 ```
 
 **关键数据结构：**
@@ -370,15 +359,25 @@ typedef struct {
 
 **推流流程：**
 
-```text
-thread_live_stream
-  → nv_tuya_get_frame
-    → nv_tuya_read_net_frame → NvNetBuf::readFrame
-  → 无帧/空帧：等待10ms后继续
-  → I帧：更新编码类型和分辨率；P帧沿用已记录编码
-  → 音频：只取主码流PCM；16kHz时重采样到8kHz，再转G711U
-  → 构造时间戳、序号、分辨率或采样信息
-  → mnsdk_stream_send(channel, 0, PREVIEW, ...)
+```mermaid
+flowchart TD
+    A[thread_live_stream] --> B[nv_tuya_get_frame]
+    B --> C[nv_tuya_read_net_frame]
+    C --> D[NvNetBuf::readFrame]
+    D --> E{有有效帧?}
+    E -->|否| F[等待 10 ms 后继续读取]
+    F --> B
+    E -->|是，视频 I 帧| G[更新编码类型和分辨率]
+    E -->|是，视频 P 帧| H[沿用已记录编码信息]
+    E -->|音频| I[仅取主码流 PCM]
+    I --> J{采样率为 16 kHz?}
+    J -->|是| K[重采样到 8 kHz 并转 G711U]
+    J -->|否| L[沿用当前采样率并转 G711U]
+    G --> M[构造时间戳、序号、分辨率或采样信息]
+    H --> M
+    K --> M
+    L --> M
+    M --> N[mnsdk_stream_send: PREVIEW]
 ```
 
 视频通常复用读取的帧数据地址；音频转换使用线程局部缓冲。SDK 是否同步复制载荷需要接口合约确认，不能从该调用直接推出发送后的缓冲所有权。
@@ -413,17 +412,19 @@ SDK 数据回调复制 `playback_info_t`、读取 command 和 `reserved[0]`，�
 
 **播放对象关系：**
 
-```text
-(channel,sid)
-  → g_playbakck_paly_id[36] 中的 play_id
-  → play_t[play_id]
-  → nv_playback_create(play_id,nvr_send_data_cb,MEARI_PLAYBACK_BASEID)
-    → userid = play_id + id_base
-    → StorageRPC::playbackCreate(userid) 获得底层 taskId
-    → 创建信号、消息队列，启动 PlayBackThreadProc，等待启动通知
-  → nv_playback_start_bytime：指定一天起止时间和目标播放时刻
-  → NvNetBuf::PbRequestReadFrame → nvr_send_data_cb → SDK发送
-  → PbCommitRead：提交已消费帧
+```mermaid
+flowchart TD
+    A[(channel, sid)] --> B["g_playbakck_paly_id[36] 查找 play_id"]
+    B --> C["play_t[play_id]"]
+    C --> D[nv_playback_create]
+    D --> E[计算 userid = play_id + id_base]
+    E --> F[StorageRPC::playbackCreate 获取底层 taskId]
+    F --> G[创建信号和消息队列，启动 PlayBackThreadProc 并等待启动通知]
+    G --> H[nv_playback_start_bytime 指定时间范围与目标播放时刻]
+    H --> I[NvNetBuf::PbRequestReadFrame]
+    I --> J[nvr_send_data_cb]
+    J --> K[SDK 发送]
+    K --> L[PbCommitRead 提交已消费帧]
 ```
 
 工作线程处理暂停/开始标志、seek 标记、结束帧、目标结束时间及 I/P 帧选择。发送回调返回 `NV_RETRY` 时等待 5ms，保留当前帧重试；正常处理后提交读位置。seek 期间有丢帧和标记处理。销毁对象先停止/销毁底层任务，设置退出标志、投递线程结束消息，再等退出信号并释放资源。
@@ -623,10 +624,17 @@ DP入口允许0至N，媒体回调允许0至N-1，具体辅助函数又采用不
 
 set不是事务：每个字段依次执行，后续失败不会自动撤销前面已经提交的操作。翻转/日夜先写本地缓存，然后下发RPC；底层flip/daynight接口再向IPC管理消息队列投递。RPC成功至少说明该同步调用走到了队列投递返回点，不等于摄像头已完成操作。真正的设备调用成功后，IPC管理更新自身状态并发出CHG_FLIP/CHG_DAY_NIGHT事件；本进程事件线程再更新DP缓存。
 
-```text
-云端set → 本进程缓存预更新 → 控制RPC → base参数检查
-  → IPC管理消息入队 → 异步设备接口调用
-  → 成功后base状态更新/配置事件 → 本进程DP缓存刷新
+```mermaid
+flowchart TD
+    A[云端 set] --> B[本进程缓存预更新]
+    B --> C[控制 RPC]
+    C --> D[base 参数检查]
+    D --> E[IPC 管理消息入队]
+    E --> F[异步调用设备接口]
+    F --> G{设备接口调用成功?}
+    G -->|是| H[base 更新状态并发布配置事件]
+    H --> I[本进程 DP 缓存刷新]
+    G -->|否| J[设备状态不更新]
 ```
 
 `pps_get_ipc_dp_data()` 在集中读取全部属性之前便设置data_valid；多个getter错误未统一改变该有效标记。因此data_valid意味着缓存被装填过的流程状态，不能单独当作每项读取都成功的保证。原始值、转换值、默认响应值与缓存值需要分别排查。
@@ -682,19 +690,23 @@ PTZ当前只识别全0停止、ps=±80左右、ts=±20上下且其他分量为0�
 
 ### 4.9 OTA固件升级模块 (nvr_upgrade)
 
-```text
-DP_OTA_UPGRADE（JSON字符串：url/version，外层channel）
-  → pps_device_upgrade_by_url：复制参数、检查URL前缀/升级状态、创建线程
-  → pps_firmware_url_upgrade
-    → 禁止回放并释放现有回放
-    → trylock升级互斥锁，设置下载进度0
-    → pps_download_ota
-      → http_fopen / http_fsize / http_fseek
-      → 分块http_fread → nv_tuya_send_ota_package
-      → 累计字节更新下载百分比
-    → 下载100%时调用nv_tuya_sys_updatefw_do
-    → 恢复回放、释放升级锁
-另一路：thread_upgrade_percent_send → SDK配置响应
+```mermaid
+flowchart TD
+    A[DP_OTA_UPGRADE: JSON url / version，外层含 channel] --> B[pps_device_upgrade_by_url 复制参数]
+    B --> C[检查 URL 前缀与升级状态并创建线程]
+    C --> D[pps_firmware_url_upgrade]
+    D --> E[禁止回放并释放现有回放]
+    E --> F[trylock 升级互斥锁并将下载进度置 0]
+    F --> G[pps_download_ota]
+    G --> H[http_fopen / http_fsize / http_fseek]
+    H --> I[分块 http_fread]
+    I --> J[nv_tuya_send_ota_package]
+    J --> K[按累计读取字节更新下载百分比]
+    K --> L{下载进度到 100%?}
+    L -->|否| I
+    L -->|是| M[调用 nv_tuya_sys_updatefw_do]
+    M --> N[恢复回放并释放升级锁]
+    O[thread_upgrade_percent_send] --> P[SDK 配置响应]
 ```
 
 **当前实现的实际限制：**
@@ -714,13 +726,17 @@ DP_OTA_UPGRADE（JSON字符串：url/version，外层channel）
 
 业务下载块不是一次完整RPC载荷。`StorageRPC::nv_send_ota_package()` 按 `OTA_PACK_SIZE=1000` 再切分，携带chan、total_len、size、off，经命令200 `SRPC_CMD_send_ota_data` 逐块发送。RPC服务端调用 `nv_sys_recv_ota_data()`，其返回值能逐级回到业务下载函数，但业务当前忽略该返回值。
 
-```text
-HTTP读取块 → 业务nv_tuya_send_ota_package
-  → rpcclient按1000字节切片 → SRPC_CMD_send_ota_data
-  → base nv_sys_recv_ota_data → OTA缓冲
-下载结束 → SRPC_CMD_fw_upgrade
-  → base nv_sys_updatefw_do → 异步updatefw_do_task
-  → 整机pps_device_upgrade_by_buffer / IPC nv_ipcm_updatefw
+```mermaid
+flowchart TD
+    A[HTTP 读取块] --> B[业务 nv_tuya_send_ota_package]
+    B --> C[rpcclient 按 1000 字节切片]
+    C --> D[SRPC_CMD_send_ota_data]
+    D --> E[base nv_sys_recv_ota_data]
+    E --> F[OTA 缓冲]
+    F --> G[下载结束: SRPC_CMD_fw_upgrade]
+    G --> H[base nv_sys_updatefw_do]
+    H --> I[异步 updatefw_do_task]
+    I --> J[整机 pps_device_upgrade_by_buffer / IPC nv_ipcm_updatefw]
 ```
 
 #### 4.9.2 base OTA缓冲状态与目标选择
@@ -786,16 +802,16 @@ RPC 目录包含六个 C++ 实现，不是仅有头文件。其职责是把业�
 
 ### 5.1 控制请求与服务端
 
-```text
-业务 pps_set_* / nv_tuya_*
-  → StorageRPC::<具体操作>
-  → 构造 SRPC_Request（cmd + 参数）
-  → StorageRPC::call
-    → connect(AF_UNIX, /tmp/nvrbase.rpc)
-    → send_req / read_rsp
-    → close
-  → nvRpcApiServer 根据 cmd 分派底层业务
-  → SRPC_Response 返回结果
+```mermaid
+flowchart TD
+    A[业务 pps_set_* / nv_tuya_*] --> B[StorageRPC 具体操作]
+    B --> C[构造 SRPC_Request: cmd + 参数]
+    C --> D[StorageRPC::call]
+    D --> E[connect AF_UNIX /tmp/nvrbase.rpc]
+    E --> F[send_req / read_rsp]
+    F --> G[close]
+    G --> H[nvRpcApiServer 按 cmd 分派底层业务]
+    H --> I[返回 SRPC_Response]
 ```
 
 请求/响应是本地 C/C++ 结构体协议。维护时需要对照 `StorageRPCInner.h` 的命令及布局、客户端参数填充、服务端提取和返回值；不同平台位宽、结构布局、错误传播不能凭函数声明推断一致。传输层代码有有限次数的读写循环，但不能据此称存在可靠的端到端超时，阻塞套接字和错误处理分支需单独检查。
@@ -1007,51 +1023,68 @@ flowchart TD
 
 ### 8.2 实时预览数据流
 
-```text
-IPC/设备媒体 → base缓冲写入（摄像头接入协议由底层负责）
-  → CHn-Streamm-net / NvNetBuf
-  → 本进程按通道创建的主、辅取流线程
-  → 视频元数据更新 / 主码流PCM转G711U
-  → mnsdk_stream_send(channel,sid=0,PREVIEW,...)
-  → SDK管理的远程传输
+```mermaid
+flowchart LR
+    A[IPC / 设备媒体] --> B[base 缓冲写入]
+    B --> C[CHn-Streamm-net / NvNetBuf]
+    C --> D[本进程主、辅取流线程]
+    D --> E[更新视频元数据 / 主码流 PCM 转 G711U]
+    E --> F[mnsdk_stream_send: PREVIEW]
+    F --> G[SDK 管理的远程传输]
 ```
 
 ### 8.3 告警及事件数据流
 
-```text
-base → app-msg-push共享事件缓冲 → thread_md_proc
-  ├─ 已映射告警 → 大小/通道检查 → mnsdk_event_publish_request
-  ├─ 无图事件 → NULL/0载荷发布
-  ├─ 连接成功 → 更新能力/属性缓存 → sem_post唤醒等待者
-  ├─ 配置变更 → 更新IPC属性
-  └─ 搜索结果 → 保存在线IPC列表
+```mermaid
+flowchart TD
+    A[base] --> B[app-msg-push 共享事件缓冲]
+    B --> C[thread_md_proc]
+    C --> D{事件类型}
+    D -->|已映射告警| E[检查大小和通道]
+    E --> F[mnsdk_event_publish_request]
+    D -->|无图事件| G[以 NULL / 0 载荷发布]
+    D -->|连接成功| H[更新能力和属性缓存]
+    H --> I[sem_post 唤醒等待者]
+    D -->|配置变更| J[更新 IPC 属性]
+    D -->|搜索结果| K[保存在线 IPC 列表]
 ```
 
 ### 8.4 回放控制与数据流
 
-```text
-SDK数据回调 → command/channel/sid/params检查
-  ├─ 月检索 → 月位图 → search->result
-  ├─ 日检索 → 分配搜索buf → RPC检索 → 共享FILE_INFO
-  │           → 格式化search->result → 释放搜索buf
-  └─ 播控 → play_id → 本地play_handle ↔ base taskId
-             → 控制RPC：start/pause/resume/seek/stop
-             → 数据缓冲：请求读帧 → nvr_send_data_cb → SDK
-                           → 成功消费后commit，NV_RETRY保留重试
+```mermaid
+flowchart TD
+    A[SDK 数据回调] --> B[检查 command / channel / sid / params]
+    B --> C{请求类型}
+    C -->|月检索| D[生成月位图]
+    D --> E[写入 search->result]
+    C -->|日检索| F[分配搜索缓冲]
+    F --> G[RPC 检索并读取共享 FILE_INFO]
+    G --> H[格式化 search->result]
+    H --> I[释放搜索缓冲]
+    C -->|播控| J[play_id 映射本地 play_handle 与 base taskId]
+    J --> K[控制 RPC: start / pause / resume / seek / stop]
+    J --> L[请求数据缓冲读帧]
+    L --> M[nvr_send_data_cb 将数据交给 SDK]
+    M --> N{SDK 消费结果}
+    N -->|成功| O[commit 已消费数据]
+    N -->|NV_RETRY| P[保留数据并重试]
 ```
 
 ### 8.5 DP配置及异步响应流程
 
-```text
-SDK request/notify → pps_iot_config_request
-  → 解析code/name/action/channel/seq
-  → code=100001,name=iot
-    ├─ get → 全量集合或按ID分派 → 读取/构造响应
-    │          注意HD_FORMAT分支会触发格式化，不是纯读取
-    └─ set → 逐字段解析 → pps_set_* / 文件存储 / IPC管理 / OTA
-  → 普通路径mnsdk_config_response
-  → reset/reboot后续动作
-  → 格式化/OTA进度线程继续响应
+```mermaid
+flowchart TD
+    A[SDK request / notify] --> B[pps_iot_config_request]
+    B --> C[解析 code / name / action / channel / seq]
+    C --> D{code=100001 且 name=iot?}
+    D -->|get| E[全量集合或按 ID 分派]
+    E --> F[读取或构造响应；HD_FORMAT 可能触发格式化]
+    D -->|set| G[逐字段解析]
+    G --> H[pps_set_* / 文件存储 / IPC 管理 / OTA]
+    F --> I[普通路径 mnsdk_config_response]
+    H --> I
+    I --> J[执行 reset / reboot 后续动作]
+    I --> K[格式化或 OTA 进度线程继续响应]
 ```
 
 对应实现与异常边界分别见4.1、4.4—4.9和第5节。

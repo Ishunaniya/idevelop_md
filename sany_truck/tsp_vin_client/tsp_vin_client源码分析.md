@@ -245,25 +245,25 @@ CAN 线程 `select()` 轮询 fd（超时 100ms），`read` 最多 1440B，按 `s
 
 ## 10. 完整数据流（端到端）
 
-```
-                         [本机 MQTT broker] ── 平台下行指令
-                                  │ (订阅, 加密线程 client_mosquitto.c 不可读)
-                                  ▼
-[MQTT线程] 解析 8F42车辆信息JSON(frame.c:parse_8f42_vehicle_info) / 远程设置(8F41)
-     ├─ 写 vehicle_info(VIN/车型/波特率/K值) · set_speed_val · battery_charge_allow
-     │        │ 共享(无锁)
-     ▼        ▼
-[主循环 每1s, ACC on] ── TBOX→CAN 广播:
-     ├─ VIN 0x19FFB0FC(分4帧) → can_fd[0]&[1]
-     ├─ GPS 0x18FEF3FC / 车速 0x0CFE6CFC / 限速+高程 0x18FEE8FC
-     ├─ 授时 0x18FEE6FC / 版本 0x18FF00D7 / 车型码 0x1AD6AE4A
-     └─ 补电唤醒 0x18FFA2FC (battery_charge_allow==2, 30次)
-                                  ▲ 读 set_speed_val 等
-        [GPS线程] 127.0.0.1:16005 → gps_info (每1s)
-                                  
-[CAN线程] can_msg_process ← can_fd[0..1] (16002/3)
-     ├─ make_full_version: 各ECU版本采集 → version_cfg 缓存
-     └─ 采集 soc/charge_status/battery_charge_flag/isIncharge/feedback_0fbd(标定回读)
+```mermaid
+flowchart TD
+    Broker[本机 MQTT broker] -->|平台下行指令：订阅| MQTT[MQTT 线程：处理 8F42 车辆信息 JSON / 8F41 远程设置]
+    MQTT -->|parse_8f42_vehicle_info| Vehicle[vehicle_info：VIN、车型、波特率、K 值]
+    MQTT --> Speed[set_speed_val]
+    MQTT --> Charge[battery_charge_allow]
+    Vehicle -->|共享状态| Main[主循环：每 1s，ACC on]
+    Speed --> Main
+    Charge --> Main
+    Main -->|VIN：0x19FFB0FC，4 帧| CANOut[TBOX → CAN 广播]
+    Main -->|GPS 0x18FEF3FC、车速 0x0CFE6CFC、限速/高程 0x18FEE8FC| CANOut
+    Main -->|授时 0x18FEE6FC、版本 0x18FF00D7、车型码 0x1AD6AE4A| CANOut
+    Main -->|battery_charge_allow=2 时，补电唤醒 0x18FFA2FC 共 30 次| CANOut
+    GPS[GPS 线程：127.0.0.1:16005，每 1s] --> GPSInfo[gps_info]
+    GPSInfo --> Main
+    CANOut --> CANBus["can_fd[0] / can_fd[1]"]
+    CANBus --> CanThread[CAN 线程：can_msg_process，16002/3]
+    CanThread --> Version[make_full_version：ECU 版本 → version_cfg 缓存]
+    CanThread --> Feedback[采集 SOC、充电状态、battery_charge_flag、isIncharge、feedback_0fbd]
 ```
 
 ---

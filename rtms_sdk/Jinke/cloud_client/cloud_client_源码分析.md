@@ -53,12 +53,14 @@
 
 ## 核心架构设计
 
-```text
-本地 MQTT / 本机 nanomsg ↔ 共享状态与消息队列
-                               ↕
-                    cloud_client 远端 MQTT ↔ 云 Broker
-                               │ 离线数据
-                               └→ SQLite / 内存缓存 → 条件满足后补传
+```mermaid
+flowchart LR
+    local[本地 MQTT / 本机 nanomsg] <--> state[共享状态与消息队列]
+    state <--> client[cloud_client]
+    client <--> remote[远端 MQTT / 云 Broker]
+    client -->|离线数据| cache[SQLite / 内存缓存]
+    cache -->|条件满足后| upload[补传]
+    upload --> remote
 ```
 
 本地与远端 Broker、注册、缓存和云端确认是不同阶段；源码中的本地 publish 成功不等于云平台处理成功。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -80,13 +82,18 @@
 
 ## 关键流程与数据流
 
-~~~text
-配置 / 区域选择 → 远端连接与注册
-符合主题与连接状态条件的本地 MQTT 消息 → 待发队列 → 远端 MQTT
-符合历史条件的工况/定位消息 → 内存或 SQLite 缓存
-远端命令 → 本地主题或 nanomsg → 本机处理方 / 回复
-缓存数据 → 满足补传条件后重发
-~~~
+```mermaid
+flowchart TD
+    config[配置 / 区域选择] --> connect[远端连接与注册]
+    local[本地 MQTT 消息] --> eligible{符合主题和连接状态条件?}
+    eligible -->|是| queue[待发队列]
+    queue --> remote[远端 MQTT]
+    local -->|符合历史条件的工况 / 定位消息| cache[内存或 SQLite 缓存]
+    command[远端命令] --> forward[本地主题或 nanomsg]
+    forward --> handler[本机处理方 / 回复]
+    cache -->|满足补传条件| resend[重新发送]
+    resend --> remote
+```
 
 对应[初始化与区域](#analysis-3)、[连接注册](#analysis-4)、[数据与指令](#analysis-5)、[历史补传](#analysis-7)。本地发布、远端发送与云端业务确认是不同阶段。
 
@@ -143,24 +150,15 @@
 
 `main()` 对 `pthread_create()` 的返回值不作检查，线程间用若干 `sleep(1)` 错峰启动；这些休眠不是服务就绪确认。部分线程在入口 `pthread_detach()`，远端线程则由协调线程 `pthread_join()`。Mosquitto 网络循环另外通过 `mosquitto_loop_start()` 启动库线程。依据：`main.c:148-166`、`client_mosquitto.c:496-498,726-748,1100-1143,1179-1182,1240-1243`。
 
-```text
-main 启动
-  │
-  ▼
-打开 /tmp/cloud_client.pid 并尝试 flock
-  ├─ 锁被其他实例持有（EWOULDBLOCK）→ 退出 1
-  └─ 加锁成功，或打开/加锁遇到其他错误 → 登记 CPActive → 云状态写 0 → 初始化 Mosquitto
-                                      │
-                                      ▼
-                                 dev_info_init()
-                                      ├─ 失败 → 返回 -1
-                                      └─ 成功 → 启动 nanomsg、本地 MQTT 线程
-                                                  ↓
-                                              选择国内/海外域名
-                                                  ↓
-                                  启动注册协调、远端 MQTT、回复、历史、保活线程
-                                                  ↓
-                                         主线程每 10 秒休眠并循环
+```mermaid
+flowchart TD
+    start[main 启动] --> lock[打开 /tmp/cloud_client.pid 并尝试 flock]
+    lock -->|EWOULDBLOCK：其他实例持锁| exit[退出 1]
+    lock -->|加锁成功或其他打开 / 加锁错误| init[登记 CPActive、云状态写 0、初始化 Mosquitto]
+    init --> setup[初始化配置、消息队列与本地 / 远端连接任务]
+    setup --> threads[启动工作线程]
+    threads --> sleep[主线程每 10 秒休眠并循环]
+    sleep --> sleep
 ```
 
 图中“打开/加锁遇到其他错误仍继续”是 `is_instance_existing()` 的实际返回路径：`open()` 失败返回 `false`；`flock()` 失败但错误不是 `EWOULDBLOCK` 时也返回 `false`。只有锁被占用这一分支阻止启动，不能把该锁当作所有异常下都有效的单实例保证。`select_domain_cfg()` 返回值也未由 `main()` 检查。依据：`main.c:26-41,148-159`。
@@ -177,21 +175,22 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 区域选择 `domain_select:type` 支持 `domestic`、`oversea`、`auto`，缺少键时默认为 `auto`；默认 Broker 域名及端口来自 `common.c:88-141`。普通编译路径通过 nanomsg 网络回复读取 PLMN/运营商，优先看 PLMN `460`；带 `EG25`、`AG35GL`、`EC200A` 宏时使用模组 API 读取 MCC。自动模式总计约 10 分钟超时后回退海外；配置无效也回退海外并返回错误。普通路径若网络已在线却一直没有 PLMN/运营商，还设有约 9 分钟的单独等待阈值。依据：`cloud_dev.c:166-347`、`nn_sock.c:107-199`。
 
-```text
-读取 domain_select:type
-  ├─ domestic → 国内业务 Broker + 国内注册 Broker
-  ├─ oversea  → 海外业务 Broker + 海外注册 Broker
-  ├─ auto
-  │    ├─ EG25 / AG35GL / EC200A：模组 API 读取 MCC
-  │    │    ├─ MCC = 460 → 国内
-  │    │    ├─ 其他有效 MCC → 海外
-  │    │    └─ 约 10 分钟无有效值 → 海外
-  │    └─ 其他编译路径：nanomsg 查询 PLMN / 运营商
-  │         ├─ PLMN 前缀 460，或运营商 CHN/CHINA → 国内
-  │         ├─ 其他有效值 → 海外
-  │         └─ 超时无有效值 → 海外
-  ├─ 缺少 type 字段 → 默认 auto，按上面的 auto 分支处理
-  └─ type 值无效 → 海外（整个文件缺失的行为另见正文）
+```mermaid
+flowchart TD
+    start[读取 domain_select:type] --> type{type 值}
+    type -->|domestic| domestic[选择国内业务 Broker + 国内注册 Broker]
+    type -->|oversea| oversea[选择海外业务 Broker + 海外注册 Broker]
+    type -->|auto 或缺少字段| path{编译路径}
+    path -->|EG25 / AG35GL / EC200A| mcc[通过模组 API 读取 MCC]
+    mcc -->|MCC = 460| domestic
+    mcc -->|其他有效 MCC| oversea
+    mcc -->|约 10 分钟无有效值| oversea
+    path -->|其他编译路径| plmn[nanomsg 查询 PLMN / 运营商]
+    plmn -->|PLMN 前缀 460 或 CHN / CHINA| domestic
+    plmn -->|其他有效值| oversea
+    plmn -->|超时无有效值| oversea
+    type -->|无效值| oversea
+    type -->|配置文件整体缺失| missing[按正文所述单独处理]
 ```
 
 `/opt/conf_ext2.ini` 整个文件加载失败时，读取函数直接返回 `-1`，而 `dev_info_init()` 不检查这个返回值。字段的回退值只适用于 INI 成功加载后的缺失字段；文件不存在时无法据此断言连接配置有效。依据：`common.c:78-146`、`cloud_dev.c:96-108`。
@@ -204,24 +203,26 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 连接被拒时，回调把当前候选标为失败并唤醒注册协调线程。协调线程要求旧远端线程退出，再等待 10 秒；若机器序列号可读、模型 ID 有效且所有候选都被标失败，就启动临时注册连接；否则轮换下一候选并新建远端线程。注册连接用租户、模型、设备 ID 组装 client ID，按源码中的 MD5 公式生成密码，登录注册 Broker 后订阅 `v4/s/register`。收到注册响应时解析 `body.results.username/password` 并保存，临时注册线程在连接断开后才退出；若没有获得凭据，协调线程调用 `exit(1)`。依据：`client_mosquitto.c:547-565,927-1143`、`json_parse.c:296-347`、`common.c:489-535`。
 
-```text
-选择首组凭据（conf2.ini 有效时优先，否则用 conf.ini）
-  ↓
-连接远端 MQTT
-  ├─ 成功 → 订阅云主题 → cloud_status 写 2 → 进入业务循环
-  ├─ 普通网络/DNS 失败 → 原连接路径重试
-  └─ 连接被拒 → 标记本组失败 → 通知注册协调线程
-                                 ↓
-                         停旧远端线程并等待 10 秒
-                                 ↓
-                 序列号/模型 ID 可用，且候选凭据全失败？
-                      ├─ 否 → 轮换下一组凭据 → 重新连接远端 MQTT
-                      └─ 是 → 连接注册 Broker 并订阅 v4/s/register
-                                   ↓
-                      ├─ 收到含用户名/密码的响应 → 解析回调立即尝试保存 conf2.ini
-                      │                            ↓
-                      │                      等注册连接断开 → 重建远端连接
-                      └─ 断开时仍无用户名/密码 → exit(1)
+```mermaid
+flowchart TD
+    creds[选择首组凭据：有效 conf2.ini 优先，否则 conf.ini] --> connect[连接远端 MQTT]
+    connect -->|成功| subscribe[订阅云主题]
+    subscribe --> status[cloud_status 写 2]
+    status --> loop[进入业务循环]
+    connect -->|普通网络 / DNS 失败| retry[原连接路径重试]
+    retry --> connect
+    connect -->|连接被拒| rejected[标记本组失败并通知注册协调线程]
+    rejected --> stop[停止旧远端线程并等待 10 秒]
+    stop --> candidate{序列号 / 模型 ID 可用，且候选凭据全失败?}
+    candidate -->|否| rotate[轮换下一组凭据]
+    rotate --> connect
+    candidate -->|是| register[连接注册 Broker 并订阅 v4/s/register]
+    register --> response{收到包含用户名 / 密码的响应?}
+    response -->|是| save[解析回调立即尝试保存 conf2.ini]
+    save --> disconnect[等待注册连接断开]
+    disconnect --> reconnect[重建远端连接]
+    reconnect --> connect
+    response -->|否，连接断开| exit[exit(1)]
 ```
 
 这里的“连接被拒”特指回调中 `result == MOSQ_ERR_CONN_REFUSED` 的分支；普通 DNS/网络连接失败走重试路径，不自动等价于注册触发。注册客户端源码没有主动发布注册请求消息，实际协议交互需由注册 Broker 行为证实。注册响应中的 `hasError` 被存入状态，但协调线程判断成功只检查用户名/密码非空，见 `json_parse.c:296-347` 与 `client_mosquitto.c:1119-1135`。远端连接成功还可能覆盖保存 `/opt/conf2.ini`，见 `client_mosquitto.c:545-555`。
@@ -232,20 +233,24 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 本地连接回调订阅四种工况/定位源、schema、系统信息以及 OTA、锁、文件、配置、实时数据、命令等回复主题。收到 schema 时只更新内存字节数组并清 `cbor_schema_report`；收到系统信息时比较 `body.info`，有变化才替换并清上报标志。其他本地消息按远端连接状态分流。依据：`client_mosquitto.c:214-427`。
 
-```text
-本地 MQTT 收到非空消息
-  ├─ schema / 系统信息 → 更新内存缓存与上报标志 → 返回
-  └─ 其他主题
-       ├─ 远端已连接
-       │    ├─ 尚未完成首次对时 → 丢弃该消息
-       │    └─ 已对时
-       │         ├─ 四种工况/定位主题 → 实时队列（达 100 条先移除旧消息）
-       │         └─ 其他已订阅主题 → 回复队列
-       └─ 远端未连接
-            ├─ 非四种工况/定位主题 → 不缓存
-            └─ 四种工况/定位主题 → 历史内存队列
-                 ├─ SD 卡初始化检查通过且累计 10 条 → 批量写 SQLite
-                 └─ SD 卡不可用且累计 100 条 → 移除旧消息
+```mermaid
+flowchart TD
+    msg[本地 MQTT 收到非空消息] --> topic{消息主题 / 类型}
+    topic -->|schema / 系统信息| update[更新内存缓存与上报标志后返回]
+    topic -->|其他主题| connected{远端已连接?}
+    connected -->|是| synced{已完成首次对时?}
+    synced -->|否| discard[丢弃该消息]
+    synced -->|是| workTopic{四种工况 / 定位主题?}
+    workTopic -->|是| realtime[进入实时队列；达到 100 条先移除旧消息]
+    workTopic -->|否| reply[进入回复队列]
+    connected -->|否| offlineClass{四种工况 / 定位主题?}
+    offlineClass -->|否| ignore[不缓存]
+    offlineClass -->|是| history[进入历史内存队列]
+    history --> sd{SD 卡初始化检查通过且累计 10 条?}
+    sd -->|是| db[批量写 SQLite]
+    sd -->|否| capacity{SD 卡不可用且累计 100 条?}
+    capacity -->|是| drop[移除旧消息]
+    capacity -->|否| history
 ```
 
 | 本地源主题 | 远端在线的实时发布 | 历史补传发布 | 源码位置 |
@@ -277,22 +282,25 @@ SD 卡检查以 `/media/sdcard` 为真实挂载点，检查只读、至少 `500�
 
 数据库文件固定为 `/media/sdcard/mqtt_history.db`，表 `mqtt_cache(id, topic, payload)`，元数据表 `mqtt_cache_meta(row_count)`；打开时设置 WAL、`synchronous=NORMAL` 和 500 ms busy timeout。`sdcard_check()` 要求挂载、可写、至少 500 MiB 剩余；另一个 `check_space()` 用 80% 占用率和 10 MiB 空间阈值，但该检查只在单条插入函数后调用，批量插入路径没有调用它。当前本地回调走批量插入；单条插入函数在本目录没有调用者。`check_db_integrity()`、`free_space()`、`delete_all_rows()` 也没有进入当前主流程。依据：`db_manage.c:19-101,150-266,303-499,612-633`、`cloud_dev.c:75-140`、`sdcard_check.c:45-79`。
 
-```text
-远端离线收到四种工况 → 加入 history_list
-  ├─ SD 卡启动时检查通过，累计 10 条 → 事务写 mqtt_cache
-  └─ SD 卡不可用，累计 100 条 → 移除旧消息
-                          ↓
-                    远端重新连接
-                          ↓
-              cbor_schema_report 为 true？
-                  ├─ 否 → 每 5 秒继续等待
-                  └─ 是 → 从 SQLite 查询一条 → QoS 0 发布
-                              ├─ publish 返回成功 → 删除数据库一条
-                              └─ publish 失败 → 保留数据库记录
-                                      ↓
-                              尝试发布内存队列首条
-                                      ↓
-                              约 200 ms 后再次循环
+```mermaid
+flowchart TD
+    offline[远端离线收到四种工况] --> history[加入 history_list]
+    history --> sd{SD 卡启动时检查通过?}
+    sd -->|是：累计 10 条| db[事务写 mqtt_cache]
+    sd -->|否：累计 100 条| trim[移除旧消息]
+    db --> online[远端重新连接]
+    trim --> online
+    online --> schema{cbor_schema_report 为 true?}
+    schema -->|否| wait[每 5 秒继续等待]
+    wait --> schema
+    schema -->|是| read[从 SQLite 查询一条]
+    read --> publish[以 QoS 0 发布]
+    publish -->|publish 返回成功| delete[删除数据库一条]
+    publish -->|publish 失败| retain[保留数据库记录]
+    delete --> memory[尝试发布内存队列首条]
+    retain --> memory
+    memory --> delay[约 200 ms 后再次循环]
+    delay --> schema
 ```
 
 补传线程在远端连上后**无条件**等待 `cbor_schema_report`；`NOT_USED_SCHEMA=ON` 会跳过远端线程中的 schema 上报分支，却不会跳过历史线程的等待，因此不能仅凭开关名认为补传可工作。无 SD 卡时 `db_handle` 为空，`select_data_from_db()` 会返回错误，之后代码仍尝试内存队列；但未对返回值做处理，实际环境还需验证。依据：`client_mosquitto.c:806-831,1179-1238`、`db_manage.c:501-555`。
@@ -362,18 +370,18 @@ grep -E 'APP Version|dev_info_init failed|SD card status:|connected to local bro
 
 ### 11.2 总体排查流程图
 
-```text
-设备异常
-  ├─ 找不到 cloud_client 进程
-  │    ├─ 核对实际二进制和启动管理器
-  │    └─ 查单实例锁、CPActive 登记、dev_info_init 和数据库打开日志
-  └─ 进程存在
-       ├─ 本地 Broker 未连接 → 查本地 IP/端口、Broker、订阅日志
-       ├─ 远端 Broker 未连接 → 查区域选择、DNS、端口/TLS、认证/注册
-       └─ 远端 Broker 已连接
-            ├─ 工况不上报 → 查首次对时、schema、源主题、实时队列
-            ├─ 云端命令无响应 → 查远端订阅、本地转发、回复主题
-            └─ 离线数据不补传 → 查 schema 标志、SD 卡/数据库、历史线程
+```mermaid
+flowchart TD
+    symptom[设备异常] --> process{找不到 cloud_client 进程?}
+    process -->|是| startup[核对实际二进制和启动管理器；检查单实例锁、CPActive、dev_info_init、数据库打开日志]
+    process -->|否| local{本地 Broker 未连接?}
+    local -->|是| localcheck[查本地 IP / 端口、Broker 和订阅日志]
+    local -->|否| remote{远端 Broker 未连接?}
+    remote -->|是| remotecheck[查区域选择、DNS、端口 / TLS、认证 / 注册]
+    remote -->|否| issue{具体故障}
+    issue -->|工况不上报| report[查首次对时、schema、源主题和实时队列]
+    issue -->|云端命令无响应| cmd[查远端订阅、本地转发和回复主题]
+    issue -->|离线数据不补传| history[查 schema 标志、SD 卡 / 数据库和历史线程]
 ```
 
 ### 11.3 症状、证据与下一步

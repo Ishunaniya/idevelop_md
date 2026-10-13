@@ -55,14 +55,15 @@
 
 ## 核心架构设计
 
-```text
-本机 CAN / GPS / MCU → 车型解析 → gb6 或 fei_4 状态机
-                                      │
-                                      ↓
-                         data_signature ↔ /dev/ttySIGN
-                                      ↓
-                           企业平台 TCP 或 MQTT
-离线队列 ↔ SQLite；备案/激活使用另一路国家平台连接
+```mermaid
+flowchart LR
+    input[本机 CAN / GPS / MCU] --> parse[车型解析]
+    parse --> state[gb6 或 fei_4 状态机]
+    state <--> sign[data_signature ↔ /dev/ttySIGN]
+    sign --> platform[企业平台 TCP 或 MQTT]
+    queue[离线队列] <--> db[SQLite]
+    db -->|补传| sign
+    register[备案 / 激活] --> national[另一路国家平台连接]
 ```
 
 发动机参数选择国六或非四任务，车型参数影响 CAN 解析，TCP/MQTT 由编译选项选择；GPS 时间参数还影响取数及签名批量门槛。签名入队与平台确认不可等同。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -84,12 +85,18 @@
 
 ## 关键流程与数据流
 
-~~~text
-本机 CAN / GPS / MCU → 车型解析 → 国六或非四协议任务
-协议数据 → 按需签名 → 企业平台 TCP 或 MQTT
-未登录 / 离线等条件下的报文 → SQLite 历史 → 条件满足后补传
-国家平台备案 / 激活 → 独立连接
-~~~
+```mermaid
+flowchart TD
+    input[本机 CAN / GPS / MCU] --> parse[车型解析]
+    parse --> protocol[国六或非四协议任务]
+    protocol --> data[协议数据]
+    data --> sign[按需签名]
+    sign --> platform[企业平台 TCP 或 MQTT]
+    protocol -->|未登录 / 离线等条件| db[SQLite 历史]
+    db -->|条件满足后| resend[补传]
+    resend --> sign
+    register[国家平台备案 / 激活] --> national[独立连接]
+```
 
 车型、发动机参数和编译选项分别影响解析、协议任务和企业平台出口。依次看[启动图](#analysis-3)、[车型与 CAN](#analysis-5)、[协议线程图](#analysis-7)、[签名补传图](#analysis-8)和[平台出口](#analysis-9)。
 
@@ -137,31 +144,7 @@
 
 ## 3. 启动流程图
 
-下方先给出任何 Markdown 阅读器都能显示的文本流程图，随后是 Mermaid 版本。下面只画 `main()` 确实执行的分支。`pthread_create()` 的返回值没有逐项检查；局部 `tid` 被反复覆盖，末尾 `pthread_join(tid, NULL)` 只等待变量中最后留下的线程标识。创建失败时 `tid` 的有效性不能由这段代码保证，也不能视为统一管理全部线程。依据：`main.c:119-198`。
-
-```text
-main 入口
-  │
-  ├─安装 SIGPIPE 处理函数、输出版本
-  ├─解析 3 个参数
-  │    ├─通过 → 保存车型、发动机类型、GPS 时间开关
-  │    └─未通过 → 使用 VT_MIXER / HJ1239_UNDEF / GPS 时间关闭
-  ├─初始化共享状态、VIN、数据队列、数据库路径
-  │    └─失败 → 退出
-  ├─打开 SQLite、创建表
-  │    └─失败 → 退出
-  ├─芯片 ID 命令入签名队列、注册保活、连接 CAN 发布端口
-  ├─启动保活线程、CAN 接收线程、GPS/MCU 消息线程；等待 2 秒
-  ├─远端发送模式
-  │    ├─ENABLE_TCP_PLATFORM=ON  → TCP 线程
-  │    └─ENABLE_TCP_PLATFORM=OFF → MQTT 线程
-  ├─启动签名线程
-  └─发动机类型
-       ├─0、1       → fei4_task
-       ├─2、3、4、255 → gb6_task
-       └─其他       → 不启动协议线程
-  最后仅对 tid 变量中留下的线程标识调用 pthread_join
-```
+下图仅画 `main()` 确实执行的分支。`pthread_create()` 的返回值没有逐项检查；局部 `tid` 被反复覆盖，末尾 `pthread_join(tid, NULL)` 只等待变量中最后留下的线程标识。创建失败时 `tid` 的有效性不能由这段代码保证，也不能视为统一管理全部线程。依据：`main.c:119-198`。
 
 ```mermaid
 flowchart TD
@@ -253,30 +236,7 @@ SAC、STC 的国六解析处理 J1939 参数组及 BAM 多帧、IUPR 分帧，�
 
 ## 7. 协议线程流程图
 
-国六和非四线程结构相近，具体数据类型与时间常量不同。下图表示两者共有的控制分支；其中“已登录”指内存中的本地 `gb_login` 标志，不代表平台确认。备案流程和企业上报在循环中并列执行，备案成功不是企业平台登录的硬前置条件。先给出始终可见的文本图，再给出 Mermaid 图。依据：`src/gb6/gb6.c:863-1252`、`src/fei_4/fei4.c:684-908`。
-
-```text
-每轮协议线程（约 100 ms 一轮）
-  │
-  ├─有 VIN 且 registerStat 为 0？
-  │    ├─是 → 国家平台备案 step（连接 → 备案帧入签名队列 → 读/校验答复）
-  │    │         └─答复成功 → INI 写 registerStat=1
-  │    └─否/仍在等待 → 继续本轮
-  │
-  ├─CAN 活跃？
-  │    ├─否 → 实时队列转历史；若已登录且远端在线，尝试拆除报警和登出
-  │    └─是 → 有 VIN？
-  │              ├─否 → 本轮不生成新上报数据
-  │              └─是 → 企业平台在线？
-  │                        ├─否 → 实时队列转 SQLite；新数据存历史
-  │                        └─是 → 已登录？
-  │                                  ├─否 → 按 INI 状态登出或入队登录；新数据存历史
-  │                                  └─是 → 定时生成新数据，进入实时队列
-  │
-  ├─签名调度：在线且已登录时，SQLite 历史行优先于实时队列
-  ├─按车型执行 CAN 主动请求
-  └─休眠约 100 ms → 下一轮
-```
+国六和非四线程结构相近，具体数据类型与时间常量不同。下图表示两者共有的控制分支；其中“已登录”指内存中的本地 `gb_login` 标志，不代表平台确认。备案流程和企业上报在循环中并列执行，备案成功不是企业平台登录的硬前置条件。下方使用 Mermaid 图呈现这一控制分支。依据：`src/gb6/gb6.c:863-1252`、`src/fei_4/fei4.c:684-908`。
 
 ```mermaid
 flowchart TD
@@ -338,29 +298,7 @@ flowchart TD
 
 ## 8. 签名、发送与补传流程图
 
-文本流程图：
-
-```text
-产生实时/待补传数据
-  │
-  ├─离线或未登录 → 数据体写入 SQLite BLOB
-  │                     └─以后在线且已登录 → 读历史行 → 组成补发帧入签名队列
-  │                                              └─立即删所取 SQLite 行（早于发送确认）
-  └─在线且已登录 → 进入实时队列
-                         ├─SQLite 仍有历史 → 先处理历史
-                         └─SQLite 无历史   → 实时帧入签名队列
-
-签名队列 → /dev/ttySIGN 请求/回复校验
-  ├─校验失败 → 等待/重试；超过次数可能丢弃
-  └─校验通过 → 尝试重组帧（返回值未检查，仍把签名项标为 OK）
-                     ├─备案/激活帧 → 尝试写国家平台备案 socket
-                     ├─常规帧成功入队 → 企业平台发送队列
-                     │                   ├─TCP：socket_send
-                     │                   └─MQTT：包装 JSON 后 mosquitto_publish
-                     └─重组或入队失败 → 没有新的企业平台发送项
-```
-
-对应的 Mermaid 图：
+Mermaid 流程图：
 
 ```mermaid
 flowchart TD
@@ -467,30 +405,23 @@ TCP/MQTT 都是企业上报通道，不替代第 7.1 节的国家平台备案 so
 
 ### 13.1 故障排查图：先判断故障落在哪一段
 
-下面的纯文本图在不支持 Mermaid 的阅读器中也能显示；“有数据”应由真实输入或对应处理日志证明，`nn_connect` 成功只说明本地连接调用成功。
+下面的 Mermaid 图需要支持 Mermaid 的阅读器渲染；“有数据”应由真实输入或对应处理日志证明，`nn_connect` 成功只说明本地连接调用成功。
 
-```text
-设备异常 / 平台无数据
-  |
-  +-- 找不到 gb_client 进程、频繁重启
-  |     -> 核对启动参数、版本、初始化错误、SQLite 路径、CPActive
-  |
-  +-- 进程持续运行
-        |
-        +-- CAN 长时间无有效帧 / 出现 no can data
-        |     -> 本机 CAN 发布端、通道、帧结构、车型/发动机解析分支
-        |
-        +-- CAN 有效，但没有实时帧
-        |     -> VIN、启用条件、GPS 时间模式、车型打包函数、队列/入库
-        |
-        +-- 已产生待签名项，但没有完整平台帧
-        |     -> /dev/ttySIGN、请求/回复、CRC/R/S、重组函数返回值
-        |
-        +-- 已进入发送队列，但企业平台无记录
-        |     -> 先分辨 TCP/MQTT，再查连接、发送返回、平台侧回执
-        |
-        +-- 只报备案/登录异常
-              -> 单独查国家平台连接、VIN 和备案答复；不要把它与企业通道混同
+```mermaid
+flowchart TD
+    symptom[设备异常 / 平台无数据] --> process{找不到 gb_client 进程或频繁重启?}
+    process -->|是| startup[核对启动参数、版本、初始化错误、SQLite 路径和 CPActive]
+    process -->|否| can{CAN 长时间无有效帧或出现 no can data?}
+    can -->|是| cancheck[检查本机 CAN 发布端、通道、帧结构、车型 / 发动机解析分支]
+    can -->|否| realtime{CAN 有效但没有实时帧?}
+    realtime -->|是| data[检查 VIN、启用条件、GPS 时间模式、车型打包函数、队列 / 入库]
+    realtime -->|否| sign{有待签名项但没有完整平台帧?}
+    sign -->|是| signcheck[检查 /dev/ttySIGN、请求 / 回复、CRC / R / S 和重组函数返回值]
+    sign -->|否| queue{已进入发送队列但企业平台无记录?}
+    queue -->|是| send[区分 TCP / MQTT，再查连接、发送返回和平台侧回执]
+    queue -->|否| national{仅备案 / 登录异常?}
+    national -->|是| nationalcheck[单独查国家平台连接、VIN 和备案答复；与企业通道分开]
+    national -->|否| other[继续定位其他环节]
 ```
 
 ### 13.2 现场先保留的事实

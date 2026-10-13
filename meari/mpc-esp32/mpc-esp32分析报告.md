@@ -83,19 +83,16 @@
 
 ### 核心定位
 
-```text
-外部主控 / 主控网络驱动（不在本仓库）
-        │ SDIO：以太网帧、逻辑 SERIAL 控制帧、初始化事件
-        ▼
-ESP32-C6 固件 ppsapp
-  ├─ SDIO Slave + syslink：数据传输、接口分发、缓冲区管理
-  ├─ dsp_mcu：主控命令处理、异步 WiFi 事件、OTA
-  ├─ WiFi：本地 lwIP 与主控网络栈之间的接收分流
-  ├─ BLE：自定义 GATT 服务、缓存接收、主控读写
-  ├─ net_heart：主控代收发 TCP / 两槽位自主 TCP 心跳
-  └─ PM：保持连接时减少主控参与、GPIO 唤醒协调
-        │
-ESP-IDF + 仓库 SDK 补丁 + 13 个预编译射频/共存库
+```mermaid
+flowchart TD
+    A[外部主控 / 主控网络驱动，本仓库外] <-->|SDIO: 以太网帧、逻辑 SERIAL 控制帧、初始化事件| B[ESP32-C6 固件 ppsapp]
+    B --> C[SDIO Slave + syslink: 数据传输、分发和缓冲管理]
+    B --> D[dsp_mcu: 主控命令、异步 Wi-Fi 事件、OTA]
+    B --> E[Wi-Fi: 本地 lwIP 与主控网络栈接收分流]
+    B --> F[BLE: 自定义 GATT、缓存接收和主控读写]
+    B --> G[net_heart: TCP 代收发与双槽自主心跳]
+    B --> H[PM: 连接保持与 GPIO 唤醒协调]
+    I[ESP-IDF + 仓库 SDK 补丁 + 13 个预编译射频 / 共存库] --> B
 ```
 
 当前目录没有摄像头采集、视频编码、AI 检测或录像存储实现。它能转发来自主控的网络载荷，但没有对视频帧作解析或媒体处理的业务代码。协议里存在 PIR、电池、白灯和 AOV 模式字段，主要体现共享协议范围；对应请求在本工程多数进入不支持分支，不能据此称本工程实现了完整电池相机 MCU 功能。
@@ -189,18 +186,31 @@ mpc-esp32/
 
 ### 4.1 两条 SDIO 通路与本地协议栈
 
-```text
-主控网络帧 ── SDIO STA/AP ──► syslink recv_queue ──► WiFi internal_tx
-                                                             │ 空口
-主控网络栈 ◄── SDIO STA/AP ◄── syslink OTHER 队列 ◄── WiFi RX 分流
-                                                      ├─ lwIP：DHCP/心跳
-                                                      └─ 双送：ARP/DNS
-
-主控命令 ── SDIO SERIAL ──► dsp_mcu 接收队列 ──► 协议解析/业务 switch
-                                                     ├─ WiFi/BLE/心跳
-                                                     ├─ OTA 分区操作
-                                                     └─ PM 请求
-主控响应 ◄── SDIO SERIAL ◄── syslink SERIAL 优先队列 ◄─ 封包/事件/日志
+```mermaid
+flowchart LR
+    subgraph Network[网络帧通路]
+        A[主控网络帧] --> B[SDIO STA / AP]
+        B --> C[syslink recv_queue]
+        C --> D[WiFi internal_tx]
+        D --> E[空口]
+        E --> F[WiFi RX 分流]
+        F --> G[本地 lwIP: DHCP / 心跳]
+        F --> H[ARP / DNS 双送]
+        F --> I[syslink OTHER 队列]
+        I --> J[SDIO STA / AP]
+        J --> K[主控网络栈]
+    end
+    subgraph Control[控制消息通路]
+        L[主控命令] --> M[SDIO SERIAL]
+        M --> N[dsp_mcu 接收队列]
+        N --> O[协议解析 / 业务 switch]
+        O --> P[WiFi / BLE / 心跳]
+        O --> Q[OTA 分区操作]
+        O --> R[PM 请求]
+        S[封包 / 事件 / 日志] --> T[syslink SERIAL 优先队列]
+        T --> U[SDIO SERIAL]
+        U --> V[主控响应]
+    end
 ```
 
 这里的 `SERIAL` 是 **SDIO 内的逻辑接口类型**。虽然函数仍名为 `uart_prot_*`，实际发送调用 `pps_syslink_send()`，没有当前业务的物理 UART 初始化或读写链路。[协议发送回调:47](/home/tronlong/lyp/meari/mpc-esp32/main/prot/dsp_mcu.c:47)。
@@ -253,10 +263,16 @@ ESP 保留本地 lwIP 用于 DHCP、心跳等，而主控也通过桥接收发�
 
 启动先打印版本、芯片和堆信息，然后按以下顺序执行：
 
-```text
-pps_system_init → systimer_init(NULL) → pps_hal_pm_init
- → pps_syslink_init → net_heart_local_init → dsp_mcu_init
- → pps_ble_init → pps_wifi_init → pps_wifi_sta_start
+```mermaid
+flowchart TD
+    A[pps_system_init] --> B[systimer_init NULL]
+    B --> C[pps_hal_pm_init]
+    C --> D[pps_syslink_init]
+    D --> E[net_heart_local_init]
+    E --> F[dsp_mcu_init]
+    F --> G[pps_ble_init]
+    G --> H[pps_wifi_init]
+    H --> I[pps_wifi_sta_start]
 ```
 
 `pps_system_init()` 调用 NVS 初始化和默认事件循环创建，在只读命名空间 `hardware_param` 读取 `support_reset`。
@@ -613,18 +629,22 @@ NVR 心跳协议虽与内层 MCU 控制帧共用起始码和类似头，但命�
 
 #### 5.9.2 正常流程
 
-```text
-主控 OTA_REQ
- → esp_ota_get_next_update_partition
- → esp_ota_begin(OTA_SIZE_UNKNOWN)
- → 回复 result/max_size=1024
-
-主控 OTA_DATA_REQ：total_len / total_offset / size / dat
- → 检查 offset+size 不大于 total_len
- → esp_ota_write_with_offset
- → 若 offset+size == total_len：esp_ota_end
- → end 成功：esp_ota_set_boot_partition
- → 回复结果
+```mermaid
+flowchart TD
+    A[主控发送 OTA_REQ] --> B[esp_ota_get_next_update_partition]
+    B --> C[esp_ota_begin: OTA_SIZE_UNKNOWN]
+    C --> D[回复 result / max_size=1024]
+    E[主控发送 OTA_DATA_REQ: total_len / total_offset / size / dat] --> F{offset + size 不大于 total_len?}
+    F -->|否| G[回复失败]
+    F -->|是| H[esp_ota_write_with_offset]
+    H --> I{offset + size 等于 total_len?}
+    I -->|否| J[回复当前写入结果]
+    I -->|是| K[调用 esp_ota_end]
+    K --> L{end 成功?}
+    L -->|是| M[esp_ota_set_boot_partition]
+    L -->|否| N[保留失败结果]
+    M --> O[回复结果]
+    N --> O
 ```
 
 #### 5.9.3 关键约束
@@ -709,75 +729,104 @@ magic=`0x56565099`，packver=1，`-c 1` 表示 ESP32-C6（usage 文本仍写 sna
 
 ### 7.1 网络双向转发
 
-```text
-空口接收 → SDK WiFi RX → 自定义 netif input → 报文分流
- ├─ 本地：原 input_fn → lwIP → DHCP 或 ESP 心跳 socket
- ├─ 主控：syslink RX callback → OTHERS 队列 → SDIO 写入 → 外部主控栈
- └─ 双送：复制一份交主控，原 buffer 交 lwIP
-
-主控栈发帧 → 外层 SDIO 报头 → SDIO RX buffer
- → 网络 callback → recv_queue(40)
- → esp_wifi_internal_tx(STA/AP) → SDK/空口
- → free_handle → SDIO buffer 重新装载
+```mermaid
+flowchart TD
+    A[空口接收] --> B[SDK Wi-Fi RX]
+    B --> C[自定义 netif input]
+    C --> D{报文分流}
+    D -->|本地| E[原 input_fn]
+    E --> F[lwIP: DHCP 或 ESP 心跳 socket]
+    D -->|主控| G[syslink RX callback]
+    G --> H[OTHERS 队列]
+    H --> I[SDIO 写入]
+    I --> J[外部主控栈]
+    D -->|双送| K[复制一份交主控]
+    K --> I
+    D -->|双送| L[原 buffer 交 lwIP]
+    L --> F
+    M[主控栈发帧] --> N[外层 SDIO 报头]
+    N --> O[SDIO RX buffer]
+    O --> P[网络 callback]
+    P --> Q[recv_queue 40]
+    Q --> R[esp_wifi_internal_tx STA / AP]
+    R --> S[SDK / 空口]
+    S --> T[free_handle]
+    T --> U[重新装载 SDIO buffer]
 ```
 
 单个接收 buffer 的处理完成与应用对端收到包是不同事件。发送/接收队列满、tx 重试用完、SDIO inactive 都存在丢弃或失败路径；不能由队列桥接推导无损网络传输。
 
 ### 7.2 WiFi 连接与事件回报
 
-```text
-主控 1209 CONNECT 完整控制帧
- → SDIO SERIAL → dsp_mcu queue(20) → 解包
- → 回复 1210 SUCCESS（请求接受）
- → 保存 RAM wifi_info → signal wifi_task
- → 设置 STA 凭据 / connect
- → WIFI_EVENT_STA_CONNECTED（关联）
- → IP_EVENT_STA_GOT_IP（获得 IPv4）
- → 1211 WiFi CONNECTED 事件入发送队列
- → 配置私有参数 / 更新重试计数 / g_sta_status=CONNECTED
- → 心跳 flush → g_sta_connected=true
+```mermaid
+flowchart TD
+    A[主控 1209 CONNECT 完整控制帧] --> B[SDIO SERIAL]
+    B --> C[dsp_mcu queue，容量 20]
+    C --> D[解包]
+    D --> E[回复 1210 SUCCESS，表示请求接受]
+    E --> F[保存 RAM wifi_info 并 signal wifi_task]
+    F --> G[设置 STA 凭据并 connect]
+    G --> H[WIFI_EVENT_STA_CONNECTED: 已关联]
+    H --> I[IP_EVENT_STA_GOT_IP: 已取得 IPv4]
+    I --> J[将 1211 Wi-Fi CONNECTED 事件放入发送队列]
+    J --> K[配置私有参数、更新重试计数和 g_sta_status]
+    K --> L[心跳 flush]
+    L --> M[g_sta_connected=true]
 ```
 
 失败事件按断线原因映射“找不到 AP / 密钥错误 / 未知”，有重试节流；AP 关联和 DHCP 完成不可合并成同一成功条件。主控 WiFi 事件 ACK 已有编解码，但本地没有等待 ACK/重发的确认状态机。
 
 ### 7.3 BLE 字节通道
 
-```text
-主控设置 name/adv → BT_ENABLE → BLE 广播和 GATT 服务
-手机连接 → 保存单连接 ctx → GPIO13 请求主控唤醒
-手机写 0x5658 → mutex 下追加 BLE buffer
-主控 BT_RECV → 最多 1024 字节 → 控制响应 → 手机数据交给外部业务
-
-主控 BT_SEND + 附加字节 → BLE notify 0x5657 → 手机
+```mermaid
+flowchart TD
+    A[主控设置 name / adv 并发送 BT_ENABLE] --> B[启动 BLE 广播和 GATT 服务]
+    B --> C[手机连接并保存单连接 ctx]
+    C --> D[GPIO13 请求主控唤醒]
+    E[手机写入 0x5658] --> F[mutex 下追加到 BLE buffer]
+    G[主控 BT_RECV] --> H[最多读取 1024 字节]
+    H --> I[发送控制响应并把手机数据交外部业务]
+    J[主控 BT_SEND + 附加字节] --> K[BLE notify 0x5657]
+    K --> L[手机]
 ```
 
 源码没有把手机数据直接解析成 WiFi connect，也没有证明 App 与该通道的端到端业务契约。数据缓存存在容量、消息边界和跨连接残留的约束。
 
 ### 7.4 主控休眠与网络唤醒
 
-```text
-主控发 MCU_SLEEP / 关闭 SDIO 数据通路
- → PM SLEEP → 标记主控 sleep → 更新 cloud 心跳
- → WiFi MAX_MODEM + 停止向主控转帧 + SDIO IO 休眠配置
- → GPIO1 唤醒启用 → 释放 PM 锁 → SDK 在适当空闲时轻休眠
-
-网络数据到 ESP → 端口命中自主心跳 → 唤出该心跳任务
- → 解析 WAKEUP → GPIO13 高20ms/低 → 外部主控体系唤醒
- → 主控拉 GPIO1 低 → PM WAKEUP
- → 恢复 SDIO/STA 桥接和 MIN_MODEM → 持 PM 锁
+```mermaid
+flowchart TD
+    A[主控发送 MCU_SLEEP 并关闭 SDIO 数据通路] --> B[PM SLEEP]
+    B --> C[标记主控 sleep 并更新 cloud 心跳]
+    C --> D[Wi-Fi MAX_MODEM，停止向主控转帧并配置 SDIO IO 休眠]
+    D --> E[启用 GPIO1 唤醒并释放 PM 锁]
+    E --> F[SDK 在适当空闲时进入轻休眠]
+    G[网络数据到达 ESP] --> H[端口命中自主心跳]
+    H --> I[唤醒对应心跳任务]
+    I --> J[解析 WAKEUP]
+    J --> K[GPIO13 拉高 20 ms 后拉低]
+    K --> L[请求外部主控体系唤醒]
+    L --> M[主控拉低 GPIO1]
+    M --> N[PM WAKEUP]
+    N --> O[恢复 SDIO / STA 桥接和 MIN_MODEM]
+    O --> P[持有 PM 锁]
 ```
 
 代收发心跳的端口命中会直接请求唤醒主控；自主心跳要先解析消息，只有 WAKEUP 命令等条件才请求。BLE 连接和心跳重连/长失败也可请求 GPIO13。外部 MCU 怎样处理脉冲、主控是否最终醒来、本次是否达成目标功耗，都没有实机证据。
 
 ### 7.5 固件更新与发布产物
 
-```text
-ppsapp.bin（裸应用）
- ├─ 主机 mcu_pack → 128字节头 + 应用 → build/esp32c6.bin
- │   → 外部主控的封装解析/传送（仓库未含）→ SDIO OTA 写应用分区
- └─ esptool merge_bin
-     + bootloader + partition table + NVS + OTA 初始数据
-     → TFTPBOOT 下的整 Flash 合并镜像 → 外部烧录工具
+```mermaid
+flowchart TD
+    A[ppsapp.bin 裸应用] --> B{产物用途}
+    B -->|SDIO OTA| C[主机 mcu_pack 添加 128 字节头]
+    C --> D[build/esp32c6.bin]
+    D --> E[外部主控解析封装并传送，仓库未含]
+    E --> F[SDIO OTA 写应用分区]
+    B -->|整 Flash 烧录| G[esptool merge_bin]
+    G --> H[合并 bootloader、partition table、NVS 和 OTA 初始数据]
+    H --> I[TFTPBOOT 下的整 Flash 镜像]
+    I --> J[外部烧录工具]
 ```
 
 这两类产物用途不同。SDIO OTA case 写的是应用分区；合并镜像含 bootloader/分区/NVS，不应直接作为同一应用 OTA 载荷。包头解析和实际烧录地址校验仍要在主控/烧录端完成。
@@ -822,13 +871,15 @@ ppsapp.bin（裸应用）
 
 `all.sh` 无参数时 `select` 选择配置，**仅当根 sdkconfig 不存在时复制**。已有 sdkconfig 时，重新选 t32/common 只更新 `soft_config` 和所用 NVS/输出名，并未切换实际编译配置。当前两配置相同使该问题暂不产生内容差异，但后续两文件分化时会影响构建一致性。[选择逻辑](/home/tronlong/lyp/meari/mpc-esp32/all.sh:58)。
 
-```text
-choose
- → version/gen_git_info.sh --file=main/git_info.h
- → version/gen_version.sh --file=main/version.h
- → idf.py build
- → esptool.py merge_bin → TFTPBOOT/整 Flash 镜像
- → tools/mcu_pack → build/esp32c6.bin
+```mermaid
+flowchart TD
+    A[choose 配置] --> B[生成 main/git_info.h]
+    B --> C[生成 main/version.h]
+    C --> D[idf.py build]
+    D --> E[esptool.py merge_bin]
+    E --> F[TFTPBOOT 整 Flash 镜像]
+    D --> G[tools/mcu_pack]
+    G --> H[build/esp32c6.bin]
 ```
 
 脚本依赖 Bash（select、关联数组、+=）、Git、idf.py、esptool.py、grep/cut 和 Linux x86-64 打包程序。`TFTPBOOT` 默认为 `~/tftpboot`，输出路径还拼接未在脚本内赋值的 `version_folder`。没有确保目标目录存在，也没有可靠路径引用；构造字符串后 eval 执行，包含空格或 shell 特殊字符的路径不具备可靠处理。`file_mapping` 定义未被使用。IDF_PATH 为空时直接 exit，没有明确非零错误码。

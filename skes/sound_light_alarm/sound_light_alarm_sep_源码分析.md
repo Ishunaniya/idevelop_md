@@ -78,17 +78,13 @@ sound_light_alarm_sep/
 <a id="architecture"></a>
 ## 三、核心架构设计
 
-```text
-SKES /skes/filter、/skes/event ──> 消息线程 ──> 共享告警/授权状态
-                                                    │
-                                                    ▼
-                                               设备发送线程
-                                            ┌───────┴────────┐
-                           wheel_loader：UI JSON + 串口/GPIO  forklift：人脸授权 + BSD/DMS
-                                      │                               │
-                              /dev/ttyS1、方向 GPIO          26006 语音、26008 DO
-                                      │                               │
-                                 本地报警器                   外部串口/DO 服务
+```mermaid
+flowchart TD
+    filter["SKES /skes/filter、/skes/event"] --> msg["消息线程"] --> state["共享告警/授权状态"]
+    state --> sender["设备发送线程"]
+    sender --> loader{"wheel_loader？"}
+    loader -->|"是"| ui["UI JSON"] --> serial["/dev/ttyS1、方向 GPIO"] --> alarm["本地报警器"]
+    loader -->|"否：forklift 分支"| auth["人脸授权 + BSD/DMS"] --> service["26006 语音、26008 DO"] --> external["外部串口/DO 服务"]
 ```
 
 `main` 还创建串口接收线程；它只在装载机类型下打开 `/dev/ttyS1`，收到数据只记录长度。装载机的声音控制还需 `/tmp/ui_config.json` 中的 `alarm.enabled/volume`；叉车须满足人脸与安全带授权条件，再按 BSD、DMS 优先级选语音。消息线程和发送线程共享字段，当前实现未见显式互斥保护。`crawler_crane` 当前无发送分支。线程与状态流见原第 2、4～6 节。
@@ -102,26 +98,26 @@ SKES /skes/filter、/skes/event ──> 消息线程 ──> 共享告警/授权
 
 `run` 依次创建消息轮询、发送、串口接收三个线程。任一步创建失败都立即返回错误，不会在该失败分支停止或等待此前已创建的线程。轮询线程设置 `skes_run` 为无限等待、可等待模式，持续消费消息；发送线程按设备类型运行；接收线程仅在装载机类型下打开 `/dev/ttyS1`，读取到的数据只记录长度，不解析。依据：`src/sound_light_alarm_sep.c:830-853,874-938,1453-1503`。
 
-#### 启动与运行流程图（纯 Markdown 可显示）
+#### 启动与运行流程图（Mermaid）
 
-```text
-main
-  |
-  +--> init_log --> 读取/回写 [log] level --> 注册 SIGUSR1 --> 打印版本
-  |
-  +--> sound_light_alarm_new
-  |      +--> 分配并清零状态
-  |      +--> skes_linker_init(订阅 19226, 发布 19225)
-  |      +--> 读取 [dev] type、do_trigger_level
-  |      +--> 连接 RS485:26006、RS232:26007、DO:26008
-  |      `--> 返回 linker 初始化结果
-  |
-  +--> sound_light_alarm_run
-  |      +--> 消息轮询线程 --> SKES 回调 --> 更新共享状态
-  |      +--> 发送线程 --> 装载机 / 叉车 / 无发送分支
-  |      `--> 串口接收线程 --> 装载机打开并读取 / 其他类型立即退出
-  |
-  `--> 每 200 ms 检查 running --> 退出时 release
+```mermaid
+flowchart TD
+    start(["main"])
+    log["init_log；读取/回写 [log] level；注册 SIGUSR1；打印版本"]
+    new["sound_light_alarm_new：分配并清零状态；初始化 linker；读取设备配置；连接 RS485 26006、RS232 26007、DO 26008"]
+    run["sound_light_alarm_run"]
+    msg["消息轮询线程：SKES 回调并更新共享状态"]
+    send["发送线程：装载机 / 叉车 / 无发送分支"]
+    serial["串口接收线程：装载机打开并读取；其他类型立即退出"]
+    poll{"每 200 ms 检查 running"}
+    release["退出时 release"]
+    start --> log --> new --> run
+    run --> msg
+    run --> send
+    run --> serial
+    run --> poll
+    poll -->|"仍运行"| poll
+    poll -->|"退出"| release
 ```
 
 文字版流程：① 初始化日志与信号；② 创建共享状态和三个本机消息连接；③ 启动三个线程；④ 轮询线程更新 DMS/BSD/人脸状态，发送线程读取状态并选取设备路径，装载机接收线程维持串口；⑤ 主线程等待 `running` 变为假；⑥ 释放 linker 与对象。`main` 正常路径没有调用 `sound_light_alarm_stop`。线程间对状态字段没有显式互斥保护。依据：`src/main.c:90-129`、`src/sound_light_alarm_sep.c:797-853,1476-1529`。
@@ -142,26 +138,28 @@ main
 
 `skes-linker` 根据话题把数据交给 `on_skes_msg_received`。该回调目前只分派 `skes_topic_type_filter` 与 `skes_topic_type_event`；心跳、版本、设备数据和位置分支被 `#if 0` 排除。`skes_msg_header_parse` 要求顶层有字符串 `type` 和存在的 `data` 字段；`data` 可以是数组或对象，具体形状由业务解析函数使用。当前两个处理函数不按 `action` 决策。话题名 `/skes/filter`、`/skes/event` 见上级 `skes-linker.c:403-413`；头解析约束见上级 `skes-msg.c:22-55`。本文件依据：`src/sound_light_alarm_sep.c:467-492,731-795`。
 
-#### 消息解析流程图（纯 Markdown 可显示）
+#### 消息解析流程图（Mermaid）
 
-```text
-19226 收到 SKES 消息
-  |
-  +--> /skes/filter
-  |      +--> JSON/头解析失败 --> 不更新
-  |      +--> type != properties --> 不更新
-  |      `--> data.type == FaceRecognition
-  |             +--> 标记“收到人脸消息”
-  |             +--> FaceRecognitionResult --> 写入识别结果
-  |             `--> seatbelt_fasten --> 写入安全带状态
-  |
-  +--> /skes/event
-  |      +--> JSON/头解析失败或 type != alarm --> 不更新
-  |      `--> 遍历 data[] 中的 source
-  |             +--> bsd --> 装载机总体状态 / 叉车四方位状态
-  |             `--> dms --> 装载机总体状态 / 叉车总体加细分状态
-  |
-  `--> 其他话题 --> 当前回调无业务处理
+```mermaid
+flowchart TD
+    start(["19226 收到 SKES 消息"])
+    topic{"消息话题？"}
+    start --> topic
+    topic -->|"/skes/filter"| filter["解析 JSON/消息头"]
+    filter --> validfilter{"解析成功且 type=properties？"}
+    validfilter -->|"否"| nochange["不更新"]
+    validfilter -->|"是"| face{"data.type=FaceRecognition？"}
+    face -->|"是"| received["标记收到人脸消息"]
+    received --> faceprop["FaceRecognitionResult 写入识别结果"]
+    received --> beltprop["seatbelt_fasten 写入安全带状态"]
+    face -->|"否"| nochange
+    topic -->|"/skes/event"| event["解析 JSON/消息头"]
+    event --> validevent{"解析成功且 type=alarm？"}
+    validevent -->|"否"| nochange
+    validevent -->|"是"| sources["遍历 data[] 中的 source"]
+    sources --> bsd["bsd：装载机总体状态 / 叉车四方位状态"]
+    sources --> dms["dms：装载机总体状态 / 叉车总体加细分状态"]
+    topic -->|"其他话题"| ignored["当前回调无业务处理"]
 ```
 
 文字版流程：① 按话题分派；② 解析 JSON 与消息头；③ `filter/properties` 从 `data.type=FaceRecognition` 的属性数组取 `FaceRecognitionResult` 和 `seatbelt_fasten`；④ `event/alarm` 遍历 `data` 数组，按 `source`、`status` 和子字段更新状态；⑤ 发送线程在自己的循环中读取这些字段。解析函数内的 `action`、时间戳和消息 ID 没有参与控制决策。依据：`src/sound_light_alarm_sep.c:420-795`。
@@ -180,24 +178,35 @@ main
 
 发送线程先将 GPIO 95/94 导出并设为输出高电平，然后进入装载机循环；串口接收线程初始化 GPIO 27/26 为 RS485 读方向，打开 `/dev/ttyS1`，尝试设为 9600、8N1，使用 `select` 最多等待 3 秒并读取；读失败时关闭后重试。发送线程只有在 `serialfd != -1` 时才读 UI JSON 和发送。串口回传仅记录长度。依据：`src/sound_light_alarm_sep.c:874-938,1167-1276,1453-1469`、`src/serial.h:4-13`。
 
-#### 装载机流程图（纯 Markdown 可显示）
+#### 装载机流程图（Mermaid）
 
-```text
-发送线程循环
-  |
-  +--> serialfd == -1? --是--> sleep(1) --> 下一轮
-  |
-  `--> 读取 /tmp/ui_config.json
-         +--> 文件/JSON/alarm 对象失败 --> 不发送 --> sleep(1)
-         `--> 成功
-                +--> enabled && (DMS 或 BSD)?
-                |      +--> 否 --> NORMAL --> 发送关闭帧
-                |      `--> 是 --> NORMAL->TRIGGER / TRIGGER->CONTINUE
-                |                    +--> TRIGGER --> 发送开启帧
-                |                    `--> CONTINUE --> 看本轮音量与本轮初始值 0
-                |                           +--> 音量非零 --> 回到 TRIGGER，发送开启帧
-                |                           `--> 音量为零 --> 本轮计数加 1，通常不发送
-                `--> sleep(1) --> 下一轮（局部计数和上次音量重新置零）
+```mermaid
+flowchart TD
+    loop(["发送线程循环"])
+    serial{"serialfd == -1？"}
+    config["读取 /tmp/ui_config.json"]
+    invalid{"文件、JSON 或 alarm 对象失败？"}
+    enabled{"enabled 且 DMS 或 BSD 告警？"}
+    normal["设为 NORMAL；发送关闭帧"]
+    trigger{"当前状态为 NORMAL/TRIGGER/CONTINUE？"}
+    open["TRIGGER：发送开启帧"]
+    cont{"CONTINUE：音量与本轮初始值 0 比较"}
+    nonzero["音量非零：回到 TRIGGER 并发送开启帧"]
+    zero["音量为零：本轮计数加 1，通常不发送"]
+    sleep["sleep(1)；局部计数和上次音量重新置零"]
+    loop --> serial
+    serial -->|"是：sleep(1)"| loop
+    serial -->|"否"| config --> invalid
+    invalid -->|"是：不发送"| sleep --> loop
+    invalid -->|"否"| enabled
+    enabled -->|"否"| normal --> sleep
+    enabled -->|"是"| trigger
+    trigger -->|"NORMAL → TRIGGER"| open
+    trigger -->|"TRIGGER"| open
+    trigger -->|"CONTINUE"| cont
+    open --> sleep
+    cont -->|"音量非零"| nonzero --> sleep
+    cont -->|"音量为零"| zero --> sleep
 ```
 
 文字版流程：① 若串口未就绪则等待；② 从 UI JSON 读取 `enabled` 与音量；③ 没有有效配置则本轮无输出；④ 未启用或没有 DMS/BSD 总体告警时设 `ALARM_NORMAL` 并发送关闭帧；⑤ 有告警时按 `NORMAL → TRIGGER → CONTINUE` 更新状态；⑥ 在 `TRIGGER` 发送开启帧；⑦ `CONTINUE` 根据代码中的局部变量决定是否发送；⑧ 睡眠 1 秒再循环。依据：`src/sound_light_alarm_sep.c:1167-1276`。
@@ -211,27 +220,39 @@ main
 
 叉车没有在本程序中打开 `/dev/ttyS1`：发送线程经 `com_output(COM_CH_RS485, ...)` 把预设的 8 字节帧发给本机 `26006` 端口；DO 命令发往 `26008`。程序也连接 `26007` 的 RS232 发布端，但当前叉车发送路径没有调用它。串口/DO 服务是否把命令送到硬件，取决于外部服务，不由本源码保证。依据：`src/sound_light_alarm_sep.c:992-1165,1278-1451`。
 
-#### 叉车流程图（纯 Markdown 可显示）
+#### 叉车流程图（Mermaid）
 
-```text
-发送线程循环
-  |
-  +--> 尚未初始化提示?
-  |      +--> 未收到人脸消息且启动不足“超过 10 秒” --> 等待 1 秒
-  |      `--> 收到消息或超过 10 秒 --> 发第 10 曲提示 + DO false + sleep(5)
-  |
-  +--> 本轮是否允许执行决策? （未触发声音 / last_time=0 / 当前秒>last_time+3）
-  |      +--> 否 --> sleep(1)
-  |      `--> 是
-  |             +--> 人脸=1 且安全带=true --> 首次授权发第 5 曲；DO true
-  |             +--> 人脸=1 且安全带=false --> 未授权时发第 11 曲；DO false
-  |             +--> 人脸=-1 且安全带=true --> 未授权时发第 6 曲；DO false
-  |             +--> 人脸=-1 且安全带=false --> 未授权时发第 12 曲；已授权则清授权并重置提示
-  |             `--> 人脸为其他值 --> 已授权则清授权并重置提示
-  |             
-  |             上述条件处理完后，如仍已授权：按 BSD 前/后/左/右，
-  |             再按 DMS 抽烟/打电话/疲劳选一条语音帧
-  `--> sleep(1) --> 下一轮
+```mermaid
+flowchart TD
+    loop(["发送线程循环"])
+    init{"尚未发送初始化提示？"}
+    ready{"已收到人脸消息或启动超过 10 秒？"}
+    wait["未收到人脸消息且启动未超过 10 秒：等待 1 秒"]
+    prompt["收到消息或超过 10 秒：发第 10 曲、DO false、sleep(5)"]
+    allowed{"允许执行决策？未触发声音 / last_time=0 / 当前秒>last_time+3"}
+    face{"人脸识别结果和安全带状态？"}
+    grant["人脸=1 且安全带=true：首次授权发第 5 曲；DO true"]
+    no_belt["人脸=1 且安全带=false：未授权时发第 11 曲；DO false"]
+    unknown_belt["人脸=-1 且安全带=true：未授权时发第 6 曲；DO false"]
+    deny["人脸=-1 且安全带=false：未授权时发第 12 曲；已授权则清授权并重置提示"]
+    other["其他人脸结果：已授权则清授权并重置提示"]
+    alarm{"处理后仍已授权？"}
+    priority["按 BSD 前/后/左/右，再按 DMS 抽烟/打电话/疲劳选择语音帧"]
+    sleep["sleep(1)；进入下一轮"]
+    loop --> init
+    init -->|"是"| ready
+    ready -->|"否"| wait --> loop
+    ready -->|"是"| prompt --> allowed
+    init -->|"否"| allowed
+    allowed -->|"否：sleep(1)"| loop
+    allowed -->|"是"| face
+    face -->|"1 且安全带=true"| grant --> alarm
+    face -->|"1 且安全带=false"| no_belt --> alarm
+    face -->|"-1 且安全带=true"| unknown_belt --> alarm
+    face -->|"-1 且安全带=false"| deny --> alarm
+    face -->|"其他"| other --> alarm
+    alarm -->|"是"| priority --> sleep --> loop
+    alarm -->|"否"| sleep
 ```
 
 文字版流程：① 待人脸消息或 `curr_time > start_time + 10` 后，发第 10 曲初始化提示并写一次 DO 非触发值，睡眠 5 秒；② 用 `is_sound_triggered` 和 `last_time` 控制进入决策块的间隔；③ 人脸=1 且安全带扣好时首次授权、发第 5 曲，并写 DO 触发值；④ 其他明确失败组合在未授权时分别发第 11/6/12 曲并写 DO 非触发值；⑤ 授权存在时才按固定优先级选择一条 BSD/DMS 语音；⑥ 每轮睡眠 1 秒。源码注释称“命令发送间隔 5 秒”，实际条件是 `curr_time > last_time + 3`，且初始化还有一次 5 秒睡眠；不要据注释认定固定 5 秒间隔。依据：`src/sound_light_alarm_sep.c:1285-1450`。
@@ -291,25 +312,20 @@ main
 
 本节用于设备上怀疑声光报警异常时定位故障点。排查顺序从可观察事实出发：先确认运行的是哪个程序和配置，再确认上游消息是否满足本程序解析条件，最后检查输出通道与硬件。示例中的 `APP_DIR` 与 `PID` 应填入现场实际值；安装后的绝对路径不能仅凭本仓库源码推定。下列命令用于查看状态，不会主动触发报警。
 
-#### 10.1 快速分流图（纯 Markdown 可显示）
+#### 10.1 快速分流图（Mermaid）
 
-```text
-设备声光报警异常
-  |
-  +--> 进程不存在/频繁重启?
-  |      `--> 查 sep.ini enabled、启动目录、INI、依赖、启动输出
-  |
-  +--> 进程存在但完全无响应?
-  |      +--> 装载机 --> /tmp/ui_config.json、19226 消息、/dev/ttyS1、GPIO
-  |      `--> 叉车   --> 人脸/安全带属性、BSD/DMS 事件、26006/26008
-  |
-  +--> 有日志显示发送，设备没动作?
-  |      +--> 装载机 --> 串口描述符/串口参数/RS485 方向/设备侧
-  |      `--> 叉车   --> nanomsg 对端、DO 命令服务、外部串口与继电器
-  |
-  `--> 错误动作/报警不消失/重复播报?
-         +--> 核对输入状态和设备类型
-         `--> 对照第 5/6/8 节的循环局部变量、旧告警位和授权分支
+```mermaid
+flowchart TD
+    start(["设备声光报警异常"])
+    start --> process{"进程不存在或频繁重启？"}
+    process -->|"是"| startup["查 sep.ini enabled、启动目录、INI、依赖和启动输出"]
+    process -->|"否"| unresponsive{"进程存在但完全无响应？"}
+    unresponsive -->|"是：装载机"| loader["查 /tmp/ui_config.json、19226 消息、/dev/ttyS1、GPIO"]
+    unresponsive -->|"是：叉车"| forklift["查人脸/安全带属性、BSD/DMS 事件、26006/26008"]
+    unresponsive -->|"否"| sent{"有发送日志但设备没动作？"}
+    sent -->|"是：装载机"| loaderout["查串口描述符/参数、RS485 方向和设备侧"]
+    sent -->|"是：叉车"| forkout["查 nanomsg 对端、DO 服务、外部串口和继电器"]
+    sent -->|"否：错误动作、报警不消失或重复播报"| state["核对输入状态、设备类型，以及第 5/6/8 节的循环变量、旧告警位和授权分支"]
 ```
 
 文字版流程：① 先核对症状出现时间、设备类型、应用进程和实际工作目录；② 再核对配置与上游消息；③ 区分“程序未生成指令”“程序调用发送函数但对端未执行”“硬件执行却不符合预期”；④ 按装载机或叉车对应路径逐级取证；⑤ 若现象吻合第 8 节已确认的控制流问题，保留原始消息与日志，再定位源码分支。不要仅凭界面显示或一条“发送成功”日志判断硬件已动作。

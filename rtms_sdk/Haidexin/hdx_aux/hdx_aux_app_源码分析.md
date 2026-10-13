@@ -50,10 +50,15 @@
 
 ## 核心架构设计
 
-```text
-argv[0] 包含 hdx_aux → CAN / RS485 / RS422 线程 + 循环维护网络（每轮休眠 1 秒）
-argv[0] 包含 hdx_dev → 单项产测命令 → 设备接口或 chs 脚本
-其他编入的 IEC / MQTT / Modbus 代码：当前两个主入口均未启动
+```mermaid
+flowchart TD
+    name{"argv[0] 包含哪个名称?"}
+    name -->|hdx_aux| aux[启动 CAN / RS485 / RS422 线程]
+    aux --> network[循环维护网络，每轮休眠 1 秒]
+    name -->|hdx_dev| cmd[执行单项产测命令]
+    cmd --> hw[设备接口或 chs 脚本]
+    name -->|其他| return[主入口不启动对应业务]
+    compiled[编入的 IEC / MQTT / Modbus 代码] -. 当前两个入口均未启动 .-> return
 ```
 
 CMake 只生成 hdx_aux；hdx_dev 名称如何提供需看设备镜像。常驻 RS485 初始化会调用 `systemctl disable modbus_app` 和 `systemctl stop modbus_app`；`hdx_dev rs485` 产测也会调用 `stop`。源码未检查这些命令的返回值，设备上的实际服务状态须另核，不能默认它与 Modbus 采集程序同时运行。编入目标不等于主入口可达。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -75,11 +80,18 @@ CMake 只生成 hdx_aux；hdx_dev 名称如何提供需看设备镜像。常驻 
 
 ## 关键流程与数据流
 
-~~~text
-argv[0] 匹配 hdx_aux → 网络维护循环 + CAN / RS485 / RS422 处理
-argv[0] 匹配 hdx_dev → 选择单项产测命令 → 设备接口或脚本
-其余编入的 IEC / MQTT / Modbus 模块 → 当前主入口未启动
-~~~
+```mermaid
+flowchart TD
+    name{"argv[0] 匹配哪个入口?"}
+    name -->|hdx_aux| aux[网络维护循环]
+    aux --> can[CAN 处理]
+    aux --> rs485[RS485 处理]
+    aux --> rs422[RS422 处理]
+    name -->|hdx_dev| command[选择单项产测命令]
+    command --> device[设备接口或脚本]
+    name -->|其他| none[不进入这两个主入口]
+    compiled[编入的 IEC / MQTT / Modbus 模块] -. 当前主入口未启动 .-> none
+```
 
 这两种入口互斥，不能画成同一次运行。[总体流程图](#analysis-3)展开常驻任务；[产测命令](#analysis-4)逐项说明设备副作用；[未启动模块](#analysis-5)说明源码存在与入口可达的区别。
 
@@ -115,27 +127,27 @@ argv[0] 匹配 hdx_dev → 选择单项产测命令 → 设备接口或脚本
 
 ## 3. 总体逻辑流程图
 
-以下流程图使用纯文本，直接显示在 Markdown 中，不依赖 Mermaid 插件。
+以下流程图使用 Mermaid 格式，需由支持 Mermaid 的 Markdown 阅读器渲染。
 
-```text
-main(argc, argv)
-  │
-  ├─ argv[0] 包含 "hdx_aux" → openlog
-  │    ├─ 创建 CAN 线程
-  │    ├─ 创建 RS485 线程
-  │    ├─ 创建 RS422 线程
-  │    └─ 无限循环 ─→ init_aux_eth() ─→ init_aux_wifi() ─→ sleep(1) ─┐
-  │                       ↑                                             │
-  │                       └─────────────────────────────────────────────┘
-  │
-  ├─ 否则 argv[0] 包含 "hdx_dev" → openlog
-  │    ├─ argc < 2 → 打印参数错误 → 返回 -1
-  │    └─ argc ≥ 2 → 按命令与参数条件匹配
-  │         ├─ 匹配 → 调用相应产测函数 → 打印 success/failed
-  │         └─ 未匹配 → 无命令结果提示
-  │       两者最终均到达 main 的 return 0
-  │
-  └─ 两种名称均不包含 → return 0
+```mermaid
+flowchart TD
+    start[main(argc, argv)] --> aux{argv[0] 包含 hdx_aux?}
+    aux -->|是| log1[openlog]
+    log1 --> can[创建 CAN 线程]
+    log1 --> rs485[创建 RS485 线程]
+    log1 --> rs422[创建 RS422 线程]
+    log1 --> loop[无限循环：init_aux_eth → init_aux_wifi → sleep(1)]
+    loop --> loop
+    aux -->|否| dev{argv[0] 包含 hdx_dev?}
+    dev -->|是| log2[openlog]
+    log2 --> argc{argc < 2?}
+    argc -->|是| bad[打印参数错误并返回 -1]
+    argc -->|否| match[按命令与参数条件匹配]
+    match -->|匹配| test[调用产测函数并打印 success / failed]
+    match -->|未匹配| unmatched[无命令结果提示]
+    test --> ret[到达 main 的 return 0]
+    unmatched --> ret
+    dev -->|否| ret2[return 0]
 ```
 
 依据：`main.c:996-1191`。两个名称判断是 `if ... else if`，因此若名称同时含两个子串，先进入 `hdx_aux` 分支。`hdx_dev` 分支中各命令是独立的 `if`；正常传入一个命令只会命中一项。未知命令不会提示错误，最后仍返回 0。常驻入口忽略三个线程创建函数及网络初始化函数的返回值，主线程继续循环。
@@ -148,19 +160,18 @@ main(argc, argv)
 
 ### 3.2 常驻入口：CAN 与串口
 
-```text
-本目录未定义的 CAN 端口提供方
-  └─ 16002/16003 → start_can_server() → can_msg_process()
-       └─ ID=1/2 且 8 字节均为 0x55？
-            ├─ 是 → 生成同 ID、8 字节 0xAA 响应 → 26002/26003
-            └─ 否 → 忽略并等待下一帧
-
-ttyS3/S4/S7/S8 → RS485 线程 → select/read
-  └─ 首字节为通道号且随后 7 字节为 0x55？
-       ├─ 是 → 同串口写通道号 + 7 字节 0xAA
-       └─ 否 → 等待下一次读取
-
-ttyS5 → RS422 线程 → 同样的 select/read 与应答规则
+```mermaid
+flowchart TD
+    canInput[本目录未定义的 CAN 端口提供方] --> can[16002 / 16003 → start_can_server → can_msg_process]
+    can --> check{ID 为 1 / 2 且 8 字节均为 0x55?}
+    check -->|是| reply[生成同 ID、8 字节 0xAA 响应]
+    reply --> canOut[26002 / 26003]
+    check -->|否| ignore[忽略并等待下一帧]
+    serial[ttyS3 / S4 / S7 / S8] --> rs485[RS485 线程：select / read]
+    rs485 --> rscheck{首字节为通道号且随后 7 字节为 0x55?}
+    rscheck -->|是| rsreply[同串口写通道号 + 7 字节 0xAA]
+    rscheck -->|否| wait[等待下一次读取]
+    rs422in[ttyS5] --> rs422[RS422 线程：相同 select / read 与应答规则]
 ```
 
 - CAN 线程建立两个 nanomsg `NN_SUB`，连接本机 `16002/16003`，按端口 0/1 区分 CAN0/CAN1。接收帧中的 `can_id` 分别为 1/2 且 8 字节均为 `0x55` 时，创建 `0xAA` 响应帧，通过 `NN_PUB` 连接 `26002/26003` 发出（`src/can_server/can_server.c:16-189`）。本程序在此处使用 `nn_connect`，没有绑定这些端口；端口提供者在本目录未定义。
@@ -188,20 +199,23 @@ ttyS5 → RS422 线程 → 同样的 select/read 与应答规则
 
 `cellular` 的主要状态顺序如下，CAT4 和 CAT1 采用基本相同的代码；两者分别位于 `main.c:688-821` 与 `823-954`。
 
-```text
-分别对 CAT4、CAT1 顺序执行：
-  停既有服务和脚本 → 启动对应模组脚本 → 等待 /dev/ttyUSB1
-       → ATE0 → ATI → AT+CPIN? → 配置 NAT → 设置/查询 CEREG
-       → qnetdevctl → usb0 up + dhclient → 读取 usb0 地址
-       → ping 114.114.114.114 ──成功──┐
-                   │失败              │
-                   ↓                  │
-             ping 8.8.8.8 ───成功─────┤
-                   │失败              ↓
-                   └─ 返回地址/连通性检查阶段
-  任一检查阶段重试次数耗尽 → 失败
-  成功或失败 → 调用对应停机脚本 → 返回该段结果
-  两段结果合并：位 0 = CAT4 失败；位 1 = CAT1 失败
+```mermaid
+flowchart TD
+    start[分别对 CAT4、CAT1 顺序执行] --> stop[停止既有服务和脚本]
+    stop --> script[启动对应模组脚本]
+    script --> tty[等待 /dev/ttyUSB1]
+    tty --> at[ATE0 → ATI → AT+CPIN? → 配置 NAT → 设置 / 查询 CEREG]
+    at --> net[qnetdevctl → usb0 up + dhclient → 读取 usb0 地址]
+    net --> ping1{ping 114.114.114.114 成功?}
+    ping1 -->|是| cleanup[调用对应停机脚本]
+    ping1 -->|否| ping2{ping 8.8.8.8 成功?}
+    ping2 -->|是| cleanup
+    ping2 -->|否| retry[返回地址 / 连通性检查阶段]
+    retry -->|重试次数未耗尽| net
+    retry -->|重试次数耗尽| failed[该段失败]
+    cleanup --> result[返回该段结果]
+    failed --> result
+    result --> bits[合并结果：位 0 = CAT4 失败；位 1 = CAT1 失败]
 ```
 
 每阶段成功会将计数重置为 `MAX_TRY=30`；失败时递减并睡 1 秒。CAT4 初始计数为 20，CAT1 为 30；成功并非保证网络业务长期稳定，只表示上述源码检查当时通过。
@@ -292,17 +306,22 @@ ttyS5 → RS422 线程 → 同样的 select/read 与应答规则
 
 本节用于设备上怀疑 `hdx_aux` 或 `hdx_dev` 出问题时定位原因。先记录故障时间、软件版本、启动命令、现象和最近的变更，再按“进程 → 日志 → 对应功能 → 外部服务/硬件”的顺序排查。下面的命令是设备端示例；设备镜像若没有某个工具，使用其已有的等效命令。诊断时先做只读检查，产测命令会改动服务、网络、时间或硬件状态，应在允许的维护窗口执行。
 
-```text
-发现故障
-  → 进程在吗？
-      ├─ 否 → 核对启动命令/名称、动态库、启动日志、内核异常
-      └─ 是 → 对应工作线程在吗？
-          ├─ 否 → 查线程创建和退出时的日志、CAN/串口处理函数
-          └─ 是 → 识别故障功能与最早失败步骤
-              → 本程序发出正确请求了吗？
-                  ├─ 否 → 查本程序调用链、参数、设备节点、返回值
-                  └─ 是 → 查对端服务、物理连线、回复内容与时序
-              → 记录证据 → 修复 → 在目标设备复核功能和副作用
+```mermaid
+flowchart TD
+    symptom[发现故障] --> process{进程在吗?}
+    process -->|否| startup[核对启动命令 / 名称、动态库、启动日志和内核异常]
+    process -->|是| thread{对应工作线程在吗?}
+    thread -->|否| threadcheck[查线程创建和退出日志、CAN / 串口处理函数]
+    thread -->|是| identify[识别故障功能与最早失败步骤]
+    identify --> request{本程序发出正确请求了吗?}
+    request -->|否| local[查本程序调用链、参数、设备节点和返回值]
+    request -->|是| peer[查对端服务、物理连线、回复内容与时序]
+    startup --> evidence[记录证据]
+    threadcheck --> evidence
+    local --> evidence
+    peer --> evidence
+    evidence --> fix[修复]
+    fix --> verify[在目标设备复核功能和副作用]
 ```
 
 ### 9.1 先确认跑的是哪个入口和哪个版本

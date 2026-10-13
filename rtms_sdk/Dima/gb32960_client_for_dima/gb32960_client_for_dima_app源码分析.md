@@ -51,13 +51,15 @@
 
 ## 核心架构设计
 
-```text
-本机 CAN / GPS / MCU → 接收与点表解析 → 车辆共享状态
-                                        │
-                                        ↓
-              new_energy 组帧 / 登录状态机 → 平台 TCP
-                                        │ 离线时
-                                        └→ 历史文件 → 联网后补传
+```mermaid
+flowchart LR
+    input[本机 CAN / GPS / MCU] --> recv[接收与点表解析]
+    recv --> state[车辆共享状态]
+    state --> pack[new_energy 组帧 / 登录状态机]
+    pack --> tcp[平台 TCP]
+    pack --> file[离线时写入历史文件]
+    file --> upload[联网后补传]
+    upload --> tcp
 ```
 
 顶层开关和设备宏都影响构建；远锦专用解析仍有 TODO。历史文件删除与平台业务确认不是同一事件。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -79,11 +81,20 @@
 
 ## 关键流程与数据流
 
-~~~text
-本机 CAN / GPS / MCU → 车辆共享状态
-共享状态 + ACC / 充电条件 → 平台 TCP 连接与登录 → 实时组帧发送
-符合缓存条件的报文 → 历史文件 → 满足补传条件后发送
-~~~
+```mermaid
+flowchart TD
+    input[本机 CAN / GPS / MCU] --> state[车辆共享状态]
+    state --> gate{ACC / 充电条件满足?}
+    gate -->|是| connect[平台 TCP 连接与登录]
+    connect --> realtime[实时组帧发送]
+    gate -->|否| wait[等待门控条件]
+    state --> cacheEligible{符合缓存条件?}
+    cacheEligible -->|是| history[写入历史文件]
+    cacheEligible -->|否| wait
+    history --> resend{满足补传条件?}
+    resend -->|是| send[发送历史报文]
+    resend -->|否| history
+```
 
 先看[总体流程与启动](#analysis-2)，再看[设备解析](#analysis-3)、[TCP 状态机](#analysis-4)和[离线补传](#analysis-6)。设备宏选择解析分支；历史文件删除不等于平台业务确认。
 
@@ -101,26 +112,25 @@
 
 ## 2. 总体流程图
 
-下图只画 `main.c` 可达的主要运行路径。使用纯文本绘制，在普通 Markdown 阅读器中也能直接看到。各线程共享 `can_mng_t`；图中分支表示源码条件，非平台保证。
+下图只画 `main.c` 可达的主要运行路径。使用 Mermaid 绘制，需由支持 Mermaid 的 Markdown 阅读器渲染。各线程共享 `can_mng_t`；图中分支表示源码条件，非平台保证。
 
-```text
-┌──────────────────────────────┐
-│ main：打印版本，can_mng_init │
-└──────────────┬───────────────┘
-               ↓
-   读取平台 INI、VIN、ICCID、点表
-               ↓
-       CPActive 注册成功？
-        ├─ 否 → 主线程返回错误
-        └─ 是
-            ├→ 保活线程：每 10 秒更新
-            ├→ CAN 线程：订阅三路 CAN → 通用点表和设备专用解析 ─┐
-            ├→ 本机消息线程：GPS、MCU → 更新 ACC、定位等 ──────┤
-            └→ 等待 10 秒收集电芯数据                           │
-                    ├→ 实时 TCP 状态机 ←────────────────────────┤
-                    ├→ 离线保存线程 ←───────────────────────────┘
-                    │       ↓ 写 SD 卡历史文件
-                    └→ 历史补传线程 → 联网后读文件、改命令、发送、删除
+```mermaid
+flowchart TD
+    start[main：打印版本并调用 can_mng_init] --> config[读取平台 INI、VIN、ICCID 和点表]
+    config --> active{CPActive 注册成功?}
+    active -- 否 --> err[主线程返回错误]
+    active -- 是 --> keep[启动保活线程：每 10 秒更新]
+    active -- 是 --> can[启动 CAN 线程：订阅三路 CAN 并解析]
+    active -- 是 --> msg[启动本机消息线程：GPS / MCU 更新 ACC、定位等]
+    active -- 是 --> collect[等待 10 秒收集电芯数据]
+    can --> tcp[实时 TCP 状态机]
+    msg --> tcp
+    collect --> tcp
+    can --> save[离线保存线程：写 SD 卡历史文件]
+    msg --> save
+    collect --> save
+    save --> history[历史补传线程：联网后读文件、改命令、发送并删除]
+    history --> tcp
 ```
 
 ### 2.1 启动顺序与失败处理
@@ -187,26 +197,24 @@ CPActive 注册失败会使主线程返回错误；成功后依次创建保活�
 
 源码状态枚举还有 HEARTBEAT、GPS、HISTORY，但 `gb32960_data_report()` 的 `switch` 只执行 UNKNOWN、LOGIN、REPORT、LOGOUT 四类分支；图中仅画可达状态（`src/new_energy/gb32960.c:22-35,1321-1498`）。
 
-```text
-                  ┌──────────────────────────┐
-                  │ UNKNOWN：检查运行门控条件 │←───────────────┐
-                  └────────────┬─────────────┘                │
-                               │条件满足                      │
-                               ↓                              │
-                     解析域名、建立 TCP 连接 ──失败───────────┘
-                               │成功
-                ┌──────────────┴────────────────┐
-                │本地状态非 LOGIN                │本地状态为 LOGIN
-                ↓                              ↓
-        LOGIN：发送登录帧               LOGOUT：发送登出帧
-        ├─ recv 无正字节 → 稍后重试     ├─ recv 无正字节 → 稍后重试
-        ├─ 发送失败/门控消失 → UNKNOWN ├─ 发送失败 → UNKNOWN
-        └─ recv 正字节 → REPORT         ├─ 正字节且门控满足 → LOGIN
-                                       └─ 正字节且门控消失 → UNKNOWN
-                REPORT：到周期逐帧打包并 send
-                ├─ 发送成功 → 留在 REPORT，等待下个周期
-                ├─ 发送失败 → UNKNOWN
-                └─ 门控消失 → LOGOUT
+```mermaid
+flowchart TD
+    unknown[UNKNOWN：检查运行门控条件] -->|条件不满足| unknown
+    unknown -->|条件满足| connect[解析域名并建立 TCP 连接]
+    connect -->|失败| unknown
+    connect -->|成功| logged{本地状态为 LOGIN?}
+    logged -- 否 --> login[LOGIN：发送登录帧]
+    logged -- 是 --> logout[LOGOUT：发送登出帧]
+    login -->|recv 无正字节| login
+    login -->|发送失败或门控消失| unknown
+    login -->|recv 正字节| report[REPORT：到周期逐帧打包并 send]
+    logout -->|recv 无正字节| logout
+    logout -->|发送失败| unknown
+    logout -->|正字节且门控满足| login
+    logout -->|正字节且门控消失| unknown
+    report -->|发送成功，等待下周期| report
+    report -->|发送失败| unknown
+    report -->|门控消失| logout
 ```
 
 门控条件是 `(mcu_info && acc_stat) || (_isIncharge && check_can_active())`。UNKNOWN 状态需要时解析平台域名并调用 TCP 连接；连接成功设置 10 秒接收超时和 60 秒 `TCP_USER_TIMEOUT`。前次本地 INI 仍为 LOGIN 时先登出，再尝试登录。登录流水号来自 `/opt/conf_loginout.ini`，循环中按 65531 取模，尝试登录时递增。登录/登出只以 `recv()` 是否返回正字节推进本地状态，未见完整的应答命令、VIN、校验码和结果码验证（`gb32960.c:1333-1447`）。
@@ -237,28 +245,31 @@ REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 
 
 ## 6. 离线保存与历史补传
 
-```text
-【保存线程】
-运行门控成立？ → network_offline == 1？ → 到保存周期？
-      否 ↺               否 ↺                 否 ↺
-                                                │是
-                                                ↓
-                                    按分帧数生成实时帧
-                                                ↓
-                                    VIN 非空且文件可写？
-                                      ├─ 否 → 返回循环
-                                      └─ 是 → 写 FF FF + 本机 short 长度 + 完整帧
-                                               ↓
-                                         文件大于 5,000,000 字节？
-                                          ├─ 是 → 关闭并轮换
-                                          └─ 否 → 继续使用
-
-【补传线程】
-检查历史目录 → TCP 有效且 network_offline == 0？
-                 ├─ 否 → 约 60 秒后重查
-                 └─ 是 → 选文件并逐条读 → 命令改 03、重算 BCC、调用 send
-                                                  ↓
-                                      关闭文件并执行删除 → 再检查目录
+```mermaid
+flowchart TD
+    subgraph save[保存线程]
+        gate{运行门控成立?} -->|否| gate
+        gate -->|是| offline{network_offline == 1?}
+        offline -->|否| gate
+        offline -->|是| due{到保存周期?}
+        due -->|否| gate
+        due -->|是| frames[按分帧数生成实时帧]
+        frames --> writable{VIN 非空且文件可写?}
+        writable -->|否| gate
+        writable -->|是| write[写 FF FF + 本机 short 长度 + 完整帧]
+        write --> size{文件大于 5,000,000 字节?}
+        size -->|是| rotate[关闭并轮换]
+        size -->|否| continue[继续使用当前文件]
+        rotate --> gate
+        continue --> gate
+    end
+    subgraph resend[补传线程]
+        scan[检查历史目录] --> online{TCP 有效且 network_offline == 0?}
+        online -->|否：约 60 秒后| scan
+        online -->|是| send[选文件并逐条读取；命令改 03、重算 BCC、调用 send]
+        send --> remove[关闭文件并执行删除]
+        remove --> scan
+    end
 ```
 
 `pthread_save_history_data()` 初始查询目录大小，若大于 `450*1024` KiB，调用函数删除两个旧文件；这是启动线程时的一次检查，不是运行期持续容量上限。保存门控与主上报相同，还要求 `network_offline==1`；常规保存间隔 9990 ms，三级告警 990 ms。每条历史记录前写 `0xFF 0xFF` 和本机 `short` 长度，后接完整实时帧；单文件超过 5,000,000 字节才轮换。写历史时只检查 VIN 非空，目录需要 SD 卡及权限（`gb32960.c:846-985`）。
@@ -307,31 +318,23 @@ REPORT 用单调时钟计算间隔，普通周期 10000 ms，`_warnLevel==0x03` 
 
 这一节用于设备已经出现问题时收集证据。先记录故障时间、VIN（对外共享日志时遮盖）、程序版本、设备型号与构建选项，再按下图逐层缩小范围。下面的命令是目标设备上的**只读检查示例**；嵌入式系统可能只提供 BusyBox 工具，命令不存在时用同类工具替代。不要仅凭单条日志判断“平台已收到”，也不要在保全历史文件和日志前重启、清理目录或改登录 INI。
 
-```text
-故障现象
-   ↓
-进程在运行？ ──否──→ 看退出码/崩溃日志/依赖库/启动配置（9.2）
-   │是
-   ↓
-CAN、GPS、MCU 本机消息正常？ ──否──→ 定位上游服务、端口、帧格式、VIN（9.3）
-   │是
-   ↓
-ACC 开启，或充电且指定 CAN 报文活跃？ ──否──→ 检查门控与告警来源（9.3）
-   │是
-   ↓
-平台域名可解析、TCP 可连接？ ──否──→ 检查 INI、DNS、路由、平台端口（9.4）
-   │是
-   ↓
-有登录应答正字节、进入 REPORT？ ──否──→ 查登录帧/VIN/ICCID/平台应答（9.4）
-   │是
-   ↓
-_splitFrameNum>0 且 data_len>0？ ──否──→ 查电芯数量、分帧组包（9.5）
-   │是
-   ↓
-设备 send 成功且平台记录到帧？ ──否──→ 查报文结构、分帧、平台业务应答（9.5）
-   │是
-   ↓
-若仍有丢数：查离线保存、补传和文件删除时机（9.6）
+```mermaid
+flowchart TD
+    symptom[故障现象] --> running{进程在运行?}
+    running -->|否| start[看退出码、崩溃日志、依赖库和启动配置（9.2）]
+    running -->|是| input{CAN、GPS、MCU 本机消息正常?}
+    input -->|否| upstream[定位上游服务、端口、帧格式和 VIN（9.3）]
+    input -->|是| gate{ACC 开启，或充电且指定 CAN 报文活跃?}
+    gate -->|否| source[检查门控与告警来源（9.3）]
+    gate -->|是| network{平台域名可解析且 TCP 可连接?}
+    network -->|否| netcheck[检查 INI、DNS、路由和平台端口（9.4）]
+    network -->|是| login{有登录应答正字节并进入 REPORT?}
+    login -->|否| logincheck[检查登录帧、VIN、ICCID 和平台应答（9.4）]
+    login -->|是| data{_splitFrameNum > 0 且 data_len > 0?}
+    data -->|否| framecheck[检查电芯数量和分帧组包（9.5）]
+    data -->|是| sent{设备 send 成功且平台记录到帧?}
+    sent -->|否| sentcheck[检查报文结构、分帧和平台业务应答（9.5）]
+    sent -->|是| history[若仍丢数，查离线保存、补传和文件删除时机（9.6）]
 ```
 
 ### 9.1 先固定证据和运行版本

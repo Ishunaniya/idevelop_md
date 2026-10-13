@@ -95,15 +95,14 @@ skes-aeb2vcu/
 <a id="architecture"></a>
 ## 三、核心架构设计
 
-```text
-SKES /skes/filter、/skes/event ──> 消息线程 ──┐
-                                              ├──> 共享设备状态 ──> CAN 发送线程
-DI 服务 127.0.0.1:38000 ────────> DI 线程 ─────┘                    │
-                                                            can_frame_t / nanomsg
-                                                                    │
-                                                     CAN0 TX 服务 127.0.0.1:26002
-                                                                    │
-                                                        物理 CAN/VCU（本程序外）
+```mermaid
+flowchart LR
+    skes["SKES /skes/filter、/skes/event"] --> msg["消息线程"]
+    di_service["DI 服务 127.0.0.1:38000"] --> di["DI 线程"]
+    msg --> state["共享设备状态"]
+    di --> state
+    state --> sender["CAN 发送线程"] --> frame["can_frame_t / nanomsg"]
+    frame --> tx["CAN0 TX 服务 127.0.0.1:26002"] --> vcu["物理 CAN/VCU（本程序外）"]
 ```
 
 消息线程和 DI 线程写共享字段，发送线程读取，当前实现未见这些字段使用互斥锁或原子同步。设备类型决定帧编码与发送间隔：装载机使用 AEB/故障/BSD 状态，履带吊使用通道 4/5 配重，叉车使用 AEB 前后触发、等级和 DI 方向。`NN_PUB` 连接或 `nn_send` 调用不能证明下游 CAN 服务及 VCU 已执行。线程、输入和设备分支分别见原第 2～5 节。
@@ -111,25 +110,27 @@ DI 服务 127.0.0.1:38000 ────────> DI 线程 ─────┘
 <a id="detail-2"></a>
 ### 2. 入口、线程和数据关系
 
-#### 普通 Markdown 可显示的总流程图
+#### 总流程图（Mermaid）
 
-```text
-进程启动 main.c
-  |
-  +-- 初始化日志：读/写 skes-aeb2vcu.ini 的 [log] level
-  +-- 注册 SIGUSR1：收到后循环切换日志等级
-  +-- skes_aeb2vcu_new
-  |     +-- 分配并清零状态对象
-  |     +-- 创建 SKES 订阅/发布连接
-  |     +-- 读 [dev] type；按设备类型读附加参数
-  |     +-- 初始化 RS-485、RS-232 的本机发送连接
-  +-- skes_aeb2vcu_run
-  |     +-- 线程 A：轮询 SKES 消息，更新共享状态
-  |     +-- 线程 B：读取共享状态，组装并发送 CAN 帧
-  |     +-- 线程 C：查询 DI 通道 1，更新行驶方向状态
-  +-- main 每 200 ms 查询 running 标志
-        +-- 标志为真：继续等待
-        +-- 标志为假：释放 SKES 句柄和状态对象，退出
+```mermaid
+flowchart TD
+    start(["进程启动 main.c"])
+    init["初始化日志；注册 SIGUSR1"]
+    new["skes_aeb2vcu_new：分配并清零状态；创建 SKES 连接；读设备配置；连接 RS-485/RS-232"]
+    run["skes_aeb2vcu_run"]
+    msg["线程 A：轮询 SKES 消息并更新共享状态"]
+    can["线程 B：读取共享状态、组帧并发送 CAN"]
+    di["线程 C：查询 DI 通道 1 并更新方向状态"]
+    poll{"main 每 200 ms 查询 running 标志"}
+    keep["标志为真：继续等待"]
+    release["标志为假：释放 SKES 句柄和状态对象，退出"]
+    start --> init --> new --> run
+    run --> msg
+    run --> can
+    run --> di
+    run --> poll
+    poll -->|"真"| keep --> poll
+    poll -->|"假"| release
 ```
 
 **文字版流程：** `main` 先设定日志文件、大小上限 5 MiB、文件数 4，并从 INI 读取日志等级再写回；随后注册 `SIGUSR1`、记录版本号 `1.1.3.0`。`skes_aeb2vcu_new` 创建状态及通信句柄，初值为装载机类型，然后读取配置决定具体设备分支。`skes_aeb2vcu_run` 启动消息、CAN、DI 三个线程。主线程每 200 ms 检查 `sre->running`。当前 `main` 没有调用 `skes_aeb2vcu_stop`，也没有针对 `SIGTERM`/`SIGINT` 的显式退出处理；因此正常停机与资源收尾不能只根据 `stop` 函数的存在来推断。
@@ -151,17 +152,13 @@ DI 服务 127.0.0.1:38000 ────────> DI 线程 ─────┘
 <a id="detail-3"></a>
 ### 3. 消息接收与分发
 
-```text
-本机 SKES broker -> 订阅句柄 -> on_skes_msg_received
-  |
-  +-- filter 主题
-  |     +-- JSON 头部 type=properties、data.type=AEB
-  |           -> 按 property_name 更新装载机 AEB 控制字段
-  +-- event 主题
-        +-- JSON 头部 type=fault -> 更新故障码列表
-        +-- JSON 头部 type=alarm -> AEB 前后告警 / BSD 方位状态
-        +-- JSON 头部 type=event -> source=counterweight-recognition
-                                      更新履带吊通道 4/5 配重
+```mermaid
+flowchart TD
+    broker["本机 SKES broker"] --> sub["订阅句柄"] --> callback["on_skes_msg_received"] --> topic{"主题？"}
+    topic -->|"filter"| filter["JSON type=properties 且 data.type=AEB"] --> props["按 property_name 更新装载机 AEB 控制字段"]
+    topic -->|"event / fault"| fault["更新故障码列表"]
+    topic -->|"event / alarm"| alarm["更新 AEB 前后告警 / BSD 方位状态"]
+    topic -->|"event / event"| counter["source=counterweight-recognition：更新履带吊通道 4/5 配重"]
 ```
 
 **文字版流程：** `skes_linker_init` 以 `is_bind=false` 创建 SUB 与 PUB 句柄，订阅端连接 `127.0.0.1:19226`，发布端连接 `127.0.0.1:19225`。消息轮询线程把接收超时设为无限、等待模式设为真，循环调用 `skes_run`。当前回调只按 `filter` 和 `event` 两个主题分发；心跳、版本、设备数据、原始设备数据和定位的回调分支位于 `#if 0`。创建 PUB 句柄不代表活跃路径在定期发布消息。
@@ -214,16 +211,14 @@ DI 服务 127.0.0.1:38000 ────────> DI 线程 ─────┘
 <a id="detail-5"></a>
 ### 5. CAN 发送线程：三个设备分支
 
-```text
-do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
-  |
-  +-- wheel_loader -> 刷新 UI 使能 -> 轮询故障码、BSD 提示
-  |                   -> 写生命信号/校验 -> 发 AEB 帧 -> 等 100 ms
-  +-- crawler_crane -> 通道 4 + 通道 5 -> 乘 10 写入帧低两字节
-  |                   -> 发配重帧 -> 等 500 ms
-  +-- forklift -> AEB 前后触发 + DI 方向 + 告警等级
-                -> 计算当前制动值 -> 按电机版本编码
-                -> 发制动帧 -> 等 100 ms（版本 1）或 35 ms（版本 2）
+```mermaid
+flowchart TD
+    start["do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节；连接 CAN0 TX 26002"] --> type{"设备类型？"}
+    type -->|"wheel_loader"| loader["刷新 UI 使能；轮询故障码和 BSD 提示"] --> loaderframe["写生命信号/校验；发送 AEB 帧"] --> wait100["等待 100 ms"]
+    type -->|"crawler_crane"| crane["通道 4 + 通道 5；乘 10 写入帧低两字节"] --> craneframe["发送配重帧"] --> wait500["等待 500 ms"]
+    type -->|"forklift"| forklift["读取 AEB 前后触发、DI 方向和告警等级"] --> calc["计算当前制动值；按电机版本编码"] --> brake["发送制动帧"]
+    brake -->|"版本 1"| wait100
+    brake -->|"版本 2"| wait35["等待 35 ms"]
 ```
 
 **文字版流程：** 线程创建 nanomsg `NN_PUB` 套接字并连接 `tcp://127.0.0.1:26002`。它发送的是头文件定义的 `can_frame_t` 结构（含 `can_id`、`can_dlc`、8 字节 `data` 等），不是直接调用 SocketCAN。每轮依 `dev_type` 选择一个分支并执行对应等待。若套接字创建或连接失败，线程直接返回；源码未见该线程内部自动重连。
@@ -246,21 +241,22 @@ do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
 
 #### 5.3 叉车 `forklift`
 
-```text
-每轮先取：前/后 AEB 触发、当前等级、DI 方向、上次等级与时间
-  |
-  +-- 满足立即重算条件？
-  |     +-- 是 -> 按当前告警和方向重算
-  |     +-- 否 -> 距上次触发不足 1 秒？
-  |                  +-- 是 -> 沿用上次制动值
-  |                  +-- 否 -> 按当前告警和方向重算
-  |
-  +-- 重算时：方向匹配且等级为 1/2 -> 取对应前/后配置值、更新时间
-  |            否则 -> 本轮值为 0
-  |
-  +-- 电机版本 1：写 ID 0x440 的 data[0]，发送，等待约 100 ms
-  +-- 电机版本 2：写 ID 0x120 的 data[0..2]，发送，等待约 35 ms
-  +-- 其他版本：不发送，等待约 100 ms
+```mermaid
+flowchart TD
+    start["每轮读取前/后 AEB 触发、等级、DI 方向、上次等级与时间"] --> immediate{"满足立即重算条件？"}
+    immediate -->|"是"| recalc["按当前告警和方向重算"]
+    immediate -->|"否"| elapsed{"距上次触发不足 1 秒？"}
+    elapsed -->|"是"| hold["沿用上次制动值"]
+    elapsed -->|"否"| recalc
+    recalc --> valid{"方向匹配且等级为 1/2？"}
+    valid -->|"是"| config["取对应前/后配置值并更新时间"]
+    valid -->|"否"| zero["本轮制动值为 0"]
+    config --> version{"电机版本？"}
+    zero --> version
+    hold --> version
+    version -->|"1"| v1["写 ID 0x440 data[0]；发送；等待约 100 ms"]
+    version -->|"2"| v2["写 ID 0x120 data[0..2]；发送；等待约 35 ms"]
+    version -->|"其他"| other["不发送；等待约 100 ms"]
 ```
 
 **文字版流程：** 先判断是否立即按当前告警重算制动值；未满足立即条件时，若距上次触发不足 1 秒，直接使用上次值，**这一保持分支不重新检查当前 DI 方向和前后触发是否匹配**；超过 1 秒才重算。重算只在告警方向与 DI 方向相配且等级为 1 或 2 时更新对应配置值。最后按制动电机版本选择 CAN ID 与数据字节；未知版本没有发送分支。下面列出具体条件和编码。
@@ -301,14 +297,18 @@ do_can_msg_sender：确认 aeb_fault_t 恰好 8 字节 -> 连接 CAN0 TX 26002
 
 #### 9.1 先定位故障落在哪一段
 
-```text
-设备异常
-  |
-  +-- 程序未运行/启动后退出 -> 查工作目录、INI、启动报错
-  +-- 程序在运行，上游消息未到达 -> 查 19226、主题和消息封装
-  +-- 消息到了，状态条件不满足 -> 查 JSON、UI 开关、DI、阈值
-  +-- 条件满足，26002 无帧 -> 查发送线程、设备类型、连接和编码
-  +-- 26002 有正确帧，车辆无动作 -> 查 CAN 服务、物理总线和 VCU
+```mermaid
+flowchart TD
+    start(["设备异常"])
+    start --> process{"程序未运行或启动后退出？"}
+    process -->|"是"| startup["查工作目录、INI、启动报错"]
+    process -->|"否"| msg{"上游消息未到达？"}
+    msg -->|"是"| input["查 19226、主题和消息封装"]
+    msg -->|"否"| state{"消息已到但状态条件不满足？"}
+    state -->|"是"| condition["查 JSON、UI 开关、DI、阈值"]
+    state -->|"否"| frame{"条件满足但 26002 无帧？"}
+    frame -->|"是"| sender["查发送线程、设备类型、连接和编码"]
+    frame -->|"否：26002 有正确帧但车辆无动作"| output["查 CAN 服务、物理总线和 VCU"]
 ```
 
 **文字版流程：** 先确认运行的确实是本程序及其实际配置，再确认消息到达订阅端且满足解析条件；然后核对 UI、DI、阈值和告警状态；接着在本机 CAN 服务接收端查 `can_frame_t`；最后对照物理 CAN 与 VCU 记录。TCP 连接存在不证明应用消息到达或 `nn_send` 成功。这个顺序按源码数据流划分责任边界，实际结论需有同一时间段的设备证据。

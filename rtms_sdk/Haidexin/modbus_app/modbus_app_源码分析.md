@@ -1,6 +1,6 @@
 # modbus_app 源码逻辑全景分析
 
-**阅读入口：**[主逻辑流程图](#3-主逻辑流程图)｜[单点 RTU 处理流程图](#7-单点-rtu-处理流程)｜[设备排障流程图](#12-设备故障排查手册)｜[配置语义](#5-配置加载的精确语义)｜[已核实的实现风险](#10-可核实的异常路径与实现风险)。流程图使用普通文本代码块，打开 Markdown 即可见，不依赖 Mermaid 渲染。
+**阅读入口：**[主逻辑流程图](#3-主逻辑流程图)｜[单点 RTU 处理流程图](#7-单点-rtu-处理流程)｜[设备排障流程图](#12-设备故障排查手册)｜[配置语义](#5-配置加载的精确语义)｜[已核实的实现风险](#10-可核实的异常路径与实现风险)。流程图使用 Mermaid 代码块，需由支持 Mermaid 的 Markdown 阅读器渲染。
 
 <!-- rtms-analysis-guide:start -->
 
@@ -54,12 +54,13 @@
 
 ## 核心架构设计
 
-```text
-/usr/local/etc/modbus_app_config.json → 通道与点表
-                                      ↓
-串口 RTU 请求 → 单次响应读取 / 校验 → 原始采集帧
-                                      ↓
-                         对应 nanomsg PUB 端口
+```mermaid
+flowchart TD
+    config[/usr/local/etc/modbus_app_config.json/] --> channels[通道与点表]
+    serial[串口 RTU 请求] --> read[单次响应读取与校验]
+    channels --> read
+    read --> frame[原始采集帧]
+    frame --> pub[对应 nanomsg PUB 端口]
 ```
 
 通道线程是否工作取决于配置及串口/PUB 初始化；程序发布原始采集帧，不在本项目内完成业务量换算。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -81,10 +82,14 @@
 
 ## 关键流程与数据流
 
-~~~text
-配置 / 点表 → 可用串口通道 → 按点表构造 RTU 请求
-单次响应读取与校验 → 原始采集帧 → 对应 nanomsg PUB
-~~~
+```mermaid
+flowchart TD
+    config[配置 / 点表] --> channel[可用串口通道]
+    channel --> request[按点表构造 RTU 请求]
+    request --> response[单次响应读取与校验]
+    response --> frame[原始采集帧]
+    frame --> pub[对应 nanomsg PUB]
+```
 
 先看[主逻辑图](#analysis-3)，再看[配置语义](#analysis-5)、[单点 RTU 处理](#analysis-7)和[发布格式](#analysis-8)。本程序发布原始采集帧，业务数值换算需看下游。
 
@@ -109,38 +114,29 @@
 
 ## 3. 主逻辑流程图
 
-```text
-┌───────────────────────────────────────────────┐
-│ main：openlog、记录版本、调用 modbus_forward_start │
-└──────────────────────┬────────────────────────┘
-                       ↓
-          初始化 4 个通道并读取固定路径 JSON
-                       ↓
-          配置可解析且 com_count > 0？
-                 ├─ 否 → 初始化失败，main 返回 -1
-                 └─ 是 → 为 com0～com3 创建并分离线程
-                             ├─ 主线程每 10 秒休眠，维持进程
-                             └─ 每个通道线程：
-                                  enable 为真？
-                                  ├─ 否 → 线程退出
-                                  └─ 是 → 尝试打开/配置串口
-                                            ↓
-                                         尝试绑定 PUB
-                                            ↓
-                                  串口与 PUB 均可用？
-                                  ├─ 否 → 返回重试
-                                  └─ 是 → 按顺序遍历点表 ────┐
-                                            ↓               │
-                                     检查发布时机与统计日志    │
-                                            ↓               │
-                                     发送 RTU 读请求          │
-                                            ↓               │
-                                     单次 read 并校验响应     │
-                                            ↓               │
-                                  通过 → 追加采集帧到缓存     │
-                                  未通过 → 记录/忽略本次点     │
-                                            └───────────────┘
-                                  一轮结束后继续尝试下一轮
+```mermaid
+flowchart TD
+    start[main：openlog、记录版本、调用 modbus_forward_start] --> init[初始化 4 个通道并读取固定路径 JSON]
+    init --> valid{配置可解析且 com_count > 0?}
+    valid -->|否| fail[初始化失败，main 返回 -1]
+    valid -->|是| threads[为 com0～com3 创建并分离线程]
+    threads --> keep[主线程每 10 秒休眠以维持进程]
+    threads --> enabled{各通道 enable 为真?}
+    enabled -->|否| exit[通道线程退出]
+    enabled -->|是| open[尝试打开 / 配置串口]
+    open --> bind[尝试绑定 PUB]
+    bind --> ready{串口与 PUB 均可用?}
+    ready -->|否| retry[返回重试]
+    retry --> open
+    ready -->|是| point[按顺序遍历点表]
+    point --> timing[检查发布时机与统计日志]
+    timing --> request[发送 RTU 读请求]
+    request --> response[单次 read 并校验响应]
+    response -->|通过| append[追加采集帧到缓存]
+    response -->|未通过| skip[记录 / 忽略本次点]
+    append --> point
+    skip --> point
+    point -->|一轮结束| point
 ```
 
 流程图简化了响应校验条件；站号与功能码比较的实际布尔条件见第 10 节。图只展示源码中的主控制路径，线程创建失败、`nn_send` 失败等边界另见下文。依据：`main.c:13-32`、`src/modbus_forward.c:279-375,458-620`。
@@ -218,32 +214,27 @@
 
 ## 7. 单点 RTU 处理流程
 
-```text
-取下一个采集点
-       ↓
-功能码是 1、2、3、4？
-  ├─ 否 → 不产生成功帧 → 下一个点
-  └─ 是
-       ↓
-slave_id 为 0？
-  ├─ 是 → 尝试站号 1～15；读取超时设为 400 ms
-  └─ 否 → 使用配置站号；读取超时设为 1000 ms
-       ↓
-限制读取数量 → 拼接 8 字节 RTU 请求及 CRC
-       ↓
-tcflush → 循环 write → tcdrain → 等待 5 ms
-       ↓
-完整写入 8 字节？
-  ├─ 否 → 本点无成功帧 → 下一个点
-  └─ 是 → 单次 read，最多读取 64 字节
-               ↓
-          长度、字节数、CRC 等检查通过？
-            ├─ 否 → 本点无成功帧 → 下一个点
-            └─ 是 → 若在探测站号，则固定本点站号
-                         ↓
-                    将响应数据复制到 16 字节内部帧
-                         ↓
-                    加入该通道发布缓存 → 下一个点
+```mermaid
+flowchart TD
+    point[取下一个采集点] --> function{功能码是 1、2、3、4?}
+    function -->|否| skip[不产生成功帧，处理下一个点]
+    function -->|是| slave{slave_id 为 0?}
+    slave -->|是| probe[尝试站号 1～15；读取超时 400 ms]
+    slave -->|否| configured[使用配置站号；读取超时 1000 ms]
+    probe --> limit[限制读取数量并拼接 8 字节 RTU 请求及 CRC]
+    configured --> limit
+    limit --> write[tcflush → 循环 write → tcdrain → 等待 5 ms]
+    write --> complete{完整写入 8 字节?}
+    complete -->|否| skip
+    complete -->|是| read[单次 read，最多读取 64 字节]
+    read --> valid{长度、字节数、CRC 等检查通过?}
+    valid -->|否| skip
+    valid -->|是| fix{是否正在探测站号?}
+    fix -->|是| set[固定本点站号]
+    fix -->|否| copy[复制响应数据到 16 字节内部帧]
+    set --> copy
+    copy --> cache[加入该通道发布缓存]
+    cache --> skip
 ```
 
 请求固定为 8 字节：站号 1、功能码 1、起始地址 2、数量 2、CRC 2。响应读取前等待 5 ms，随后单次 `read(fd,rsp,64)`；读到数据或读错误后等待 200 ms，超时返回 0 时没有该 200 ms 等待。线圈/离散量预计数据字节数为 `ceil(quantity/8)`，寄存器为 `2*quantity`；总长度须等于数据字节数加 5，CRC 计算结果须为 0。有效数据从响应的第 4 个字节开始拷入 8 字节 `data` 区，其余清零。依据：`src/modbus_forward.c:24-56,58-276`。
@@ -308,36 +299,22 @@ tcflush → 循环 write → tcdrain → 等待 5 ms
 
 ### 12.1 排障决策流程图
 
-```text
-设备数据异常
-    ↓
-确认运行的二进制、配置文件、故障时间
-    ↓
-modbus_app 进程存在？
-  ├─ 否 → 检查安装文件、启动日志、配置读取与 JSON 解析
-  └─ 是
-       ↓
-目标 comN 被启用且线程运行？
-  ├─ 否 → 核对 enable、串口字段、点表、启动日志
-  └─ 是
-       ↓
-目标串口能打开并完成配置？
-  ├─ 否 → 核对设备节点、权限、占用、termios 实际值
-  └─ 是
-       ↓
-请求已写出且有有效 RTU 响应？
-  ├─ 否 → 分别判断写失败、超时、站号/功能码、
-  │        字节数、帧长、CRC；必要时做被动抓帧
-  └─ 是
-       ↓
-目标 PUB 端口存在且有消息？
-  ├─ 否 → 查绑定失败、nn_send 错误、缓存发送时机
-  └─ 是
-       ↓
-订阅端解帧和业务换算正确？
-  ├─ 否 → 比较 16 字节帧、地址、数量、原始字节、
-  │        字节序、符号位、比例系数与点表
-  └─ 是 → 再调查其他应用或设备链路
+```mermaid
+flowchart TD
+    symptom[设备数据异常] --> identify[确认运行的二进制、配置文件和故障时间]
+    identify --> process{modbus_app 进程存在?}
+    process -->|否| install[检查安装文件、启动日志、配置读取与 JSON 解析]
+    process -->|是| thread{目标 comN 已启用且线程运行?}
+    thread -->|否| config[核对 enable、串口字段、点表和启动日志]
+    thread -->|是| port{目标串口能打开并完成配置?}
+    port -->|否| device[核对设备节点、权限、占用和 termios 实际值]
+    port -->|是| rtu{请求已写出且有有效 RTU 响应?}
+    rtu -->|否| rtucheck[区分写失败、超时、站号 / 功能码、字节数、帧长、CRC；必要时被动抓帧]
+    rtu -->|是| pub{目标 PUB 端口存在且有消息?}
+    pub -->|否| pubcheck[查绑定失败、nn_send 错误和缓存发送时机]
+    pub -->|是| sub{订阅端解帧和业务换算正确?}
+    sub -->|否| subcheck[比较 16 字节帧、地址、数量、原始字节、字节序、符号位、比例系数与点表]
+    sub -->|是| other[再调查其他应用或设备链路]
 ```
 
 该图是**定位顺序**，不是“经过某检查即证明下一层正确”。例如 `tx_ok` 只证明程序的 `write` 返回完整字节数；`rx_ok` 只证明通过当前代码的校验；`nn_send` 被调用也不证明订阅端收到消息。依据：`src/modbus_forward.c:117-169,217-269,343-367`、`src/ipc_pubsub.c:16-26`。

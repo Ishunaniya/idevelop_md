@@ -21,20 +21,17 @@
 
 ### 核心定位
 
-```text
-产线客户端 / U盘配置
-          │ HTTP :8090 / 配置文件路径
-          ▼
-      nvrfactory 进程
- ┌────────┼──────────┬────────────────────┐
- │ main/config      │ HTTP业务与出厂信息 │
- │ 生命周期/配置    │ RPC包装/共享数据   │
- └────────┼──────────┴──────────┬─────────┘
-          │                    │
-   外部 StorageRPC /        本地 HAL / OS
-   CShareDataBuf / NvNetBuf    strnio / MTD / 网卡ioctl
-          │                    │
-   基础服务、媒体、存储       固件驱动及设备分区
+```mermaid
+flowchart TD
+    A[产线客户端 / U 盘配置] -->|HTTP :8090 / 配置文件路径| B[nvrfactory 进程]
+    B --> C[main / config: 生命周期与配置]
+    B --> D[HTTP 业务与出厂信息: RPC 包装 / 共享数据]
+    C --> E[外部 StorageRPC / CShareDataBuf / NvNetBuf]
+    D --> E
+    C --> F[本地 HAL / OS: strnio / MTD / 网卡 ioctl]
+    D --> F
+    E --> G[基础服务、媒体和存储]
+    F --> H[固件驱动及设备分区]
 ```
 
 这里的“加密”有两种含义，必须区分：一是写入序列号、License、Secret、产品型号等出厂信息并用XXTEA处理Flash内容；二是HTTP摘要鉴权及授权状态签名。它不等于整个生产网络启用了加密传输，也不等于生产测试结果已由云端校验。
@@ -114,22 +111,20 @@ nvr-factory/
 
 ### 4.1 整体分层与真实调用边界
 
-```text
-main
- ├─ wait_nvr_start → 外部基础服务就绪 → 获取设备信息 → 消息线程
- ├─ init_share → CShareDataBuf只读共享数据 → 通道/磁盘信息
- ├─ init_hardware → strnio初始化/GetInfo → MTD表初始化
- ├─ config → 外部RPC提供文件路径 → nv_read_file → cJSON/s2j
- ├─ 可选U盘升级 → 本地版本判断 → StorageRPC发起升级
- └─ 配网/HTTP/BLE/syslog
-          │
-          ▼
-  单个Mongoose事件循环线程（TCP 8090）
-          │ 顶层endpoint → 子路径分发
-          ├─ StorageRPC包装 → 外部设备服务
-          ├─ 本地HAL → ioctl、MTD、RTC
-          ├─ 本地文件 → 产测状态、音频包、日志、快照
-          └─ 异步线程 → 老化、UDP音频、URL升级、指示灯
+```mermaid
+flowchart TD
+    A[main] --> B[等待基础服务就绪、获取设备信息并启动消息线程]
+    B --> C[init_share: 读取通道 / 磁盘共享数据]
+    C --> D[init_hardware: 初始化 strnio / GetInfo / MTD 表]
+    D --> E[config: RPC 获取路径，nv_read_file 并解析 cJSON / s2j]
+    E --> F[可选 U 盘升级: 判断本地版本并经 StorageRPC 发起升级]
+    F --> G[初始化配网 / HTTP / BLE / syslog]
+    G --> H[单个 Mongoose 事件循环线程监听 TCP 8090]
+    H --> I[顶层 endpoint 与子路径分发]
+    I --> J[StorageRPC 包装调用外部设备服务]
+    I --> K[本地 HAL: ioctl / MTD / RTC]
+    I --> L[本地文件: 产测状态 / 音频包 / 日志 / 快照]
+    I --> M[异步线程: 老化 / UDP 音频 / URL 升级 / 指示灯]
 ```
 
 HTTP端口的日志写“multi-threaded server”，但实际只有一个`mg_mgr_poll(...,500)`事件循环。其他工作线程独立存在，并不意味着每个HTTP请求有独立线程。LED测试中的0.5秒睡眠、RTC测试中的1.5秒等待、CPU利用率采样的1秒等待及同步RPC都可能阻塞其他HTTP请求。
@@ -546,82 +541,105 @@ XXTEA参与出厂Flash读写；HMAC-SHA1/SHA1与Base64参与授权信息输出�
 
 ### 7.1 启动与U盘配置流
 
-```text
-设备外部组件检测U盘/拉起进程（本仓库外）
-   ↓
-等待基础服务就绪 → 设备信息/消息线程 → 共享数据/硬件/MTD
-   ↓
-RPC取得配置路径 → nv_read_file → cJSON/s2j → param
-   ├─ 成功：STEP_OK、打印配置、RPC补光类型
-   └─ 失败：错误状态/日志；main仍继续
-   ↓
-MPC非AOV申请时间片 → 可选U盘升级预检查/RPC
-   ↓
-网络配置请求 → HTTP线程请求 → BLE开关 → 可选syslog → 常驻
+```mermaid
+flowchart TD
+    A[外部组件检测 U 盘并拉起进程，本仓库外] --> B[等待基础服务就绪]
+    B --> C[启动设备信息 / 消息线程，初始化共享数据、硬件和 MTD]
+    C --> D[RPC 获取配置路径]
+    D --> E[nv_read_file 并用 cJSON / s2j 解析 param]
+    E --> F{配置读取成功?}
+    F -->|是| G[设置 STEP_OK、打印配置并经 RPC 设置补光类型]
+    F -->|否| H[记录错误状态和日志，main 仍继续]
+    G --> I[MPC 非 AOV 申请时间片]
+    H --> I
+    I --> J[按条件进行 U 盘升级预检查和 RPC]
+    J --> K[处理网络配置请求]
+    K --> L[启动 HTTP 请求线程]
+    L --> M[设置 BLE 开关]
+    M --> N[按配置启用 syslog]
+    N --> O[进入常驻运行]
 ```
 
 本流程不包含本地自动搜U盘、检测UI页面或读取配置后完整验证网络；这些能力不能由main注释补出。
 
 ### 7.2 HTTP命令与产测结果流
 
-```text
-TCP接收缓冲 → MG_EV_RECV解析与鉴权
-   ├─ 拒绝：401、清空接收缓冲、关闭标志
-   └─ 放行：Mongoose重新解析 → 最长endpoint → 子分支
-                  ├─ 本地HAL/RTC/文件操作
-                  ├─ RPC动作/查询
-                  ├─ 新建后台线程
-                  └─ 固定成功文本/本地状态写入
-                       ↓
-                    HTTP响应
+```mermaid
+flowchart TD
+    A[TCP 接收缓冲] --> B[MG_EV_RECV 解析与鉴权]
+    B --> C{鉴权通过?}
+    C -->|否| D[返回 401、清空接收缓冲并关闭标志]
+    C -->|是| E[Mongoose 重新解析请求]
+    E --> F[匹配最长 endpoint 并进入子分支]
+    F --> G[本地 HAL / RTC / 文件操作]
+    F --> H[RPC 动作 / 查询]
+    F --> I[创建后台线程]
+    F --> J[写固定成功文本 / 本地状态]
+    G --> K[生成 HTTP 响应]
+    H --> K
+    I --> K
+    J --> K
 ```
 
 响应生成位置随handler而不同，媒体发送和声音包上传甚至先应答再动作。生产客户端应把响应接受、动作完成和质量判定视为独立事件；当前代码没有统一的完成回执协议。
 
 ### 7.3 出厂信息写入与授权材料流
 
-```text
-/flash/encryption 或 /flash/identity POST
-   ↓ JSON字段/更新位
-读取MTD当前数据 → XXTEA解密 → magic/布局检查
-   ↓
-选择性改字段 → 分块XXTEA → 擦64KiB → 写2KiB+6KiB → sync
-   ↓  当前写失败可能仍返回0
-HTTP结果
-
-/product_test/auth_info 或 auth_state
-   ↓
-Flash License/Secret/SN + 本地factory_test.conf标志
-   ↓
-param1 JSON → HMAC-SHA1 → Base64/字符转换 → param2
-   ↓
-HTTP返回给产线工具；客户端/云端后续验证在仓库外
+```mermaid
+flowchart TD
+    A[POST /flash/encryption 或 /flash/identity] --> B[解析 JSON 字段和更新位]
+    B --> C[读取当前 MTD 数据]
+    C --> D[XXTEA 解密]
+    D --> E[检查 magic 和布局]
+    E --> F[选择性修改字段]
+    F --> G[分块 XXTEA 加密]
+    G --> H[擦除 64 KiB 并写入 2 KiB + 6 KiB]
+    H --> I[sync 并返回 HTTP 结果，当前写失败可能仍返回 0]
+    J[GET /product_test/auth_info 或 auth_state] --> K[读取 Flash License / Secret / SN 和本地 factory_test.conf 标志]
+    K --> L[param1 JSON]
+    L --> M[HMAC-SHA1]
+    M --> N[Base64 / 字符转换]
+    N --> O[param2]
+    O --> P[HTTP 返回产线工具]
+    P -. 客户端 / 云端后续验证位于仓库外 .-> Q[外部验证]
 ```
 
 ### 7.4 老化与按键事件流
 
-```text
-HTTP start_aging 或 app-msg-push中的reset短按
-   ↓
-本地aging状态=1 → aging_state=0落盘 → 外部老化/补光请求
-   ↓
-300秒周期线程：IR → 登录声音 → IR-cut → PTZ
-   ├─ 系统uptime>12h：aging_state=1（非老化累计时长）
-   └─ 本地状态=0：退出动作、WiFi重连、线程结束
+```mermaid
+flowchart TD
+    A[HTTP start_aging 或 app-msg-push reset 短按] --> B[本地 aging 状态置 1]
+    B --> C[aging_state=0 落盘]
+    C --> D[发起外部老化 / 补光请求]
+    D --> E[300 秒周期线程执行 IR、登录声音、IR-cut、PTZ]
+    E --> F{系统 uptime > 12 小时?}
+    F -->|是| G[aging_state=1，表示 uptime 条件而非老化累计时长]
+    F -->|否| H{本地状态仍为 1?}
+    H -->|是| E
+    H -->|否| I[退出动作、Wi-Fi 重连并结束线程]
 ```
 
 ### 7.5 媒体与升级数据流
 
-```text
-av_play JSON → RPC发送设置 → 外部编码/发流 → 产线接收端
-
-UDP :6765 → 恰好320字节 → RPC音频包 → 外部播放系统
-
-抓图HTTP → 每通道RPC → /tmp/snapshot_test.jpg → 固定容量HTTP响应
-
-URL升级 → HEAD长度 → Range GET≤64KiB → 分片RPC → updatefw RPC
-   ↓
-轮询外部刷写进度 → ≥100释放锁（无统一总超时）
+```mermaid
+flowchart TD
+    A[av_play JSON] --> B[RPC 发送设置]
+    B --> C[外部编码 / 发流]
+    C --> D[产线接收端]
+    E[UDP :6765] --> F[要求恰好 320 字节]
+    F --> G[RPC 音频包]
+    G --> H[外部播放系统]
+    I[抓图 HTTP] --> J[逐通道 RPC]
+    J --> K[/tmp/snapshot_test.jpg]
+    K --> L[固定容量 HTTP 响应]
+    M[URL 升级] --> N[HEAD 获取长度]
+    N --> O[Range GET，每次不超过 64 KiB]
+    O --> P[分片 RPC]
+    P --> Q[updatefw RPC]
+    Q --> R[轮询外部刷写进度]
+    R --> S{进度达到 100?}
+    S -->|是| T[释放锁]
+    S -->|否| R
 ```
 
 图中“外部”环节未在本仓库完成端到端验证，视频编码格式、发流协议、音频codec、固件签名校验和刷写原子性均须配套源码/运行证据。

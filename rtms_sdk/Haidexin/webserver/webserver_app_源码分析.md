@@ -50,12 +50,13 @@
 
 ## 核心架构设计
 
-```text
-浏览器 → GoAhead 路由 / 认证 → webserver_init 注册的 action
-                                     ↓
-             action_handle → 模板 / Excel 转换 / 配置文件
-                                     ↓
-                              HTTP 响应或设备文件
+```mermaid
+flowchart TD
+    browser[浏览器] --> route[GoAhead 路由 / 认证]
+    route --> action[webserver_init 注册的 action]
+    action --> handle[action_handle]
+    handle --> transform[模板 / Excel 转换 / 配置文件]
+    transform --> result[HTTP 响应或设备文件]
 ```
 
 安装的路由受 ENABLE_LOGIN_AUTH 影响；设备实际链接的 GoAhead 构建、认证和文件权限仍需现场核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -77,12 +78,20 @@
 
 ## 关键流程与数据流
 
-~~~text
-启动 → GoAhead 加载文档目录 / 路由 → 监听并注册 action
-浏览器请求 → 路由 / 认证 → 对应 action
-  ├→ 导入：上传文件 → 转换脚本 → 配置文件
-  └→ 导出：读取目标文件 → 分块写回 → 浏览器下载
-~~~
+```mermaid
+flowchart TD
+    start[启动] --> go[GoAhead 加载文档目录 / 路由]
+    go --> listen[监听并注册 action]
+    browser[浏览器请求] --> route[路由 / 认证]
+    route --> action[对应 action]
+    action --> kind{操作类型}
+    kind -->|导入| upload[上传文件]
+    upload --> convert[转换脚本]
+    convert --> config[配置文件]
+    kind -->|导出| read[读取目标文件]
+    read --> chunks[分块写回]
+    chunks --> download[浏览器下载]
+```
 
 图和实现细节分别见[启动](#analysis-3)、[页面请求](#analysis-4)、[导入及导出](#analysis-5)；安装路由的认证模式由构建配置选择，设备上的实际效果还须结合[认证边界](#analysis-6)。
 

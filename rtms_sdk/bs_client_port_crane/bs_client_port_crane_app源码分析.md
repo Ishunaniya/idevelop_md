@@ -2,7 +2,7 @@
 
 > 分析对象：`/home/tronlong/lyp/code/rtms_sdk/apps/bs_client_port_crane/`；Git 分支 `develop/rtms_sdk_v1.3_20240408`，提交 `bc60961e`。下文的文件行号对应这次检出的源码。分析以本目录、`apps/CMakeLists.txt` 的静态调用关系为依据；外部库、本机服务、换电站和真实整车行为不在本次源码中，不能由本报告替它们作运行保证。
 
-阅读顺序：先看[主流程图](#3-实际逻辑流程图)和[站端流程图](#61-连接重连发送)，再按[现场故障排查](#11-现场故障排查手册)定位问题。两处流程都提供纯文本版，可在普通 Markdown 阅读器中直接看到。
+阅读顺序：先看[主流程图](#3-实际逻辑流程图)和[站端流程图](#61-连接重连发送)，再按[现场故障排查](#11-现场故障排查手册)定位问题。两处流程均使用 Mermaid 格式，需由支持 Mermaid 的 Markdown 阅读器渲染。
 
 <!-- rtms-analysis-guide:start -->
 
@@ -55,11 +55,15 @@
 
 ## 核心架构设计
 
-```text
-本机 CAN → can_server → app_mng 共享状态 ↔ batt_stand_client ↔ 换电站
-                                         ↓
-                                  cmd → 本机控制服务
-app_server 的 GPS / MCU 线程在当前 main 路径未启动
+```mermaid
+flowchart LR
+    can[本机 CAN] --> server[can_server]
+    server --> state[app_mng 共享状态]
+    state <--> client[batt_stand_client]
+    client <--> tcp[换电站]
+    state --> cmd[cmd]
+    cmd --> service[本机控制服务]
+    gps[app_server 的 GPS / MCU 线程] -. 当前 main 路径未启动 .-> state
 ```
 
 顶层 add_subdirectory 被注释；源码存在的 CAN 发帧和 GPS/MCU 处理并不都在当前入口执行。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
@@ -81,11 +85,14 @@ app_server 的 GPS / MCU 线程在当前 main 路径未启动
 
 ## 关键流程与数据流
 
-~~~text
-本机 CAN → 共享车辆 / 电池状态
-Wi-Fi / 站端 TCP ↔ 心跳、车辆信息与换电状态
-站端换电状态 → 本机命令发布 → 下游控制服务
-~~~
+```mermaid
+flowchart TD
+    can[本机 CAN] --> state[共享车辆 / 电池状态]
+    state <--> tcp[Wi-Fi / 站端 TCP]
+    tcp <--> data[心跳、车辆信息与换电状态]
+    data -->|站端换电状态| command[本机命令发布]
+    command --> service[下游控制服务]
+```
 
 从[实际逻辑图](#analysis-3)进入，再查[CAN 与 VIN](#analysis-5)、[站端协议](#analysis-6)和[本机命令](#analysis-7)。当前入口未启动已编入的 GPS/MCU 线程；顶层构建也未纳入该目录。
 
@@ -119,33 +126,9 @@ Wi-Fi / 站端 TCP ↔ 心跳、车辆信息与换电状态
 
 ## 3. 实际逻辑流程图
 
-先给出纯文本流程图，普通 Markdown 阅读器打开文件就能看到。图中只包含 `main()` 真正创建的线程；共享状态箭头表示读写关系，不代表严格的线程执行先后。
+下图使用 Mermaid 表示 `main()` 真正创建的线程。图中只包含 `main()` 真正创建的线程；共享状态箭头表示读写关系，不代表严格的线程执行先后。
 
-```text
-main()
-  │
-  ├─ /tmp/<argv[0]>.pid 文件锁：已有实例？ ── 是 ──→ 返回 1
-  │                                      否
-  ├─ 注册 SIGPIPE / SIGUSR1 / SIGUSR2，记录版本 1.0
-  ├─ canapp_mng_init()
-  │    ├─ 分配 CAN 状态、站端状态和发送队列
-  │    ├─ 读取 T-Box ID、VIN、站端地址、Wi-Fi 参数
-  │    ├─ 初始化失败 ────────────────────────────→ 返回 -1
-  │    └─ Wi-Fi JSON 参数变化？ ── 是 ──→ 写配置 → 重启 → 退出
-  ├─ 注册 CPActive（超时 30 秒）；失败 ──────────→ 返回 -1
-  ├─ 保活线程：每 15 秒刷新进程访问时间 ─────────┐
-  ├─ CAN 线程：SUB 16002/16003/16004 → 解析帧 ─┤
-  ├─ 站端接收线程：wlan0 IP → TCP → 解析指令 ───┤→ 共享 app_mng
-  ├─ 站端发送线程：心跳/车辆信息 → 队列 → TCP ────┤   can_data / batt_data
-  └─ 周期线程：约 100 ms 检查超时与状态 ────────┘
-       ├─ CAN/BMS 超时处理
-       ├─ 更新 Wi-Fi 接口状态、换电请求超时处理
-       └─ PUB 26008：唤醒请求、换电状态、车型 PORT_CRANE
 
-  app_msg_task（GPS/MCU）在 main.c 中被注释，当前不启动。
-```
-
-支持 Mermaid 的阅读器还可显示下面的节点图。
 
 ```mermaid
 flowchart TD
@@ -229,55 +212,42 @@ CAN 线程创建三个 `NN_SUB` socket 并订阅全部消息，分别连接 `tcp
 
 ### 6.1 连接、重连、发送
 
-```text
-站端接收线程
-  检查 wlan0 IPv4
-    ├─ 无地址 → 等 3 秒 → 再检查
-    └─ 有地址 → TCP connect
-                   ├─ 失败 → 等 3 秒 → 再检查
-                   └─ 成功 → select/read
-                                ├─ 超过 20 次 1 秒空等 → 断连
-                                ├─ read 失败或返回 0 → 断连
-                                └─ 收到字节 → 解析命令
-                                     ├─ 心跳答复 → 比较本机 ID/VIN
-                                     │                └─ 不匹配 → 握手失败 → 断连
-                                     ├─ 请求车辆信息 → CarInfo_Req=1
-                                     └─ 换电状态 → 更新 batt_data
-  断连后清 CarInfo_Req、关闭 socket、等 3 秒重连；
-  握手失败时还经过约 10 秒条件等待。
-
-站端发送线程（与接收线程并行）
-  ├─ TCP 未连接 → 等 1 秒 → 再检查
-  └─ TCP 已连接 → 从队列取出最多一帧
-                   → 约每 3 秒入队心跳
-                   → CAN 正常且站端请求时，约每 1 秒入队车辆信息
-                   → send 已取出的帧 → 等 500 ms → 循环
-```
-
-下面的 Mermaid 图与纯文本图描述同一条执行路径。
-
 ```mermaid
-flowchart LR
-    A[接收线程检查 wlan0 IPv4] --> B{有 IPv4?}
-    B -- 否 --> A
-    B -- 是 --> C[TCP connect 到站端]
-    C --> D{连接成功?}
-    D -- 否 --> A
-    D -- 是 --> E[select/read 站端字节]
-    E --> F[解析命令并更新 batt_data]
-    F --> G{远端 ID 已取得?}
-    G -- 是 --> H[与本机 ID 或 VIN 比较]
-    H -- 失败 --> I[标记握手失败并断连]
-    H -- 成功 --> E
-    G -- 否 --> E
-    E -- 读失败/关闭/空等超限 --> I
-    I --> J[清 CarInfo_Req、关闭 socket、重试]
-    K[发送线程] --> L{socket 可用?}
-    L -- 是 --> M[从队列取一帧]
-    M --> N[按时间入队心跳；CAN 有效且站端请求时入队车辆信息]
-    N --> O[send 已取出的帧]
-    O --> K
+flowchart TD
+    subgraph receive[站端接收线程]
+        ip{检查 wlan0 IPv4}
+        ip -->|无地址| waitip[等待 3 秒]
+        waitip --> ip
+        ip -->|有地址| connect[TCP connect]
+        connect -->|失败：等 3 秒| ip
+        connect -->|成功| read[select / read]
+        read -->|超过 20 次 1 秒空等| disconnect[断连]
+        read -->|read 失败或返回 0| disconnect
+        read -->|收到字节| parse[解析命令]
+        parse -->|心跳答复| match{本机 ID / VIN 匹配?}
+        match -->|否| handshake[握手失败并断连]
+        match -->|是| read
+        parse -->|请求车辆信息| car[CarInfo_Req=1]
+        parse -->|换电状态| batt[更新 batt_data]
+        car --> read
+        batt --> read
+        disconnect --> cleanup[清 CarInfo_Req、关闭 socket]
+        handshake --> cleanup
+        cleanup -->|等 3 秒后重连；握手失败还等待约 10 秒| ip
+    end
+    subgraph send[站端发送线程，与接收线程并行]
+        connected{TCP 已连接?}
+        connected -->|否：等 1 秒| connected
+        connected -->|是| dequeue[从队列取最多一帧]
+        dequeue --> heartbeat[约每 3 秒入队心跳]
+        heartbeat --> info[CAN 正常且站端请求时，约每 1 秒入队车辆信息]
+        info --> sendframe[send 已取出的帧]
+        sendframe --> delay[等待 500 ms]
+        delay --> connected
+    end
 ```
+
+上方 Mermaid 图已展开接收与发送线程的等待、断连和状态路径。
 
 图中的失败回环包含源码中的 3 秒重试休眠；握手失败还经过约 10 秒条件等待。发送线程与接收线程并行运行，图中两侧不表示先后顺序。依据：`src/batt_stand_client/batt_stand_client.c:140-315`。
 
@@ -370,27 +340,21 @@ flowchart LR
 
 ### 11.1 一页定位流程
 
-```text
-设备报“bs_client 相关故障”
-  │
-  ├─ 程序是否存在且持续运行？
-  │    ├─ 否 → 11.3 启动、退出、重启
-  │    └─ 是
-  ├─ wlan0 有 IP，站端 TCP 7701 已连接吗？
-  │    ├─ 否 → 11.4 Wi-Fi 与 TCP
-  │    └─ 是
-  ├─ 是否收到有效的站端报文和心跳答复？
-  │    ├─ 否 → 11.5 报文、握手和超时
-  │    └─ 是
-  ├─ CAN 消息实际到达，canState / bmsState 正常吗？
-  │    ├─ 否 → 11.6 CAN、电池数据、VIN
-  │    └─ 是
-  ├─ 站端下发 0x0303 / 0x0606 后，本机发布命令了吗？
-  │    ├─ 否 → 11.7 命令发布和状态机
-  │    └─ 是
-  └─ 下游服务收到并执行，设备有对应物理反馈吗？
-       ├─ 否 → 核对命令消费者、CAN/MCU、整车和站端记录
-       └─ 是 → 对齐双方时间戳、协议应答与最终换电结果
+```mermaid
+flowchart TD
+    symptom[设备报“bs_client 相关故障”] --> process{程序存在且持续运行?}
+    process -->|否| startup[检查启动、退出和重启（11.3）]
+    process -->|是| ip{wlan0 有 IP，且站端 TCP 7701 已连接?}
+    ip -->|否| network[检查 Wi-Fi 与 TCP（11.4）]
+    ip -->|是| heartbeat{收到有效站端报文和心跳答复?}
+    heartbeat -->|否| protocol[检查报文、握手和超时（11.5）]
+    heartbeat -->|是| can{CAN 消息到达且 canState / bmsState 正常?}
+    can -->|否| cancheck[检查 CAN、电池数据和 VIN（11.6）]
+    can -->|是| command{站端下发 0x0303 / 0x0606 后本机发布命令?}
+    command -->|否| cmdcheck[检查命令发布和状态机（11.7）]
+    command -->|是| feedback{下游服务收到并执行，且设备有物理反馈?}
+    feedback -->|否| downstream[核对命令消费者、CAN / MCU、整车和站端记录]
+    feedback -->|是| result[对齐双方时间戳、协议应答与最终换电结果]
 ```
 
 这是一条排查顺序，不是故障归因结论。例如 `io_mng` 的头文件定义了 CAN 发布地址 16002–16004 和命令订阅地址 26008，但实际设备是否运行 `io_mng`、是否订阅并处理 `CMD_TAG=221`，仍须核对部署版本及下游日志。依据：`apps/io_mng/src/io_mng/io_mng.h:49-74,85-110`、`apps/io_mng/src/can/can_process.c:25-33`、`apps/io_mng/src/cmd/cmd.c:160-210`、本目录 `src/cmd/cmd.h:6-31`。

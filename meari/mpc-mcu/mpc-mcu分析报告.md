@@ -21,22 +21,17 @@
 
 ### 核心定位
 
-```text
-摄像机主控 / 外部升级发送端
-         │ UART 私有协议 + GPIO 唤醒
-         ▼
-┌─────────────────────────────────────────┐
-│ MCU app（RT-Thread）                    │
-│ dsp：命令、查询、事件、休眠协商          │
-│ run_mode：电量模式、上/下电、心跳监督    │
-│ pir / ele_meter / wakeup：传感器与事件   │
-├─────────────────────────────────────────┤
-│ BSP：GPIO / UART / Flash / 时钟 / WDT   │
-│      SysTick / 低功耗定时器 / Sleep      │
-└─────────────────────────────────────────┘
-         │ 重启 + Flash 升级标志
-         ▼
-bootloader（裸机）：引导 app 或接收升级分块
+```mermaid
+flowchart TD
+    A[摄像机主控 / 外部升级发送端] <-->|UART 私有协议、GPIO 唤醒| B
+    subgraph B[MCU app: RT-Thread]
+        C[dsp: 命令、查询、事件、休眠协商]
+        D[run_mode: 电量模式、上 / 下电、心跳监督]
+        E[pir / ele_meter / wakeup: 传感器与事件]
+    end
+    B <--> F[BSP: GPIO / UART / Flash / 时钟 / WDT / SysTick / 低功耗定时器 / Sleep]
+    B -->|重启并设置 Flash 升级标志| G[bootloader 裸机: 引导 app 或接收升级分块]
+    G -->|正常引导| B
 ```
 
 **能力边界**：可以从源码确认控制逻辑和接口，不能据此确认功耗数值、实际续航、PIR 检出率、所有板卡可用、升级掉电可靠性或完整产品链路成功。尤其工厂模式绕过真实电量进行模式决策，工厂固件正常运行不能证明正式固件的低电量路径正常。
@@ -144,15 +139,20 @@ RT-Thread 各部分中，内核 `src` 15 文件，公开头文件 15，CPU 移�
 
 同一工程构建两个独立映像：bootloader 处于 Flash 起始地址；app 位于应用分区。二者使用同一公共命令枚举和板级库，但各自拥有 `dsp.c` 和入口；boot 不链接 RT-Thread 内核，app 链接内核和 Cortex-M0 上下文切换代码。[factory_objs.mk:21](/home/tronlong/lyp/meari/mpc-mcu/factory_objs.mk:21)、[factory_objs.mk:32](/home/tronlong/lyp/meari/mpc-mcu/factory_objs.mk:32)、[factory_objs.mk:48](/home/tronlong/lyp/meari/mpc-mcu/factory_objs.mk:48)。
 
-```text
-硬件 Reset
-  └─ startup.S：初始化 .data/.bss → SystemInit → entry
-       ├─ boot 的 entry → boot main
-       │    ├─ 没有升级标志 + 向量检查通过 → app Reset_Handler
-       │    └─ 有升级标志或引导未成功 → 裸机升级服务
-       └─ app 的 entry → rtthread_startup
-            → board/heap → 内核对象/定时器/调度初始化
-            → main 线程 → app/main.c
+```mermaid
+flowchart TD
+    A[硬件 Reset] --> B[startup.S 初始化 .data / .bss]
+    B --> C[SystemInit]
+    C --> D[entry]
+    D --> E{入口映像}
+    E -->|boot entry| F[boot main]
+    F --> G{升级标志存在或 app 向量检查失败?}
+    G -->|否| H[跳转 app Reset_Handler]
+    G -->|是| I[进入裸机升级服务]
+    E -->|app entry| J[rtthread_startup]
+    J --> K[board / heap 初始化]
+    K --> L[内核对象、定时器和调度初始化]
+    L --> M[main 线程进入 app/main.c]
 ```
 
 F005 的 `SystemInit()` 只更新核心时钟变量；实际时钟、看门狗、Flash、GPIO、UART 初始化发生在 boot。app 的板级初始化重新配置 SysTick 和堆，没有重新调用上述驱动初始化。因此 **app 依赖已有 bootloader 的引导/硬件状态**，单独把 `ppsapp.bin` 烧到地址 0 不能形成正确的本工程启动流程。[rt-thread/bsp/hc32f005/libraries/common/gcc/startup.S:62](/home/tronlong/lyp/meari/mpc-mcu/rt-thread/bsp/hc32f005/libraries/common/gcc/startup.S:62)、[rt-thread/bsp/hc32f005/libraries/common/system_hc32f005.c:81](/home/tronlong/lyp/meari/mpc-mcu/rt-thread/bsp/hc32f005/libraries/common/system_hc32f005.c:81)、[boot/main.c:49](/home/tronlong/lyp/meari/mpc-mcu/boot/main.c:49)、[rt-thread/bsp/hc32f005/board/board.c:39](/home/tronlong/lyp/meari/mpc-mcu/rt-thread/bsp/hc32f005/board/board.c:39)、[rt-thread/src/components.c:213](/home/tronlong/lyp/meari/mpc-mcu/rt-thread/src/components.c:213)。
@@ -774,82 +774,99 @@ app的MSP仅256字节，boot为1024字节；业务线程使用PSP，GPIO/UART/Sy
 
 ### 7.1 上电与系统服务启动
 
-```text
-硬件复位 → boot启动初始化 → 等待约3秒
-  ├─ 升级标志存在/未跳转 → 主控/模组上电 → UART升级循环
-  └─ 正常app向量 → app Reset_Handler
-       → 数据/BSS初始化 → SystemInit更新时钟
-       → RT-Thread初始化堆/调度/线程
-       → main初始化电量计/PIR、注册UART、建立模式线程
-       → 模式线程读SOC并决策
-            ├─ 正式模式电量允许 → 主控与模组上电，启用PIR/SIM
-            └─ NONE → 关闭相关供电与中断，MCU仍保留自身周期唤醒
+```mermaid
+flowchart TD
+    A[硬件复位] --> B[boot 启动初始化并等待约 3 秒]
+    B --> C{升级标志存在或尚未跳转?}
+    C -->|是| D[主控 / 模组上电]
+    D --> E[UART 升级循环]
+    C -->|否，app 向量有效| F[跳转 app Reset_Handler]
+    F --> G[初始化数据 / BSS，SystemInit 更新时钟]
+    G --> H[RT-Thread 初始化堆、调度和线程]
+    H --> I[main 初始化电量计 / PIR、注册 UART、建立模式线程]
+    I --> J[模式线程读取 SOC 并决策]
+    J --> K{正式模式电量允许?}
+    K -->|是| L[主控与模组上电，启用 PIR / SIM]
+    K -->|否，NONE| M[关闭相关供电与中断，保留 MCU 周期唤醒]
 ```
 
 boot正常跳转发生在boot“主控上电”代码之前，所以正常启动的供电由app模式线程决定；升级入口才由boot给主控上电。首次等待、驱动初始化和PIR/电量计耗时都影响上电延迟，本次未测量总启动时间。
 
 ### 7.2 PIR/共享网络唤醒与主控事件
 
-```text
-PIR 或共享4G/主控 GPIO IRQ
-  → wakeup_src |= 位，event |= 位 → 释放mode信号量
-  → MCU退出WFI（若当时在睡眠）并恢复驱动/tick
-  → mode线程检查/释放PIR触发，取event后清event
-  → 主控有供电时转换为协议事件
-  → 逻辑有效10ms唤醒脉冲 + EVENT_REQ（掩码/计数）
-  → 等确认，200ms一轮、初次加最多10次重试
-       ├─ EVENT_RSP → 完成
-       ├─ 仅PIR且来源已被主控消费 → 提前完成
-       └─ 全部超时 → 返回-1；调用方未恢复原event
+```mermaid
+flowchart TD
+    A[PIR 或共享 4G / 主控 GPIO IRQ] --> B[设置 wakeup_src 与 event 位，释放 mode 信号量]
+    B --> C[若处于 WFI 则唤醒 MCU，并恢复驱动 / tick]
+    C --> D[mode 线程检查 PIR 并读取、清除 event]
+    D --> E{主控已供电?}
+    E -->|是| F[转换为协议事件]
+    E -->|否| G[暂不发送主控事件]
+    F --> H[逻辑有效 10 ms 唤醒脉冲并发送 EVENT_REQ]
+    H --> I[等待确认: 每轮 200 ms，最多重试 10 次]
+    I --> J{收到 EVENT_RSP?}
+    J -->|是| K[完成]
+    J -->|否，PIR 来源已被主控消费| L[提前完成]
+    J -->|否且重试耗尽| M[返回 -1，调用方未恢复原 event]
 ```
 
 网络硬件如何产生共享唤醒脚属于外部模组/主控实现；本仓库只负责响应该引脚。不能画成 MCU 接收TCP消息、解析云命令再唤醒摄像头的链路。
 
 ### 7.3 主控许可睡眠与周期恢复
 
-```text
-主控 GPIO先唤醒MCU / UART通信恢复
-  → 可用 WAKEUP_MCU_REQ声明DSP来源
-  → 主控发 MCU_SLEEP_REQ
-  → dsp线程设置dsp_wakeup=0、allow_sleep=1，通知mode线程并响应
-  → mode检查：供电为0或allow_sleep为1；没有按键持续按下
-  → UART/引脚/Flash/WDT/SysTick/时钟进入睡眠配置
-  → 启TIM2（45秒）→ 普通Sleep/WFI
-       ├─ TIMER单独唤醒 → 恢复、喂狗、补tick，保留睡眠许可
-       └─ 外部/多个来源 → 恢复、补tick，清allow_sleep，处理业务
+```mermaid
+flowchart TD
+    A[主控 GPIO 唤醒 MCU，恢复 UART 通信] --> B[可用 WAKEUP_MCU_REQ 声明 DSP 来源]
+    B --> C[主控发送 MCU_SLEEP_REQ]
+    C --> D[dsp 线程设置 dsp_wakeup=0、allow_sleep=1，通知 mode 并响应]
+    D --> E{供电为 0 或允许休眠，且按键未持续按下?}
+    E -->|否| F[保持运行]
+    E -->|是| G[UART、引脚、Flash、WDT、SysTick 和时钟进入睡眠配置]
+    G --> H[启动 TIM2: 45 秒]
+    H --> I[普通 Sleep / WFI]
+    I --> J{唤醒来源}
+    J -->|仅 TIMER| K[恢复、喂狗、补 tick，保留睡眠许可]
+    J -->|外部或多个来源| L[恢复、补 tick，清 allow_sleep 并处理业务]
+    K --> I
 ```
 
 UART在睡眠时被关闭，因此不能把任意UART字节描述成独立可靠唤醒源；需要外部GPIO唤醒协作。这里也没有控制摄像机视频采集间隔、主控媒体suspend或录像帧率的算法，MCU与参考报告中的主控AOV调度器职责不同。
 
 ### 7.4 低电量/长按关机
 
-```text
-SOC迟滞进入NONE 或 主控有电时按键持续约5秒
-  → POWER_OFF来源和事件 → 记录请求时间
-  → 通过EVENT_REQ通知主控
-       ├─ 主控发SHUTDOWN_REQ → 置allow_power_off
-       └─ 超过30秒未完成 → 强制进入下电分支
-  → 清事件/来源 → 关闭主控两根电源控制脚与模组供电
-  → 禁用PIR与非WiFi的SIM中断 → 清心跳计时
-  → MCU普通Sleep，每45秒醒来维护
+```mermaid
+flowchart TD
+    A[SOC 迟滞进入 NONE，或主控有电时按键约 5 秒] --> B[设置 POWER_OFF 来源和事件并记录时间]
+    B --> C[通过 EVENT_REQ 通知主控]
+    C --> D{主控发 SHUTDOWN_REQ?}
+    D -->|是| E[设置 allow_power_off]
+    D -->|否，超过 30 秒| F[强制进入下电分支]
+    E --> G[清事件和来源]
+    F --> G
+    G --> H[关闭主控电源控制脚与模组供电]
+    H --> I[禁用 PIR 与非 WiFi 的 SIM 中断，清心跳计时]
+    I --> J[MCU 普通 Sleep，每 45 秒唤醒维护]
 ```
 
 长按关机不是直接断MCU电源。恢复电量导致模式转为非NONE或允许条件下长按，可走重新上电；实际充电曲线和恢复等待需上板测量。
 
 ### 7.5 OTA 与生产烧录/升级包
 
-```text
-生产烧录：bootloader.hex + factory ppsapp.hex
-          → merge.sh / hex2tobin → 工厂合并镜像
-          （写入boot中PCB字节；app含PPS_FACTORY）
-
-产品升级：normal ppsapp.bin
-          → pack工具加128字节头 → 兄弟mpc-pack工程
-          → 外部主控解封装/传输（不在本仓库）
-          → app OTA_REQ：写标志、复位
-          → boot OTA_DATA：按块擦写app
-          → 收到末块即完成标记 → 清标志、控制电源、复位
-          → boot重新检查应用向量 → 进入新app
+```mermaid
+flowchart TD
+    subgraph Factory[生产烧录]
+        A[bootloader.hex + factory ppsapp.hex] --> B[merge.sh / hex2tobin]
+        B --> C[工厂合并镜像: boot 写 PCB 字节，app 含 PPS_FACTORY]
+    end
+    subgraph OTA[产品升级]
+        D[normal ppsapp.bin] --> E[pack 工具添加 128 字节头]
+        E --> F[兄弟 mpc-pack 工程]
+        F --> G[外部主控解封装并传输，本仓库外]
+        G --> H[app OTA_REQ 写标志并复位]
+        H --> I[boot OTA_DATA 按块擦写 app]
+        I --> J[收到末块后标记完成，清标志、控制电源并复位]
+        J --> K[boot 重新检查应用向量并进入新 app]
+    end
 ```
 
 正式源清单不构建bootloader，但正式app仍依赖已烧录boot。app更新不重写 `0x15F8`，所以正常流程下保留原PCB值；异常offset若越过接收检查则不能作此保证。工厂/正式app需要区分使用，不能把生产工厂镜像等同于部署后的电量策略。

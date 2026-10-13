@@ -14,24 +14,16 @@
 
 **一句话概括**：该项目是一块车载 TBOX（远程信息处理盒子）的 MCU 固件，负责在 EC200A 4G 模块与车辆 CAN 总线/传感器之间做数据桥接，同时实现三一叉车 ECU 的绑定/锁机/解锁控制逻辑。
 
-```
-┌─────────────────────────────────────────────────────┐
-│              AT32F403A MCU（本仓库）                  │
-│                                                     │
-│  ┌─────────┐  SPI(Slave)  ┌──────────────────────┐ │
-│  │  EC200A │◄────────────►│  comm_msg / spi_item  │ │
-│  │  4G模块  │              │  SPI数据帧收发桥接层  │ │
-│  └─────────┘              └──────────────────────┘ │
-│                                       │             │
-│              ┌────────────────────────┘             │
-│              ▼                                      │
-│  ┌─────────────────────────────────────────────┐   │
-│  │            dev_mng（全局设备管理器）           │   │
-│  └──┬──────────┬──────────┬──────────┬─────────┘   │
-│     │          │          │          │              │
-│  CAN总线    lock(锁机)  GPS/ADC   CIU98安全芯片     │
-│  (3路)      ECU控制    传感器     USART6 DMA        │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph MCU["AT32F403A MCU（本仓库）"]
+        Bridge["comm_msg / spi_item<br/>SPI 数据帧收发桥接层"] --> DM["dev_mng<br/>全局设备管理器"]
+        DM --> CAN["CAN 总线<br/>3 路"]
+        DM --> LOCK["lock<br/>ECU 锁机控制"]
+        DM --> GPSADC["GPS / ADC<br/>传感器"]
+        DM --> CIU["CIU98 安全芯片<br/>USART6 DMA"]
+    end
+    EC["EC200A<br/>4G 模块"] <-->|"SPI 从机链路"| Bridge
 ```
 
 ---
@@ -135,59 +127,51 @@ Src/User/
 
 ### A.3 模块依赖关系
 
-```
-main.c
-  └── dev_mng (初始化中心)
-        ├── spi_items_mng (注册所有 spi_item)
-        │     ├── RX items: ota, cmd, can0/1/2
-        │     └── TX items: ota_ret, cmd_ret, can0/1/2, event, gps, di, adc, log, all_can
-        ├── comm_msg_handler_task
-        │     ├── spi_dma (DMA IRQ → h_spi_rx_queue)
-        │     └── EXTI9 (TX触发) / EXTI4 (CS复位)
-        ├── lock_task
-        │     ├── lock_common (h_cmd_lock_queue ← cmd_spi_item)
-        │     └── lock_etm (CAN ISA → VCU心跳/状态 ← can_isa_func)
-        ├── ec20_mng_task (4G模块电源状态机)
-        ├── sleep_mode_task (ACC+CAN超时 → 系统休眠)
-        └── led_task
-
-跨模块数据流：
-  EC200A ──SPI──► spi_dma IRQ ──Queue──► comm_msg_task ──dispatch──► spi_items(RX)
-                                                                         │
-                                                              cmd_item → h_cmd_lock_queue
-                                                              cmd_item → h_cmd_id_secret_queue
-                                                              can_item → can总线发送
-  lock_task ──CAN──► VCU(三一ECU)
-  VCU ──CAN──► can_isa_func ──► lock_etm_receive_ecu_feedback
-  lock_task ──xQueueSend(can_spi_item TX)──► EXTI9触发发给EC200A
+```mermaid
+flowchart TB
+    MAIN["main.c"] --> DM["dev_mng<br/>初始化中心"]
+    DM --> ITEMS["spi_items_mng<br/>注册所有 spi_item"]
+    ITEMS --> RX["RX items：ota、cmd、can0/1/2"]
+    ITEMS --> TX["TX items：ota_ret、cmd_ret、can0/1/2、event、gps、di、adc、log、all_can"]
+    DM --> COMM["comm_msg_handler_task"]
+    COMM --> DMA["spi_dma：DMA IRQ → h_spi_rx_queue"]
+    COMM --> EXTI["EXTI9：TX 触发；EXTI4：CS 复位"]
+    DM --> LT["lock_task"]
+    LT --> LC["lock_common：h_cmd_lock_queue ← cmd_spi_item"]
+    LT --> LETM["lock_etm：CAN ISA / VCU 心跳与状态"]
+    DM --> EC20["ec20_mng_task：4G 模块电源状态机"]
+    DM --> SLEEP["sleep_mode_task：ACC + CAN 超时 → 休眠"]
+    DM --> LED["led_task"]
+    EC["EC200A"] -->|SPI| IRQ["spi_dma IRQ"] -->|Queue| COMM -->|dispatch| RX
+    RX --> QLOCK["cmd_item → h_cmd_lock_queue"]
+    RX --> QSECRET["cmd_item → h_cmd_id_secret_queue"]
+    RX --> CANOUT["can_item → CAN 总线发送"]
+    LT -->|CAN| VCU["VCU（三一 ECU）"] -->|CAN| ISA["can_isa_func"] --> FEEDBACK["lock_etm_receive_ecu_feedback"]
+    LT -->|xQueueSend（can_spi_item TX）| TXIRQ["EXTI9 触发发送至 EC200A"]
 ```
 
 ---
 
 ### A.4 关键入口与启动流程
 
-```
-main()
-  1. NVIC_PriorityGroupConfig(Group_4)      -- 4位抢占优先级
-  2. gpio_init()                            -- 所有GPIO初始化
-  3. debug_init()                           -- 调试串口
-  4. printf("version: 0x10.03")
-  5. mcu_delayus_correct_cycle()            -- 微秒延时校准（硬编码34循环）
-  6. dev_mng_init(&g_device_mng)            -- ★ 分配所有动态内存，初始化所有模块
-  7. pcf8563_init()                         -- 判断启动类型（RTC唤醒/IWDG/正常）
-  8. pcf8563_get_rtc() → rtc_set_time()    -- 同步RTC
-  9. hardfault_info_read()                  -- 打印上次Hardfault寄存器
-  10. at24cxx_init()                        -- EEPROM
-  11. timer_tick_init()                     -- CAN发送周期定时器
-  12. spi_4g_init()                         -- SPI1 DMA初始化（MCU作为SPI从机）
-  13. xTaskCreate × 6:
-      - StartDefaultTask  pri=2   512B   (看门狗+SPI超时检测)
-      - ec20_mng_task     pri=8   1024B  (4G模块状态机)
-      - comm_msg_task     pri=7   3072B  (SPI数据包处理)
-      - sleep_mode_task   pri=10  1024B  (休眠管理)
-      - led_task          pri=11  256B   (LED)
-      - lock_task         pri=13  512B   (锁机控制)
-  14. vTaskStartScheduler()                 -- 启动FreeRTOS调度
+```mermaid
+flowchart TD
+    A["main()"] --> B["NVIC_PriorityGroupConfig(Group_4)<br/>4 位抢占优先级"]
+    B --> C["gpio_init()：所有 GPIO 初始化"] --> D["debug_init()：调试串口"]
+    D --> E["打印版本 0x10.03"] --> F["mcu_delayus_correct_cycle()<br/>微秒延时校准（硬编码 34 循环）"]
+    F --> G["dev_mng_init(&g_device_mng)<br/>分配动态内存并初始化模块"]
+    G --> H["pcf8563_init()<br/>判断 RTC 唤醒 / IWDG / 正常启动"]
+    H --> I["pcf8563_get_rtc() → rtc_set_time()：同步 RTC"]
+    I --> J["hardfault_info_read()：读取上次 HardFault 信息"]
+    J --> K["at24cxx_init()：EEPROM"] --> L["timer_tick_init()：CAN 周期定时器"]
+    L --> M["spi_4g_init()：SPI1 DMA，从机模式"] --> N["xTaskCreate × 6"]
+    N --> T1["StartDefaultTask：pri=2，512B<br/>看门狗 + SPI 超时检测"]
+    N --> T2["ec20_mng_task：pri=8，1024B<br/>4G 模块状态机"]
+    N --> T3["comm_msg_task：pri=7，3072B<br/>SPI 数据包处理"]
+    N --> T4["sleep_mode_task：pri=10，1024B<br/>休眠管理"]
+    N --> T5["led_task：pri=11，256B"]
+    N --> T6["lock_task：pri=13，512B<br/>锁机控制"]
+    N --> O["vTaskStartScheduler()<br/>启动 FreeRTOS 调度"]
 ```
 
 ---
@@ -320,25 +304,22 @@ typedef struct {
 
 #### 收发流程
 
-```
-TX方向（MCU→EC200A）：
-  EXTI9中断（SCK边沿触发）
-    ├── 遍历所有TX spi_item，调用 fn_spi_item_read() 填充 p_spi_tx
-    ├── comm_pack_packet() 填写帧头CRC
-    └── DMA已预配置发送 p_spi_tx（4096字节）
-
-RX方向（EC200A→MCU）：
-  EXTI4中断（CS下降沿）
-    └── spi_4g_reset_counter() 重置DMA计数器，准备接收
-
-  DMA1_Channel2_IRQHandler（接收完成）
-    ├── comm_check_packet() 校验帧头+payload CRC
-    ├── 校验通过 → xQueueSendFromISR(h_spi_rx_queue, ...)
-    └── 校验失败 → try_times++，连续3次失败则强制ACK
-
-  comm_msg_handler_task（任务，pri=7）
-    └── xQueueReceive(h_spi_rx_queue)
-        └── 解析 spi_item_hdr，按tag分发到对应 spi_item.fn_spi_item_rx_handler
+```mermaid
+flowchart LR
+    subgraph TX["TX：MCU → EC200A"]
+        TXIRQ["EXTI9 中断：SCK 边沿触发"] --> READ["遍历 TX spi_item<br/>fn_spi_item_read() 填充 p_spi_tx"]
+        READ --> PACK["comm_pack_packet()：填写帧头 CRC"] --> SEND["DMA 预配置发送 p_spi_tx（4096 字节）"]
+    end
+    subgraph RX["RX：EC200A → MCU"]
+        CS["EXTI4 中断：CS 下降沿"] --> RESET["spi_4g_reset_counter()<br/>重置 DMA 计数器，准备接收"]
+        RESET --> DMA_RX["DMA 接收完成"]
+        DMA_RX --> CHECK["DMA1_Channel2_IRQHandler<br/>comm_check_packet() 校验帧头与 payload CRC"]
+        CHECK --> VALID{"校验通过？"}
+        VALID -->|是| QUEUE["xQueueSendFromISR(h_spi_rx_queue, …)"]
+        VALID -->|否| RETRY["try_times++<br/>连续失败 3 次则强制 ACK"]
+        QUEUE --> TASK["comm_msg_handler_task（pri=7）<br/>xQueueReceive(h_spi_rx_queue)"]
+        TASK --> PARSE["解析 spi_item_hdr，按 tag 分发至 fn_spi_item_rx_handler"]
+    end
 ```
 
 ---
@@ -349,44 +330,64 @@ RX方向（EC200A→MCU）：
 
 #### 整体架构
 
-```
-lock_task (100ms 轮询)
-  ├── lock_password_clr()          -- 检查密码重置请求
-  ├── receive_id_secret_handle()   -- 从 h_cmd_id_secret_queue 接收设备ID/Secret
-  ├── lock_cmd_handler()           -- 从 h_cmd_lock_queue 接收绑定/锁机命令
-  ├── check_ecu_engine_type()      -- 当前固定为 RFT_ENGINE（三一）
-  ├── heartbeat_handle()           -- lock_etm_heartbeat_handle（每5秒发心跳）
-  ├── receive_ecu_feedback()       -- lock_etm_receive_ecu_feedback（读VCU状态）
-  ├── send_cmd_to_ecu()            -- lock_etm_send_cmd_to_ecu（发命令到ECU）
-  └── send_ecu_status_to_platform()-- 每2秒通过SPI item上报ECU状态
+```mermaid
+flowchart TD
+    LOOP["lock_task：100 ms 轮询"] --> CLR["lock_password_clr()：检查重置请求"]
+    CLR --> SECRET["receive_id_secret_handle()：读取 h_cmd_id_secret_queue"]
+    SECRET --> CMD["lock_cmd_handler()：读取 h_cmd_lock_queue"]
+    CMD --> ENGINE["check_ecu_engine_type()：当前固定 RFT_ENGINE（三一）"]
+    ENGINE --> HB["heartbeat_handle()：每 5 秒发送心跳"]
+    HB --> FB["receive_ecu_feedback()：读取 VCU 状态"]
+    FB --> SEND["send_cmd_to_ecu()：发送 ECU 命令"]
+    SEND --> REPORT["send_ecu_status_to_platform()：每 2 秒经 SPI item 上报"] --> LOOP
 ```
 
 #### 状态机（cmd_status & ecu_status）
 
-```
-bind_status:  UNBIND(0x00) ←→ BIND(0x01)
-lock_status:  UNLOCK(0x00) → ONE_LOCK(0x01) → TWO_LOCK(0x02) → THREE_LOCK(0x03)
-
-命令接收（receive_cmd_type_e）：
-  0x10: BIND           → cmd_status.bind=BIND
-  0x20: UNBIND         → cmd_status.bind=UNBIND
-  0x31: ONE_LOCK       → cmd_status.lock=ONE_LOCK
-  0x32: TWO_LOCK       → cmd_status.lock=TWO_LOCK
-  0x33: THREE_LOCK     → cmd_status.lock=THREE_LOCK
-  0x40: UNLOCK         → cmd_status.lock=UNLOCK
-  0x51: BIND+ONE_LOCK  → 组合
-  0x52: BIND+TWO_LOCK  → 组合
-  0x60: UNBIND+UNLOCK  → 组合
-
-发送命令决策（check_need_to_send_cmd）：
-  当 cmd_status != ecu_status 时触发：
-  - 锁机优先级：unlock > one_lock > two_lock > three_lock
-  - 绑定优先级：bind > unbind（unbind要求ECU已解锁）
-  - ECU处于UNBIND时不发锁机指令
-
-命令执行状态（lock_general_message）：
-  EXECUTE_NULL → EXECUTE_UNDERWAY → EXECUTE_SUCCEED/EXECUTE_FAIL
-  （通过cmd_tag_lock_reply_msg上报平台）
+```mermaid
+flowchart TD
+    INPUT["接收 receive_cmd_type_e"] --> TYPE{"命令类型"}
+    TYPE -->|"0x10"| BIND["bind = BIND"]
+    TYPE -->|"0x20"| UNBIND["bind = UNBIND"]
+    TYPE -->|"0x31"| ONE["lock = ONE_LOCK"]
+    TYPE -->|"0x32"| TWO["lock = TWO_LOCK"]
+    TYPE -->|"0x33"| THREE["lock = THREE_LOCK"]
+    TYPE -->|"0x40"| UNLOCK["lock = UNLOCK"]
+    TYPE -->|"0x51"| BINDONE["组合：BIND + ONE_LOCK"]
+    TYPE -->|"0x52"| BINDTWO["组合：BIND + TWO_LOCK"]
+    TYPE -->|"0x60"| UNBINDUNLOCK["组合：UNBIND + UNLOCK"]
+    VALUES["状态取值<br/>bind：UNBIND（0x00）↔ BIND（0x01）<br/>lock：UNLOCK（0x00）→ ONE_LOCK（0x01）→ TWO_LOCK（0x02）→ THREE_LOCK（0x03）"]
+    INPUT -.-> VALUES
+    BIND --> COMPARE["比较 cmd_status 与 ecu_status"]
+    UNBIND --> COMPARE
+    ONE --> COMPARE
+    TWO --> COMPARE
+    THREE --> COMPARE
+    UNLOCK --> COMPARE
+    BINDONE --> COMPARE
+    BINDTWO --> COMPARE
+    UNBINDUNLOCK --> COMPARE
+    COMPARE --> SAME{"状态相同？"}
+    SAME -->|是| DONE["SEND_CMD_COMPLETE"]
+    SAME -->|否| DIFFLOCK{"锁机状态不同？"}
+    DIFFLOCK -->|是| ECUUNBIND{"ECU 为 UNBIND？"}
+    ECUUNBIND -->|是| NOLOCK["不发送锁机指令"] --> DIFFBIND
+    ECUUNBIND -->|否| LOCKCMD["选择锁机命令<br/>UNLOCK > ONE_LOCK > TWO_LOCK > THREE_LOCK"]
+    DIFFLOCK -->|否| DIFFBIND{"绑定状态不同？"}
+    DIFFBIND -->|需要 BIND| BINDSEND["发送 BIND"]
+    DIFFBIND -->|"需要 UNBIND 且 ECU 已解锁"| UNBINDSEND["发送 UNBIND"]
+    DIFFBIND -->|"需要 UNBIND 但 ECU 未解锁"| WAITUNBIND["等待 ECU 解锁后解绑"]
+    DIFFBIND -->|否| WAIT["等待状态变化或再次检查"]
+    LOCKCMD --> UNDERWAY["EXECUTE_UNDERWAY"]
+    BINDSEND --> UNDERWAY
+    UNBINDSEND --> UNDERWAY
+    UNDERWAY --> RESULT{"ECU 反馈匹配目标状态？"}
+    RESULT -->|是| SUCCEED["EXECUTE_SUCCEED"]
+    RESULT -->|重试耗尽或失败| FAIL["EXECUTE_FAIL"]
+    INIT["初始状态"] --> NULL["EXECUTE_NULL"] --> UNDERWAY
+    SUCCEED --> REPLY["通过 cmd_tag_lock_reply_msg 上报平台"]
+    FAIL --> REPLY
+    DIFFBIND -.-> BINDPRIO["绑定优先级：BIND > UNBIND；解绑要求 ECU 已解锁"]
 ```
 
 #### CAN ID映射（三一协议）
@@ -467,21 +468,16 @@ typedef struct {
 
 **状态机**：
 
-```
-ec20_state_boot ──► ec20_boot_handle
-    ├── ec20_pwr_supply_ctrl(true)  -- 供电
-    ├── 检查当前电源状态
-    ├── 若已下电 → ec20_pwr_on_process() → PWRKEY拉高→等待
-    └── 成功 → ec20_state_config
-
-ec20_state_hw_reset ──► ec20_hw_reset
-    └── ec20_pwr_reset_process() → 重新上电
-
-ec20_state_config ──► ec20_config
-    └── 当前实现直接返回 ec20_state_config（占位，实际配置由EC200A自己完成）
-
-⚠️ 注意：ec20_state_net_connect / ec20_state_net_ok 状态处理函数为 NULL
-   gsm_mng_func_ar[4] = NULL，若状态机进入这两个状态会触发空指针调用！
+```mermaid
+flowchart TD
+    BOOT["ec20_state_boot"] --> HANDLE["ec20_boot_handle"]
+    HANDLE --> SUPPLY["ec20_pwr_supply_ctrl(true)：供电"] --> POWER{"当前电源状态？"}
+    POWER -->|已下电| ON["ec20_pwr_on_process()：PWRKEY 拉高并等待"] --> CONFIG["ec20_state_config"]
+    POWER -->|已上电| CONFIG
+    RESET["ec20_state_hw_reset"] --> RESET_HANDLE["ec20_hw_reset"] --> REPWR["ec20_pwr_reset_process()：重新上电"]
+    CONFIG --> CONFIG_HANDLE["ec20_config"] --> PLACEHOLDER["当前直接返回 ec20_state_config<br/>实际配置由 EC200A 自行完成"]
+    NET["ec20_state_net_connect / ec20_state_net_ok"] --> NULL["gsm_mng_func_ar[4]/[5] 为 NULL<br/>进入状态会调用空指针"]
+    style NULL fill:#fee,stroke:#c00
 ```
 
 ---
@@ -494,12 +490,13 @@ ec20_state_config ──► ec20_config
 3. 两个定时器都超时 → 进入休眠流程
 
 **休眠流程**：
-```
-sleep_event_countdown_deal()  -- 发送EVENT_CODE_MCU_GOTO_SLEEP事件，倒计时10秒
-→ ec20_pwr_ctrl(false)        -- 关闭EC200A电源
-→ pcf8563_alarm_interrupt_set(now + 24*3600)  -- 设置24小时RTC唤醒
-→ GPIO_F405_SYS_PWROFF()      -- 关闭系统电源
-→ NVIC_SystemReset()          -- 软复位（若电源未完全关断）
+```mermaid
+flowchart TD
+    START["两个休眠计时器均超时"] --> EVENT["sleep_event_countdown_deal()<br/>发送 EVENT_CODE_MCU_GOTO_SLEEP 事件，倒计时 10 秒"]
+    EVENT --> MODEM["ec20_pwr_ctrl(false)：关闭 EC200A 电源"]
+    MODEM --> RTC["pcf8563_alarm_interrupt_set(now + 24 × 3600)<br/>设置 24 小时 RTC 唤醒"]
+    RTC --> POWER["GPIO_F405_SYS_PWROFF()：关闭系统电源"]
+    POWER --> RESET["NVIC_SystemReset()<br/>电源未完全关断时软复位"]
 ```
 
 ---
@@ -587,27 +584,22 @@ hdr = 0x2323
 
 ### D.1 IPC拓扑图
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                       FreeRTOS 任务间通信                         │
-│                                                                  │
-│  DMA_IRQ ──Queue(4096B×8)──► comm_msg_task                      │
-│                                    │                             │
-│                          按tag分发到spi_item                      │
-│                          ├─ cmd_item → h_cmd_lock_queue(8)       │
-│                          ├─ cmd_item → h_cmd_id_secret_queue(8) │
-│                          ├─ cmd_item → h_cmd_can_set_queue(4)   │
-│                          ├─ can_msg → can物理总线发送             │
-│                          └─ ota_item → ota处理                   │
-│                                                                  │
-│  lock_task ←── h_cmd_lock_queue                                  │
-│            ←── h_cmd_id_secret_queue                             │
-│            ──► can_spi_item TX queue (VCU心跳/命令)              │
-│            ──► can_spi_item TX queue (ECU状态上报)               │
-│                                                                  │
-│  EXTI9_IRQ ──► 遍历TX spi_items → 填充p_spi_tx → DMA发送        │
-│  EXTI4_IRQ ──► spi_4g_reset_counter (为下次RX复位DMA)            │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    DMA["DMA_IRQ"] -->|"Queue（4096 B × 8）"| COMM["comm_msg_task"]
+    COMM --> DISPATCH["按 tag 分发到 spi_item"]
+    DISPATCH --> QLOCK["cmd_item → h_cmd_lock_queue（8）"]
+    DISPATCH --> QSECRET["cmd_item → h_cmd_id_secret_queue（8）"]
+    DISPATCH --> QCAN["cmd_item → h_cmd_can_set_queue（4）"]
+    DISPATCH --> CANOUT["can_msg → CAN 物理总线发送"]
+    DISPATCH --> OTA["ota_item → OTA 处理"]
+    QLOCK --> LOCK["lock_task"]
+    QSECRET --> LOCK
+    LOCK -->|"VCU 心跳/命令"| TX1["can_spi_item TX queue"]
+    LOCK -->|"ECU 状态上报"| TX2["can_spi_item TX queue"]
+    TX1 --> EXTI9["EXTI9_IRQ：遍历 TX spi_items，填充 p_spi_tx 并 DMA 发送"]
+    TX2 --> EXTI9
+    EXTI4["EXTI4_IRQ"] --> RESET["spi_4g_reset_counter：为下次 RX 复位 DMA"]
 ```
 
 ### D.2 所有通信协议汇总
@@ -686,38 +678,34 @@ ECU状态上报（MCU→平台/SPI）CAN ID 0xFAAA0001：
 
 #### 锁机完整状态转换
 
-```
-平台发命令 ──► h_cmd_lock_queue
-                  │
-             lock_cmd_handler()
-                  │
-         更新 cmd_status（bind+lock）
-         写入Flash持久化
-         receive_cmd_flag = true
-                  │
-         check_need_to_send_cmd()
-         ┌─────────────────────────────────────┐
-         │ cmd == ecu：SEND_CMD_COMPLETE        │
-         │ cmd.lock != ecu.lock：              │
-         │   ecu=UNLOCK: 发对应lock cmd        │
-         │   cmd=UNLOCK: 发UNLOCK              │
-         │ cmd.bind != ecu.bind：              │
-         │   cmd=BIND: 发BIND                  │
-         │   cmd=UNBIND（ecu已UNLOCK）: 发UNBIND│
-         └─────────────────────────────────────┘
-                  │
-         lock_etm_send_cmd_to_ecu()
-         ├── receive_cmd_flag → reset send_cmd_count=0
-         ├── 每 SEND_CMD_INTERVAL(8s) 执行一次
-         ├── send_cmd_count < 7：发命令（2帧/次）
-         └── send_cmd_count == 7：标记 EXECUTE_FAIL
-
-VCU反馈 ──► lock_etm_receive_ecu_feedback()
-                  │
-         更新 ecu_status
-         receive_ecu_status_flag = true
-                  │
-         send_ecu_status_to_platform() 每2秒上报
+```mermaid
+flowchart TD
+    PLATFORM["平台命令"] --> QUEUE["h_cmd_lock_queue"] --> HANDLER["lock_cmd_handler()"]
+    HANDLER --> UPDATE["更新 cmd_status<br/>写入 Flash 持久化<br/>receive_cmd_flag = true"]
+    UPDATE --> DECIDE["check_need_to_send_cmd()"]
+    DECIDE --> MATCH{"cmd_status == ecu_status？"}
+    MATCH -->|是| COMPLETE["SEND_CMD_COMPLETE"]
+    MATCH -->|否| DIFFLOCK{"cmd.lock != ecu.lock？"}
+    DIFFLOCK -->|"ecu=UNLOCK"| LOCKCMD["发送对应锁机命令"]
+    DIFFLOCK -->|"cmd=UNLOCK"| UNLOCKCMD["发送 UNLOCK"]
+    DIFFLOCK -->|否| DIFFBIND{"cmd.bind != ecu.bind？"}
+    DIFFBIND -->|cmd=BIND| BIND["发送 BIND"]
+    DIFFBIND -->|"cmd=UNBIND 且 ECU 已解锁"| UNBIND["发送 UNBIND"]
+    DIFFBIND -->|其他| WAIT["等待状态变化或再次检查"]
+    LOCKCMD --> SEND["lock_etm_send_cmd_to_ecu()"]
+    UNLOCKCMD --> SEND
+    BIND --> SEND
+    UNBIND --> SEND
+    SEND --> NEWCMD{"receive_cmd_flag？"}
+    NEWCMD -->|是| RESET["send_cmd_count = 0"] --> INTERVAL
+    NEWCMD -->|否| INTERVAL{"到达 SEND_CMD_INTERVAL（8 秒）？"}
+    INTERVAL -->|否| WAIT
+    INTERVAL -->|"send_cmd_count < 7"| RETRY["发送命令（每次 2 帧）"]
+    RETRY --> COUNT["send_cmd_count 递增"] --> INTERVAL
+    INTERVAL -->|"send_cmd_count == 7"| FAIL["标记 EXECUTE_FAIL"]
+    VCU["VCU 反馈"] --> FEEDBACK["lock_etm_receive_ecu_feedback()"]
+    FEEDBACK --> STATUS["更新 ecu_status<br/>receive_ecu_status_flag = true"]
+    STATUS --> REPORT["send_ecu_status_to_platform()：每 2 秒上报"]
 ```
 
 ---
@@ -815,51 +803,41 @@ void mcu_delay_us(uint32_t us);
 
 #### 锁机命令完整时序
 
-```
-平台(EC200A)    comm_msg_task      lock_task            VCU(ECU)
-     │                │                │                   │
-     │──SPI CMD帧────►│                │                   │
-     │                │──xQueueSend───►│                   │
-     │                │   h_cmd_lock   │                   │
-     │                │                │ lock_cmd_handler()│
-     │                │                │ 更新cmd_status    │
-     │                │                │ 写Flash持久化      │
-     │                │                │                   │
-     │                │                │ check_need_to_send│
-     │                │                │──CAN CMD(加密)───►│
-     │                │                │ (2帧，间隔50ms)   │
-     │                │                │ 每8秒重试，最多7次 │
-     │                │                │◄──VCU状态(0x1150)─│
-     │                │                │ 更新ecu_status    │
-     │                │                │ 检查cmd==ecu?     │
-     │                │                │ EXECUTE_SUCCEED   │
-     │◄──SPI TX帧─────│◄──xQueueSend───│                   │
-     │  (ECU状态上报)  │  can_spi_item  │ 每2秒上报         │
+```mermaid
+sequenceDiagram
+    participant P as 平台（EC200A）
+    participant C as comm_msg_task
+    participant L as lock_task
+    participant V as VCU（ECU）
+    P->>C: SPI CMD 帧
+    C->>L: xQueueSend（h_cmd_lock_queue）
+    L->>L: lock_cmd_handler() 更新 cmd_status
+    L->>L: 写 Flash 持久化并检查是否需要发送
+    L->>V: CAN 加密命令（2 帧，间隔 50 ms）
+    Note over L,V: 每 8 秒重试，最多 7 次
+    V-->>L: VCU 状态反馈（0x1150）
+    L->>L: 更新 ecu_status；状态吻合时标记 EXECUTE_SUCCEED
+    L->>C: xQueueSend（can_spi_item，ECU 状态）
+    Note over L,C: 每 2 秒上报
+    C->>P: SPI TX 帧（ECU 状态上报）
 ```
 
 #### SPI 通信时序
 
-```
-EC200A(Master)        MCU(Slave，本代码)
-     │                       │
-     │──CS拉低────────────────►EXTI4_IRQHandler
-     │                       │  spi_4g_reset_counter() 复位DMA
-     │                       │
-     │──SCLK+MOSI数据─────────►DMA接收中
-     │◄─────────────MISO数据──│ DMA发送（使用上次EXTI9填充的p_spi_tx）
-     │                       │
-     │──CS拉高───────────────►│
-     │                       │
-     │──SPI_CTRL脉冲──────────►EXTI9_IRQHandler
-     │                       │  遍历TX spi_items → 填充p_spi_tx
-     │                       │  comm_pack_packet() 封帧
-     │                       │
-     │                       DMA1_Channel2_IRQHandler
-     │                       │  comm_check_packet()校验
-     │                       │  → xQueueSendFromISR(h_spi_rx_queue)
-     │                       │
-     │                       comm_msg_handler_task
-     │                       │  解析tag → 分发到各spi_item
+```mermaid
+sequenceDiagram
+    participant E as EC200A（Master）
+    participant M as MCU（Slave，本代码）
+    E->>M: CS 拉低
+    M->>M: EXTI4_IRQHandler：spi_4g_reset_counter() 复位 DMA
+    E->>M: SCLK + MOSI 数据
+    M-->>E: MISO 数据（DMA 使用此前 EXTI9 填充的 p_spi_tx）
+    E->>M: CS 拉高
+    E->>M: SPI_CTRL 脉冲
+    M->>M: EXTI9_IRQHandler：遍历 TX spi_items 并填充 p_spi_tx
+    M->>M: comm_pack_packet() 封帧
+    M->>M: DMA1_Channel2_IRQHandler：校验并发送至 h_spi_rx_queue
+    M->>M: comm_msg_handler_task：解析 tag 并分发至 spi_item
 ```
 
 ---

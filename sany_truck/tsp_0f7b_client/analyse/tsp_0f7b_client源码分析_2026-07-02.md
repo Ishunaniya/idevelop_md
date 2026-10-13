@@ -24,35 +24,17 @@
 
 > 下列各图为纯文本图，任意编辑器/终端可直接查看。图中 ⚠ 标注对应第三节问题编号，位置均已核对源码。
 
-```text
-[CAN 桥接进程]                          [GPS 提供进程]
-127.0.0.1:16002/16003/16004             127.0.0.1:16005
-（CAN0/1/2 三通道，外部进程）             （外部进程）
-      │                                       │
-      │ TCP 连接                              │ TCP 连接
-      │ skt_res_new_socket                    │ skt_res_new_socket_ip
-      │ （can_server.c:13）                    │ （skt_res.c:60）
-      │ ⚠P02 重试 break 位置错误，              │ ⚠P01 connect 失败不 close，
-      │   :36 失败路径同样不 close              │   反复重连泄漏 fd
-      ▼                                       ▼
-[CAN 线程 src/can_server]               [GPS 线程 src/gps]
-select 三个 fd 读 can_frame_t            读 sany_gps_ec21_t
-      │                                       │
-      │ 写 value_int / time_rcv               │ 写 gps_info
-      └─────────────────┬─────────────────────┘
-                        ▼
-        [共享状态 can_mng_t]
-        data_process_mng 规则树 + gps_info
-        ⚠P03 全仓库无任何互斥锁/原子操作（grep 确认零命中）
-                        │
-                        │ 读（多字段快照非原子 → 撕裂读风险）
-                        ▼
-        [MQTT 线程 src/mosquitto]
-        每 30s：快照 → 封帧 → publish TSP_TOPIC_PUB_MSG
-                        │
-                        ▼
-        [本地 Mosquitto broker]（外部进程）
-        conf_ext.ini 的 mgw:local_ip/port（缺省回退 127.0.0.1:1883）
+```mermaid
+flowchart TD
+    CanBridge[CAN 桥接进程：127.0.0.1:16002/16003/16004] -->|TCP；skt_res_new_socket| CanThread[CAN 线程 src/can_server：select 三个 fd，读取 can_frame_t]
+    CanIssue[⚠P02：重试 break 位置错误；失败路径未 close] -.-> CanThread
+    GPSProcess[GPS 提供进程：127.0.0.1:16005] -->|TCP；skt_res_new_socket_ip| GPSThread[GPS 线程 src/gps：读取 sany_gps_ec21_t]
+    GPSIssue[⚠P01：connect 失败未 close，反复重连泄漏 fd] -.-> GPSThread
+    CanThread -->|写 value_int / time_rcv| Shared[共享 can_mng_t：规则树与 gps_info]
+    GPSThread -->|写 gps_info| Shared
+    Shared -->|无锁读取，多字段快照可能撕裂| MQTT[MQTT 线程 src/mosquitto：每 30s 快照并封帧]
+    Race[⚠P03：全仓库无互斥锁或原子操作] -.-> Shared
+    MQTT -->|publish TSP_TOPIC_PUB_MSG| Broker[本地 Mosquitto broker：mgw local_ip/port，缺省 127.0.0.1:1883]
 ```
 
 进程本体：`main.c`，flock `/tmp/tsp_0f6b_client.pid` 单实例；三线程共享同一 `can_mng`，run-forever。
@@ -62,64 +44,45 @@ select 三个 fd 读 can_frame_t            读 sany_gps_ec21_t
 
 ### 数据流水线图（点表 → 规则树 → 写侧/读侧 → 线上帧）
 
-```text
-【点表加载 —— 启动时执行一次（main.c）】
-
-Pointsheet_info1.json（dev[] → msg[] → rls[] → pts[]，34 个点，均 ptyp=1、len≤32）
-    │
-    │ load_pointsheet_json()（data_process.c）
-    ▼
-data_rule_t 规则树：每 CAN 通道一个 uthash（key=value），
-叶子 data_item_t（信号名 / 位偏移 / 缩放 / 场景间隔）
-
-
-【写侧 —— CAN 线程，随 CAN 流量持续运行】
-
-CAN 帧到达
-    │ can_msg_process()（can_server.c）
-    ▼
-parse_common_msg()：HASH_FIND_INT 查通道规则表 → 递归 set_common_data_item
-    │ ⚠P11 递归子规则时忽略 val 过滤器（data_process.c:342-348），
-    │      当前点表一一对应不触发，报文复用后会信号污染
-    ▼
-写入叶子 data_item_t 的 value_int / value_double / time_rcv
-
-
-【读侧 —— MQTT 线程，每 30s 一轮】
-
-按「信号名 + 帧 ID」反查叶子：get_0f6b_work_data / check_0f6b_data_item
-（函数名沿用 0f6b，但属在用的 0f7b 路径）
-    │ binary_work_data_generate()
-    │ ⚠P04 填到 BMS1_BatSoc 即 return（data_process.c:670），
-    │      data_0f7b_t 其后约 24 个字段（BMS2_data…TP_DT2）恒 0 上报
-    ▼
-data_0f7b_t（__attribute__((packed)) 固定布局，与平台 schema 手工同步维护）
-    │ make_tsp_0f7b_frame()（frame.c）：前置 level1_0f6b_t（时间戳 + GPS 经纬度）
-    ▼
-tsp_cmd 封装（src/tsp_cmd）：cmd=0x0f7b、设备号 BCD、序号
-    ▼
-线上帧 → MQTT publish 到本地 broker
+```mermaid
+flowchart TD
+    Pointsheet[Pointsheet_info1.json：dev → msg → rls → pts，34 个点] --> Load[启动时 load_pointsheet_json]
+    Load --> Tree[data_rule_t 规则树：每 CAN 通道一个 uthash]
+    Tree --> Leaves[data_item_t 叶子：信号名、位偏移、缩放、场景间隔]
+    CAN[CAN 帧到达] --> CanProcess[CAN 线程：can_msg_process]
+    CanProcess --> Parse[parse_common_msg：查通道规则并递归 set_common_data_item]
+    P11[⚠P11：递归子规则时忽略 val 过滤器] -. 风险点 .-> Parse
+    Parse --> Values[写入 value_int / value_double / time_rcv]
+    Leaves --> Parse
+    Values -->|共享状态| Read[MQTT 线程：每 30s 按信号名和帧 ID 读取]
+    Read --> Lookup[get_0f6b_work_data / check_0f6b_data_item]
+    Lookup --> Generate[binary_work_data_generate]
+    P04[⚠P04：填到 BMS1_BatSoc 后即 return，后续约 24 字段恒为 0] -. 风险点 .-> Generate
+    Generate --> Payload[data_0f7b_t：packed 固定布局]
+    Payload --> Frame[make_tsp_0f7b_frame：加入时间戳与 GPS 一级头]
+    Frame --> Cmd[tsp_cmd：0x0f7b、BCD 设备号、序号及帧封装]
+    Cmd --> Publish[线上帧：MQTT publish 到本地 broker]
 ```
 
 ### 线程交互时序图（30s 上报周期与 P03 竞态窗口）
 
-```text
-CAN 线程（写侧）              共享 can_mng（无锁）            MQTT 线程（读侧）
-     │                             │                              │
-     │ parse_common_msg            │                              │
-     ├──写 value_int/time_rcv────▶ │                              │
-     ├──写（持续不断）───────────▶ │                              │  ┌─ 每 30s 一轮
-     │                             │ ◀────逐字段读取信号───────────┤  │ binary_work_data_generate
-     ├──仍在写──────────────────▶ │ ◀────继续逐字段读取───────────┤  │
-     │                             │                              │  │
-     │            ⚠P03 竞态窗口：读取过程中写侧仍在写，            │  │
-     │            多字段快照非原子 → 撕裂读（值/时间戳可能不一致）  │  │
-     │                             │                              │  │
-     │                             │                              │  │ make_tsp_0f7b_frame
-     │                             │                              │  │ （加时间戳+GPS 一级头）
-     │                             │                              │  │ tsp_cmd 封 0x0f7b 帧
-     │                             │                              │  └─ publish 到本地 broker
-     ▼                             ▼                              ▼
+```mermaid
+sequenceDiagram
+    participant CAN as CAN 线程（写侧）
+    participant Shared as 共享 can_mng（无锁）
+    participant MQTT as MQTT 线程（读侧）
+    loop CAN 帧持续到达
+        CAN->>Shared: parse_common_msg 写 value_int / time_rcv
+    end
+    loop 每 30s 上报一轮
+        MQTT->>Shared: binary_work_data_generate 逐字段读取
+        Note over CAN,Shared: 写侧可在读取期间继续更新，多字段快照非原子
+        Shared-->>MQTT: 返回信号值与时间戳
+        MQTT->>MQTT: make_tsp_0f7b_frame（加时间戳与 GPS 一级头）
+        MQTT->>MQTT: tsp_cmd 封装 0x0f7b 帧
+        MQTT->>MQTT: publish 到本地 broker
+    end
+    Note over CAN,MQTT: ⚠P03 竞态窗口：值与时间戳可能来自不同更新时刻
 ```
 
 ### 构建体系

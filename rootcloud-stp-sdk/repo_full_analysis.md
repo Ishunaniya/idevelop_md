@@ -84,86 +84,70 @@ rootcloud-stp-sdk/
 
 ### A.3 模块划分与依赖关系
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         erk-agent (main)                          │
-│              rcpv4_new() → rcpv4_task_run() → ev_loop            │
-└──────────────────┬───────────────────────────────────────────────┘
-                   │ 加载插件（dlopen）
-                   ▼
-┌──────────────────────────────┐   ┌────────────────────────────┐
-│     erk-core / rcpv4         │   │   erk-core / ERK           │
-│  ┌─────────────────────────┐ │   │  ┌──────────────────────┐  │
-│  │ rcpv4.c                 │ │   │  │ erk.c (libev loop)   │  │
-│  │ rcpv4-cmd-lock.c        │◄├───┼──┤ erk_mqtt_t           │  │
-│  │ rcpv4-cmd-cmd.c         │ │   │  │ MQTT pub/sub/connect │  │
-│  │ rcpv4-aul.c (OTA下载)   │ │   │  └──────────────────────┘  │
-│  └─────────────────────────┘ │   └────────────────────────────┘
-│             │                │                │
-│    device_adapter_t 接口      │          MQTT → CMS/ESMP
-└──────────────┬───────────────┘
-               │ 实现 device_adapter_t 虚函数表
-               ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    scp-adapter (插件)                             │
-│  scp-adapter.c ←→ stub-linker (nanomsg) ←→ 控制器托管程序(stub) │
-│       │                                                          │
-│  scp-raw-data-filter.c  (工况存储、压缩、上传)                    │
-│  scp-rule-filter.c      (DBC 解析、J1939 规则引擎)               │
-│  scp-profile-sync.c     (物模型下发与同步)                        │
-│  scp-cmd-hook.c         (自定义命令透传)                          │
-└──────────────────────────────────────────────────────────────────┘
-               │
-               ▼ nanomsg pub/sub (端口 11215/11216/11225)
-┌──────────────────────────────────────────────────────────────────┐
-│            控制器托管程序 (stub-sany-forklift 等)                  │
-│  CAN socketcan ← CAN总线 → ECU/MCU                               │
-│  锁机/解锁机命令 → SPI/CAN → MCU                                  │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Agent["erk-agent main<br/>rcpv4_new → rcpv4_task_run → ev_loop"]
+    subgraph Core["erk-core"]
+        RCP["RCPv4<br/>rcpv4.c / cmd-lock / cmd-cmd / aul"]
+        ERK["ERK<br/>erk.c / libev / erk_mqtt_t"]
+    end
+    Plugin["scp-adapter 插件<br/>raw-data-filter：存储 / 压缩 / 上传<br/>rule-filter：DBC / J1939 规则<br/>profile-sync：物模型同步<br/>cmd-hook：自定义命令"]
+    Stub["控制器托管程序<br/>stub-sany-forklift 等"]
+    Device["CAN 总线 → ECU / MCU<br/>锁机命令经 SPI / CAN 下发"]
+    Cloud["CMS / ESMP 云平台"]
+    Agent -->|"dlopen 加载插件"| Plugin
+    Agent --> RCP
+    RCP <-->|"MQTT"| ERK
+    ERK <-->|"MQTT"| Cloud
+    RCP -->|"device_adapter_t 接口"| Plugin
+    Plugin <-->|"stub-linker / nanomsg<br/>11215 / 11216 / 11225"| Stub
+    Stub <--> Device
 ```
 
 **依赖关系（从底到顶）：**
 
-```
-nanomsg → stub-linker-git
-libev + umqtt → erk-core/erk
-cJSON + collections-c + libssl → erk-core/rcpv4-utils
-erk + rcpv4-utils + stub-linker → rcpv4
-rcpv4 + DBC解析库 + j1939-adapter → scp-adapter插件
-scp-adapter + rcpv4 → erk-agent（最终可执行文件）
+```mermaid
+flowchart BT
+    nanomsg --> stub["stub-linker-git"]
+    libev["libev + umqtt"] --> erk["erk-core/erk"]
+    utils["cJSON + collections-c + libssl"] --> rutils["erk-core/rcpv4-utils"]
+    erk --> rcp["rcpv4"]
+    rutils --> rcp
+    stub --> rcp
+    rcp --> scp["scp-adapter 插件"]
+    dbc["DBC 解析库 + j1939-adapter"] --> scp
+    scp --> agent["erk-agent（最终可执行文件）"]
+    rcp --> agent
 ```
 
 ### A.4 关键入口文件及启动流程
 
-```
-main() [erk-agent/main.c]
-  │
-  ├─1. init_env()          ← 设置 locale、工作目录
-  ├─2. argv_handle()       ← 解析 -e endpoints.json -c config.json
-  ├─3. init_log()          ← 初始化日志（文件+终端，等级可运行时 SIGUSR1 切换）
-  ├─4. rcpv4_new()         ← 创建 RCPv4 句柄
-  │     ├── 解析 endpoints.json（MQTT 地址/凭证）
-  │     ├── 解析 config.json（设备 ID、物模型等）
-  │     └── dlopen 加载插件（scp-adapter.so 或 virtual-adapter.so）
-  │           └── 插件 init() → stub_init() → nn_bind(11215/11216/11225)
-  │
-  ├─5. rcpv4_task_new() + rcpv4_task_run()
-  │     └── 启动事件循环线程（libev ev_loop）
-  │           ├── MQTT 连接/重连（erk_mqtt_connect → auto reconnect）
-  │           ├── 订阅云平台 topic（命令/OTA/配置/锁机）
-  │           └── 定时器：心跳、统计计数器 dump（每10秒）
-  │
-  ├─6. erk_signal_init()   ← SIGUSR1（动态切换日志等级）、SIGPIPE（忽略）
-  │
-  └─7. while(running) usleep(200ms)  ← 主循环，仅做计数器 dump
-        └── rcpv4_task_is_running() 返回 false 时退出
-
-  ┌─── 后台线程（scp-adapter 内部）─────────────────────────────────┐
-  │  stub_data_thread:  stub_run(handle_sub_data)  ← 接收工况(11225) │
-  │  stub_cmd_thread:   stub_run(handle_sub_cmd)   ← 接收命令(11215) │
-  │  raw_filter_thread: 原始数据压缩/写文件/上传                      │
-  │  comp_thread:       数据压缩线程                                   │
-  └──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Start["main()：erk-agent/main.c"] --> Env["init_env：设置 locale、工作目录"]
+    Env --> Args["argv_handle：解析 endpoints.json / config.json 参数"]
+    Args --> Log["init_log：初始化文件和终端日志"]
+    Log --> New["rcpv4_new：创建 RCPv4 句柄"]
+    New --> EP["解析 endpoints.json：MQTT 地址 / 凭证"]
+    New --> Config["解析 config.json：设备 ID / 物模型"]
+    EP --> Plugin["dlopen 加载插件"]
+    Config --> Plugin
+    Plugin --> StubInit["插件 init → stub_init → nn_bind 端口"]
+    StubInit --> Task["rcpv4_task_new + rcpv4_task_run"]
+    Task --> Loop["libev 事件循环线程"]
+    Loop --> MQTT["MQTT 连接 / 自动重连"]
+    Loop --> Subscribe["订阅命令 / OTA / 配置 / 锁机 topic"]
+    Loop --> Timer["心跳和统计计数器定时器（每 10 秒）"]
+    Task --> Signal["erk_signal_init：SIGUSR1 / SIGPIPE"]
+    Signal --> MainLoop["主循环：每 200ms 检查任务状态并 dump 计数器"]
+    MainLoop -->|"任务停止时退出"| End(["结束"])
+    subgraph Threads["scp-adapter 后台线程"]
+        Data["stub_data_thread：接收工况（11225）"]
+        Cmd["stub_cmd_thread：接收命令（11215）"]
+        Filter["raw_filter_thread：压缩 / 写文件 / 上传"]
+        Comp["comp_thread：数据压缩"]
+    end
+    Plugin -.-> Threads
 ```
 
 ### A.5 技术栈与第三方库
@@ -288,21 +272,18 @@ struct erk_mqtt_mgr {
 
 **生命周期：**
 
-```
-erk_handle_new()
-  └── ev_loop_new(EVFLAG_AUTO)
-
-erk_mqtt_new(handle)
-  └── 关联 erk_handle_t，加入 mqtt_connectors HashSet
-
-erk_mqtt_connect(mqtt, host, port, opt)
-  └── 异步 TCP 连接，ev_io 注册读写事件
-        └── CONNACK 回调 → on_connect_ack()
-
-erk_handle_run(handle, wait=true)   ← 主循环，阻塞直到 erk_handle_stop()
-  └── ev_run(loop, EVRUN_ONCE 或 0)
-
-erk_handle_stop()  ← 线程安全，内部 ev_break(EVBREAK_ALL)
+```mermaid
+flowchart TD
+    Handle["erk_handle_new()"] --> EvLoop["ev_loop_new(EVFLAG_AUTO)"]
+    EvLoop --> Mqtt["erk_mqtt_new(handle)"]
+    Mqtt --> Register["关联 erk_handle_t<br/>加入 mqtt_connectors HashSet"]
+    Register --> Connect["erk_mqtt_connect(mqtt, host, port, opt)"]
+    Connect --> TCP["异步 TCP 连接<br/>ev_io 注册读写事件"]
+    TCP --> Ack["CONNACK 回调 → on_connect_ack()"]
+    Ack --> Run["erk_handle_run(handle, wait=true)"]
+    Run --> EvRun["ev_run(loop, EVRUN_ONCE 或 0)"]
+    EvRun -->|"运行直到 stop"| Stop["erk_handle_stop()"]
+    Stop --> Break["ev_break(EVBREAK_ALL)"]
 ```
 
 **设计特点：** 整个 ERK 是无锁单线程模型，所有 API 只能在创建 erk_handle_t 的同一线程调用。
@@ -425,31 +406,15 @@ typedef struct scp_adapter {
 
 **锁机状态机（scp-adapter.c）：**
 
-```
-                   ┌──────────────────────┐
-                   │   IDLE（无 lock_info）│
-                   └──────────┬───────────┘
-                              │ on_lock() 收到云平台 lock/unlock 命令
-                              ▼
-                   ┌──────────────────────┐
-                   │   PENDING（等待 stub）│  timeout=300s，retries=true
-                   │   lock_info 非 NULL  │
-                   └────┬──────────┬──────┘
-          stub 回复      │          │  超时（300s）
-       (response)        │          │
-            ┌────────────┘          └────────────┐
-            ▼                                    ▼
-┌───────────────────────┐           ┌────────────────────────┐
-│ progress+status 模式  │           │  超时回复 error 给平台  │
-│ waiting → done        │           │  lock_info=NULL → IDLE  │
-│（可多次上报进度）     │           └────────────────────────┘
-└───────────┬───────────┘
-            │ progress==100 && status=="done" 或 code!=0
-            ▼
-   ┌────────────────────┐
-   │ 上报结果给云平台   │
-   │ lock_info=NULL     │
-   └────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE: 无 lock_info
+    IDLE --> PENDING: on_lock() 收到 lock / unlock 命令
+    PENDING --> PENDING: stub response，继续上报 progress / status
+    PENDING --> Completed: progress=100 且 status=done，或 code!=0
+    PENDING --> TimedOut: 超时（300s）
+    Completed --> IDLE: 上报结果给云平台，lock_info=NULL
+    TimedOut --> IDLE: 回复 error 给平台，lock_info=NULL
 ```
 
 ---
@@ -492,20 +457,12 @@ lock_cmd_reset_engine_type = 0x90 // 重置发动机类型
 
 **线程模型（多线程，有 mutex）：**
 
-```
-主线程（scp-adapter）
-   │  push to deque
-   ▼
-raw_pid 线程（stub-linker 工况接收）
-   │  filter_mutex 保护 DBC 解析
-   ▼
-comp_pid 线程（gzip 压缩 + 写文件）
-   │  sem_t 信号量触发
-   ▼
-export_task 线程（文件上传 HTTP）
-   │  mutex + cond 控制
-   ▼
-erk-otad（上传成功后删除临时文件）
+```mermaid
+flowchart TD
+    Main["主线程（scp-adapter）<br/>push to deque"] --> Raw["raw_pid：stub-linker 工况接收<br/>filter_mutex 保护 DBC 解析"]
+    Raw --> Comp["comp_pid：gzip 压缩 + 写文件<br/>sem_t 信号量触发"]
+    Comp --> Export["export_task：HTTP 文件上传<br/>mutex + cond 控制"]
+    Export --> Otad["erk-otad<br/>上传成功后删除临时文件"]
 ```
 
 **关键同步原语：**
@@ -634,36 +591,24 @@ SDK 版本 0.3.5.98 之前只支持 MD5 签名，MD5 已不安全，存在碰撞
 
 ### D.1 IPC 拓扑图（完整消息流向）
 
-```
-云平台 (CMS/ESMP)
-     │ MQTT publish/subscribe
-     │ TLS TCP
-     ▼
-erk-agent (main process)
-  ├── erk_mqtt_t (umqtt client, libev驱动)
-  └── rcpv4_handle_t
-        │
-        │ device_adapter_t 虚函数调用
-        ▼
-scp-adapter.so (loaded by dlopen)
-  ├── scp_adapter_t
-  │     ├── handle_sub_data ─── nanomsg XSUB ← 11225 ← stub.pub（工况）
-  │     ├── handle_sub_cmd  ─── nanomsg XSUB ← 11215 ← stub.pub（命令回复/状态）
-  │     └── handle_pub_cmd  ─── nanomsg XPUB → 11216 → stub.sub（命令下发）
-  │
-  └── 内部线程
-        ├── data_thread:  stub_run(sub_data)  → CAN数据 → DBC解析 → MQTT上报
-        ├── cmd_thread:   stub_run(sub_cmd)   → 锁机结果/OTA进度 → MQTT上报
-        ├── raw_filter_thread: 数据写文件
-        └── comp_thread:       gzip压缩 + HTTP上传
-
-控制器托管程序 (stub-sany-forklift, 独立进程)
-  ├── nn_connect(11225) → pub CAN工况数据
-  ├── nn_connect(11215) → pub 命令执行结果/状态
-  └── nn_connect(11216) → sub 接收命令下发
-
-物理层
-  └── SocketCAN (CAN0/CAN1) ←→ ECU/MCU
+```mermaid
+flowchart TD
+    Cloud["云平台 CMS / ESMP"] <-->|"MQTT publish / subscribe<br/>TLS TCP"| Agent["erk-agent 主进程<br/>erk_mqtt_t + rcpv4_handle_t"]
+    Agent <-->|"device_adapter_t 虚函数调用"| Plugin["scp-adapter.so（dlopen）<br/>scp_adapter_t"]
+    Stub["控制器托管程序<br/>stub-sany-forklift（独立进程）"]
+    subgraph IPC["nanomsg XSUB / XPUB"]
+        Data["11225：stub 工况 pub → handle_sub_data"]
+        Cmd["11215：stub 命令结果 pub → handle_sub_cmd"]
+        CmdOut["11216：handle_pub_cmd → stub 命令 sub"]
+    end
+    Stub --> Data --> Plugin
+    Stub --> Cmd --> Plugin
+    Plugin --> CmdOut --> Stub
+    Plugin --> D1["data_thread：CAN 数据 → DBC 解析 → MQTT 上报"]
+    Plugin --> D2["cmd_thread：锁机结果 / OTA 进度 → MQTT 上报"]
+    Plugin --> D3["raw_filter_thread：数据写文件"]
+    Plugin --> D4["comp_thread：gzip 压缩 + HTTP 上传"]
+    Stub <--> Device["SocketCAN（CAN0 / CAN1）↔ ECU / MCU"]
 ```
 
 ### D.2 所有通信协议
@@ -786,14 +731,15 @@ scp-adapter.so (loaded by dlopen)
 
 本仓库实现了一个**三层架构的工业 IoT 设备端 SDK**：
 
-```
-[云平台层]  CMS（MQTT接入）↔ ESMP（设备管理）
-              ↕ MQTT/TLS
-[SDK框架层] erk-agent → ERK(libev) → RCPv4 → device_adapter_t接口
-              ↕ dlopen 插件机制
-[插件适配层] scp-adapter → stub-linker(nanomsg) → 控制器托管程序(stub)
-              ↕ SocketCAN
-[物理设备层] CAN总线 → ECU/MCU/传感器
+```mermaid
+flowchart TD
+    Cloud["云平台层<br/>CMS（MQTT 接入）↔ ESMP（设备管理）"]
+    SDK["SDK 框架层<br/>erk-agent → ERK（libev）→ RCPv4 → device_adapter_t"]
+    Plugin["插件适配层<br/>scp-adapter → stub-linker（nanomsg）→ 控制器托管程序（stub）"]
+    Device["物理设备层<br/>CAN 总线 → ECU / MCU / 传感器"]
+    Cloud <-->|"MQTT / TLS"| SDK
+    SDK <-->|"dlopen 插件机制"| Plugin
+    Plugin <-->|"SocketCAN"| Device
 ```
 
 ### E.2 所有源文件功能说明
@@ -975,74 +921,68 @@ int stub_release(stub_handle_t *handle);
 
 #### 锁机完整时序
 
-```
-云平台 ESMP      rcpv4/erk-agent    scp-adapter       stub-sany-forklift    MCU
-    │                  │                 │                    │                │
-    │──lock cmd─────►  │                 │                    │                │
-    │  (MQTT pub)      │                 │                    │                │
-    │              rcpv4_cmd_on_post_lock│                    │                │
-    │                  │──on_lock()────► │                    │                │
-    │                  │   (虚函数)       │                    │                │
-    │                  │                 │─nanomsg pub(11216)─►                │
-    │                  │                 │  /stub/lock/dev     │                │
-    │                  │                 │  cmd=lock,level=2   │                │
-    │                  │                 │                    │──CAN/SPI──────►│
-    │                  │                 │                    │  锁机命令       │
-    │                  │                 │                    │◄──ack──────────│
-    │                  │                 │◄─nanomsg pub(11215)─                │
-    │                  │                 │  progress=50,       │                │
-    │                  │                 │  status=waiting     │                │
-    │◄──progress 50─── │◄─update_lock()──│                    │                │
-    │  (MQTT pub)       │                 │                    │                │
-    │                  │                 │◄─nanomsg pub(11215)─                │
-    │                  │                 │  progress=100,      │                │
-    │                  │                 │  status=done,code=0 │                │
-    │◄──locked result── │◄─update_lock()──│                    │                │
-    │  (MQTT pub)       │                 │  lock_info=NULL     │                │
+```mermaid
+sequenceDiagram
+    participant Cloud as 云平台 ESMP
+    participant RCP as rcpv4 / erk-agent
+    participant Adapter as scp-adapter
+    participant Stub as stub-sany-forklift
+    participant MCU
+    Cloud->>RCP: lock cmd（MQTT publish）
+    RCP->>RCP: rcpv4_cmd_on_post_lock()
+    RCP->>Adapter: on_lock()（虚函数）
+    Adapter->>Stub: nanomsg pub 11216 /stub/lock/dev<br/>cmd=lock, level=2
+    Stub->>MCU: CAN / SPI 锁机命令
+    MCU-->>Stub: ack
+    Stub->>Adapter: nanomsg pub 11215<br/>progress=50, status=waiting
+    Adapter->>RCP: update_lock()
+    RCP->>Cloud: progress 50（MQTT publish）
+    Stub->>Adapter: nanomsg pub 11215<br/>progress=100, status=done, code=0
+    Adapter->>RCP: update_lock()，lock_info=NULL
+    RCP->>Cloud: locked result（MQTT publish）
 ```
 
 #### OTA 完整时序
 
-```
-云平台 ESMP      rcpv4             scp-adapter      stub          ECU
-    │                │                  │              │            │
-    │──OTA cmd──────►│                  │              │            │
-    │  (含文件URL)    │                  │              │            │
-    │             aul_new(url)          │              │            │
-    │             aul_run() ─HTTP GET─► 文件服务器      │            │
-    │             ←─── 文件数据 ─────────               │            │
-    │             MD5/SHA256校验        │              │            │
-    │                │──on_ota()───────►│              │            │
-    │                │                  │─nanomsg pub──►            │
-    │                │                  │ /stub/ota/dev │            │
-    │                │                  │ (本地文件路径)│            │
-    │                │                  │              │──TFTP/UDS─►│
-    │                │                  │              │  升级包     │
-    │                │                  │◄─nanomsg pub──            │
-    │                │                  │ status=installing         │
-    │                │                  │ progress=50               │
-    │◄──OTA progress──│◄─on_ota_progress─│              │            │
-    │                │                  │◄─nanomsg pub──            │
-    │                │                  │ status=done,code=0        │
-    │◄──OTA success───│◄─────────────────│              │            │
+```mermaid
+sequenceDiagram
+    participant Cloud as 云平台 ESMP
+    participant RCP as rcpv4
+    participant Server as 文件服务器
+    participant Adapter as scp-adapter
+    participant Stub as stub
+    participant ECU
+    Cloud->>RCP: OTA cmd（含文件 URL）
+    RCP->>RCP: aul_new(url) / aul_run()
+    RCP->>Server: HTTP GET
+    Server-->>RCP: 文件数据
+    RCP->>RCP: MD5 / SHA256 校验
+    RCP->>Adapter: on_ota()
+    Adapter->>Stub: nanomsg pub /stub/ota/dev<br/>本地文件路径
+    Stub->>ECU: TFTP / UDS 发送升级包
+    ECU-->>Stub: 安装状态 / 进度
+    Stub-->>Adapter: nanomsg pub：installing，progress=50
+    Adapter->>RCP: on_ota_progress()
+    RCP->>Cloud: OTA progress
+    Stub-->>Adapter: nanomsg pub：done，code=0
+    Adapter->>RCP: on_ota_progress()
+    RCP->>Cloud: OTA success
 ```
 
 #### 工况数据上报时序
 
-```
-ECU/传感器      stub(socketcan)   scp-adapter(data线程)  rcpv4/MQTT    云平台CMS
-    │                │                    │                  │              │
-    │──CAN帧────────►│                    │                  │              │
-    │                │──nanomsg pub──────►│                  │              │
-    │                │  /stub/data/dev/   │                  │              │
-    │                │  data/raw          │                  │              │
-    │                │  (11225端口)        │                  │              │
-    │                │                    │  DBC解析+过滤     │              │
-    │                │                    │──rcpv4_adl_pub───►              │
-    │                │                    │  (工况JSON/CBOR)  │              │
-    │                │                    │                  │──MQTT pub───►│
-    │                │                    │                  │  工况topic   │
-    │                │                    │  （同时写本地文件）│              │
+```mermaid
+sequenceDiagram
+    participant ECU as ECU / 传感器
+    participant Stub as stub（SocketCAN）
+    participant Adapter as scp-adapter（data 线程）
+    participant RCP as rcpv4 / MQTT
+    participant Cloud as 云平台 CMS
+    ECU->>Stub: CAN 帧
+    Stub->>Adapter: nanomsg pub 11225<br/>/stub/data/dev/data/raw
+    Adapter->>Adapter: DBC 解析 + 过滤<br/>同时写本地文件
+    Adapter->>RCP: rcpv4_adl_pub（工况 JSON / CBOR）
+    RCP->>Cloud: MQTT publish（工况 topic）
 ```
 
 ### E.5 已知问题与改进建议
