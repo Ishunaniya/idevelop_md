@@ -1,16 +1,16 @@
 # web_app 源码分析（当前分支实装）
 
-> 核对基线：`rtms_sdk` 仓库 `develop/rtms_sdk_v1.3_20240408`，提交 `bc60961e`；源码根目录 `/home/tronlong/lyp/code/rtms_sdk/apps/web_app`。本文只把可从该工作树直接确认的行为写作“当前实现”。设备文件、外部命令、网络与构建产物的实际状态没有在目标设备验证。
+> 核对基线：`rtms_sdk` 仓库 `develop/rtms_sdk_v1.3_20240408`，核对日期 `2026-10-14`，仓库 HEAD `b7323a76`，最近一次涉及本项目的提交 `0516720c`（2026-10-14）；源码根目录 `/home/tronlong/lyp/code/rtms_sdk/apps/web_app`。本文只把可从该工作树直接确认的行为写作“当前实现”。设备文件、外部命令、网络与构建产物的实际状态没有在目标设备验证。
 >
 > 阅读范围：本项目 CMake、启动脚本、路由/认证文件、项目特有 C 代码和当前页面及脚本；随仓库编入的 GoAhead 核心只分析与请求主链有关的入口和职责，`src/paks/`、`src/doc/`、CSS、图片、第三方压缩 JS 不逐行复述。文中 `源码:行号` 均相对于上述源码根目录；四份 `docs/` 设计文档仅作背景，具体行为以代码为准。
 
-本文流程图采用 Mermaid 代码块，按箭头表示处理路径、按分支表示条件结果；需要 Markdown 查看器支持 Mermaid 渲染。
+本文保留 Mermaid 流程图，并在每张图后附纯文本流程；不支持 Mermaid 的 Markdown 查看器可直接阅读 `text` 代码块。箭头表示处理路径，条件旁的文字表示分支。除另行标注“SDK 根目录”的路径外，源码路径均相对于本项目目录。
 
 <!-- rtms-analysis-guide:start -->
 
 ## 文档目录
 
-本报告对应 `rtms_sdk/apps/web_app/` 在 `bc60961e` 的源码；跨项目关系见[源码分析总览](../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
+本报告对应 `rtms_sdk/apps/web_app/` 在仓库 HEAD `b7323a76` 的源码（本项目最近更新 `0516720c`，应用版本 `2.9`）；跨项目关系见[源码分析总览](../源码分析总览.md)。下文原章节编号保留，先用概述、目录、架构、模块和流程五节建立整体脉络。
 
 - [项目概述](#project-overview)
 - [源码目录总览](#source-overview)
@@ -18,13 +18,17 @@
 - [核心模块深度分析](#core-modules)
 - [关键流程与数据流](#key-flows)
 - [1. 结论速览](#analysis-1)
+- [1.2 本次更新与兼容变化](#update-20261014)
 - [2. 构建边界与目录职责](#analysis-2)
+- [2.2 zip/unzip 构建与部署](#zip-build)
 - [3. 启动、请求分发与认证](#analysis-3)
 - [4. 浏览器页面与端到端功能](#analysis-4)
+- [4.3 日志查询流程与时间语义](#log-query)
 - [5. 数据路径、配置与外部依赖](#analysis-5)
 - [6. 源码可证实的限制和维护风险](#analysis-6)
 - [7. 模块关系与修改索引](#analysis-7)
 - [8. 设备异常时的排查手册](#analysis-8)
+- [8.6 本次升级后的专项排查与验证](#update-checks)
 - [9. 核对方法与边界](#analysis-9)
 
 **顺读方式：**先读下面五节，再从原第 1 节起顺序阅读详细分析；需要查特定模块时，可用模块表跳到对应章节。
@@ -68,6 +72,15 @@ flowchart TD
     logs --> response
 ```
 
+纯文本流程（无需 Mermaid）：
+
+```text
+浏览器 -> 页面 HTML/JS -> GoAhead 路由与认证 -> 已注册 action
+  -> action_func.c：记录、配置、下载、记录 ZIP
+  -> log_export.c：日志查询、日志 ZIP
+  -> HTTP 响应或设备文件 -> 浏览器
+```
+
 页面可见入口、已注册 action、已编译 GoAhead 处理器和设备上实际启用功能分别核对。图中箭头表示源码中的数据或控制方向；外部服务和设备效果以正文标明的证据边界为准。
 
 <a id="core-modules"></a>
@@ -98,6 +111,14 @@ flowchart TD
     poll --> download[触发下载]
 ```
 
+纯文本流程（无需 Mermaid）：
+
+```text
+start_web.sh -> 启动 GoAhead -> 路由/认证 -> 已注册 action
+浏览器查询 -> 记录/日志列表 -> 页面显示 -> 单文件下载
+浏览器勾选 -> 后台 ZIP 任务 -> 页面轮询 -> 下载 ZIP -> 清理
+```
+
 [组件与数据流](#analysis-1)、[启动图](#analysis-3)、[记录查询图](#analysis-4)分别展开。日志批量导出还有独立的任务和进度路径，具体条件见第 4 节。
 
 <!-- rtms-analysis-guide:end -->
@@ -125,7 +146,37 @@ flowchart TD
     logs --> zip
 ```
 
+纯文本流程（无需 Mermaid）：
+
+```text
+浏览器 index.html / home.html -> GoAhead -> 按 action 分发
+  -> action_func.c
+     -> conf.c / iniparser -> /opt/conf.ini
+     -> /opt/ 配置文件
+     -> /media/sdcard/ 记录和 ZIP
+     -> 系统 zip 命令
+  -> log_export.c
+     -> /tmp/rtms_log/ 或 /media/sdcard/rtms_log/
+     -> 系统 zip 命令
+```
+
 这里的箭头表示代码调用或文件访问；图中没有画出未在本项目实现的记录生成进程、日志生成进程。GoAhead 核心负责网络、路由、认证、上传和静态文件服务，项目业务层实现查询、下载、打包。依据：`src/src/http.c:229-286`，`src/src/action.c:22-98`，`src/src/goahead.c:328-423`，`src/src/action_func.c:19-40`，`src/src/log_export.c:69-73`。
+
+<a id="update-20261014"></a>
+
+### 1.2 本次更新与兼容变化（2026-10-14）
+
+本次从旧文档基线 `bc60961e` 核对到仓库 HEAD `b7323a76`；这个区间内涉及 `apps/web_app/` 的提交只有 `0516720c`。本目录变化为 `CMakeLists.txt` 和 `src/src/log_export.c`；同一提交还在 SDK 的 `3rdparty/` 增加 ZIP 工具构建支持。以下为源码差异，尚未在目标设备上验证。
+
+| 项目 | 旧基线行为 | 当前实现及影响 |
+| --- | --- | --- |
+| 应用版本 | CMake 版本 `2.8`。 | 升至 `2.9`；启动日志中的 `App Version` 来自生成的应用版本宏。`--version` 仍打印 GoAhead 的 `5.2.0`，不能单独据此判断应用升级成功。 |
+| 日志时间范围 | 文件名年份仅接受 2000—2100；解析失败后使用文件修改时间兜底。 | 年份检查扩大为 1970—2100；解析失败直接跳过；`mktime` 结果小于 0 时也跳过。因此年份通过检查仍不保证最终纳入列表。 |
+| 日志筛选、排序与显示 | 筛选、排序优先用文件名时间，显示通常用文件修改时间。 | 三者统一使用从文件名解析的 `log_time`；`stat` 只用于取文件大小，失败时大小为字符串 `"0"`。复制或修改文件导致 mtime 改变，不再改变日志的筛选和显示时间。 |
+| 不符合命名约定的日志 | 可能依赖 mtime 出现在列表。 | 现在会被跳过；排查升级后缺失日志时先核对命名和文件名时间。该变化只涉及日志列表，`flat-can` 记录查询仍保留自己的 mtime 兜底。 |
+| ZIP 工具 | 导出业务调用设备环境提供的 `zip`。 | SDK 增加默认开启的 `USE_ZIP`，构建 Info-ZIP zip 3.0 和 unzip 6.0；业务仍通过 shell 调用 `zip`，构建产物进入镜像及设备 PATH 的情况需单独核对。 |
+
+依据：提交 `0516720c`；`CMakeLists.txt:1-2`、`global_config.h.in:5-6`、`src/src/goahead.c:308-312,439-440`、`src/src/log_export.c:58-61,146-174,181-187,233-306`；SDK 根目录 `3rdparty/CMakeLists.txt:31,96-98`、`3rdparty/zip/CMakeLists.txt:4-14,29-52`。前端、action 注册、两套导出任务的创建/轮询/清理流程未在本次提交中修改。
 
 <a id="analysis-2"></a>
 
@@ -134,7 +185,7 @@ flowchart TD
 | 部分 | 当前源码作用与核对点 |
 | --- | --- |
 | `apps/CMakeLists.txt` | `WITH_WEB_APP` 默认 `ON`，开启时 `add_subdirectory(web_app)`；它是仓库级开关，不是运行时开关。 |
-| `CMakeLists.txt` | 项目版本 `2.8`、C99；`go` 共享库由 GoAhead 通用源码加选中的 TLS 适配层构成；`web_app` 由 `goahead.c`、`action_func.c`、`log_export.c` 构成并链接 `go`；`gopass` 也链接 `go`。 |
+| `CMakeLists.txt` | 项目版本 `2.9`、C99；`go` 共享库由 GoAhead 通用源码加选中的 TLS 适配层构成；`web_app` 由 `goahead.c`、`action_func.c`、`log_export.c` 构成并链接 `go`；`gopass` 也链接 `go`。 |
 | `src/src/` | GoAhead 网络、路由、认证、文件、上传等核心及项目扩展。`action_func.c` 和 `log_export.c` 属于 `web_app` 主程序，不在 `go` 库的源文件列表中；`conf.c`、`sany_list.c`、`cJSON.c`、`opt_iniparser` 列在 `go` 库中。 |
 | `webserver/` | 运行脚本、实际安装的 `route.txt`、`auth.txt`、静态 `html/` 及可选证书。`src/src/route.txt` 和 `src/src/web/` 是另一套随 GoAhead 源码提供的内容；CMake 安装的是 `webserver/` 下的文件。 |
 | `docs/` | `URD`、`SRS`、`HLD`、`DDD` 四份日志导出文档，用于理解需求和设计；本文只依据实装代码判断行为。 |
@@ -163,7 +214,39 @@ CMake 的 TLS 开关默认 mbedTLS 开、OpenSSL 关，二者同时开启会直�
 
 仓库本目录的 `README.md` 把安装目录写成 `userdata/webserver`，但当前 CMake 安装规则和启动脚本均为 `usrdata/webserver`；本文采用可执行规则中的拼写。`src/test/` 是随 GoAhead 源码存在的测试目录，当前本项目 `CMakeLists.txt` 没有把它加入构建或定义专用测试目标。依据：`README.md:67-69`，`CMakeLists.txt:195-199`，`webserver/start_web.sh:3`。
 
-**版本区分**：CMake `project(web_app VERSION 2.8)` 是本项目版本；GoAhead 配置头 `src/projects/goahead-linux-default-me.h:280-281` 中 `ME_VERSION` 为 `5.2.0`，`--version` 打印的是 `ME_VERSION`（`src/src/goahead.c:308-312`），两者不能混写。
+**版本区分**：CMake `project(web_app VERSION 2.9)` 是本项目版本；GoAhead 配置头 `src/projects/goahead-linux-default-me.h:280-281` 中 `ME_VERSION` 为 `5.2.0`，`--version` 打印的是 `ME_VERSION`（`src/src/goahead.c:308-312`），两者不能混写。
+
+<a id="zip-build"></a>
+
+### 2.2 新增 zip/unzip 构建与部署边界
+
+以下路径相对于 **SDK 根目录 `/home/tronlong/lyp/code/rtms_sdk`**。顶层先加入 `3rdparty`，再加入 `apps`；`3rdparty/CMakeLists.txt` 增加默认值为 `ON` 的 `USE_ZIP`，开启时加入 `zip/` 子目录。该开关控制第三方命令行工具的构建；`WITH_WEB_APP` 控制应用构建，两者是独立开关。
+
+| 文件或变量 | 当前实现 |
+| --- | --- |
+| `3rdparty/zip/zip30.tar.gz`、`unzip60.tar.gz` | 随仓库保存的 Info-ZIP 源码包，声明版本分别为 zip 3.0、unzip 6.0。 |
+| `3rdparty/zip/CMakeLists.txt` | 使用 CMake `ExternalProject_Add` 创建 `zip`、`unzip` 外部构建目标；解包后在源码目录构建，配置步骤和独立安装步骤为空，实际编译/复制由 `build.sh` 执行。 |
+| `3rdparty/zip/build.sh` | 优先用环境变量 `CC`；否则当目标主机非空且不等于 `Linux` 时用 `<目标主机>-gcc`；其余情况用本机 `gcc`。第二个处理器参数当前未在脚本中参与编译器选择。zip 与 unzip 均调用各自 `unix/Makefile` 的 `generic` 目标。 |
+| 输出目录 | CMake 将该模块安装前缀设为 `${CMAKE_BINARY_DIR}/build_dir`，脚本将可执行文件复制到其中的 `bin/zip`、`bin/unzip`。 |
+| `zip-config.cmake.in` | 导出 `ZIP_DIR` 与 `ZIP_BIN_DIR`；`zip-config-version.cmake.in` 只接受精确匹配声明的 zip 版本。 |
+| 应用运行依赖 | `action_func.c` 和 `log_export.c` 继续通过 `system()` 执行 `zip` 命令；它们没有改为链接 Info-ZIP 库，也没有写死新工具的绝对路径。 |
+
+```text
+SDK CMake
+  -> 3rdparty：USE_ZIP 是否开启？
+     -> 否：跳过 zip/unzip 构建
+     -> 是：解包 zip30.tar.gz / unzip60.tar.gz
+          -> build.sh 选择 CC / <目标主机>-gcc / gcc
+          -> make -f unix/Makefile generic
+          -> 构建根目录/build_dir/bin/zip、unzip
+          -> 镜像或部署步骤将工具放入目标设备可执行目录【需核对】
+          -> web_app 的后台线程经 shell、PATH 找到 zip
+          -> 生成 ZIP -> 页面轮询 -> 下载 -> 清理
+```
+
+当前 `apps/web_app/CMakeLists.txt` 没有 `find_package(zip)` 或安装 `${ZIP_BIN_DIR}` 的规则；在已检索的仓库 CMake/脚本中，也未找到消费 `ZIP_BIN_DIR` 的部署代码。源码能确认构建暂存目录和包配置，不能据此断言工具已经进入设备镜像。交叉编译时还要核对脚本实际选择的编译器和产物架构：外部脚本并未直接读取 CMake 的 `CMAKE_C_COMPILER`，只有正确传入的环境/目标主机才能决定其编译器。`build.sh` 未启用 `set -e`，各次 `make` 后也无显式失败判断，核对时应检查构建日志和产物，不能只看末尾复制操作。
+
+依据：SDK 根目录 `CMakeLists.txt:39-40`、`3rdparty/CMakeLists.txt:31,96-98`、`3rdparty/zip/CMakeLists.txt:1-52`、`3rdparty/zip/build.sh:9-32`、`3rdparty/zip/zip-config.cmake.in:1-6`、`3rdparty/zip/zip-config-version.cmake.in:1-9`；应用 `src/src/action_func.c:1870-1908`、`src/src/log_export.c:455-469`。
 
 <a id="analysis-3"></a>
 
@@ -187,6 +270,18 @@ flowchart TD
     tasks --> serve[websServiceEvents 处理请求]
     serve --> signal[收到终止信号]
     signal --> close[websClose]
+```
+
+纯文本流程（无需 Mermaid）：
+
+```text
+start_web.sh -> cd /usrdata/webserver -> killall -9 web_app
+  -> 每 30 秒检查：进程不存在且二进制存在时，后台启动 web_app
+  -> web_app 解析参数 -> websOpen / route.txt
+     -> 失败：退出
+     -> 成功：加载 auth.txt -> 监听 -> 注册 14 个业务 action
+          -> 初始化日志任务表 -> websServiceEvents
+          -> 终止信号 -> websClose
 ```
 
 脚本先强制结束同名进程，再进入轮询；`killall` 的范围是进程名。脚本设定 `record_mode=dated`、`--max-export-size 50`、`stdout:2`、HTTP 80 端口，未传 `--route`，所以主程序用当前工作目录下的 `route.txt`。主程序默认记录模式与上限也分别是 `dated`、50 MB；`--max-export-size` 只接受 20–100。`websOpen` 完成核心、文件、上传、认证、路由等初始化；`websListen` 后注册业务 action，事件循环处理请求。当前退出路径调用 `websClose()`，没有显式调用 `log_export_deinit()`。依据：`webserver/start_web.sh:3-31`，`src/src/goahead.c:39-40,225-425`，`src/src/http.c:229-286`。
@@ -221,12 +316,12 @@ flowchart TD
 | `getBatchDownloadProgress` | `taskId` | 回 `progress,status`，成功时带 `zipFile`，失败可带 `error`。 | `action_func.c:2056-2112` |
 | `getExportConfig` | 无 | 回 `maxExportSizeMB`。 | `action_func.c:2039-2054` |
 | `cleanupBatchFile` | `filePath` | 路径前缀为 `/media/sdcard/` 时调用 `unlink`，回 `status` 或 `error`。 | `action_func.c:2114-2139` |
-| `getLogList` | `dirType,start_time,end_time` | 扫描 `mem/sd` 对应目录的 `.log` 文件，回 `dirPath,dirType,fileList,truncated` 或错误。 | `log_export.c:190-342` |
-| `startLogExport` | `dirType,files,zipName` | 校验所选文件名并启动日志 ZIP 线程，回 `taskId` 或 `error`。 | `log_export.c:513-674` |
-| `getLogExportProgress` | `taskId` | 回 `progress,status`，成功时带 `zipFile`。 | `log_export.c:676-734` |
-| `cleanupLogExportFile` | `filePath` | 仅接受两个日志根目录下、文件名字符合限制的路径并调用 `unlink`。 | `log_export.c:736-793` |
+| `getLogList` | `dirType,start_time,end_time` | 扫描 `mem/sd` 对应目录的 `.log` 文件，回 `dirPath,dirType,fileList,truncated` 或错误。 | `log_export.c:190-332` |
+| `startLogExport` | `dirType,files,zipName` | 校验所选文件名并启动日志 ZIP 线程，回 `taskId` 或 `error`。 | `log_export.c:503-664` |
+| `getLogExportProgress` | `taskId` | 回 `progress,status`，成功时带 `zipFile`。 | `log_export.c:666-724` |
+| `cleanupLogExportFile` | `filePath` | 仅接受两个日志根目录下、文件名字符合限制的路径并调用 `unlink`。 | `log_export.c:726-783` |
 
-`fileList` 项常见字段为 `fileName`、`subDir`、`date`、`size`；记录项的 `size` 以 JSON 数字输出，日志项的 `size` 以字符串输出。部分模式还返回 `start_time/end_time`、`totalCount`、`truncated`；不要依赖所有模式字段完全一致。记录和日志 action 对错误有的返回空表、有的返回 `error`，前端应分别处理。依据：`src/src/action_func.c:494-577,1020-1224,1401-1468,1621-1687,1699-1762`，`src/src/log_export.c:190-342`。
+`fileList` 项常见字段为 `fileName`、`subDir`、`date`、`size`；记录项的 `size` 以 JSON 数字输出，日志项的 `size` 以字符串输出。部分模式还返回 `start_time/end_time`、`totalCount`、`truncated`；不要依赖所有模式字段完全一致。记录和日志 action 对错误有的返回空表、有的返回 `error`，前端应分别处理。依据：`src/src/action_func.c:494-577,1020-1224,1401-1468,1621-1687,1699-1762`，`src/src/log_export.c:190-332`。
 
 ### 4.2 记录查询的逻辑流程图
 
@@ -250,15 +345,79 @@ flowchart TD
     choice -->|勾选批量| export[转入 4.4 导出流程]
 ```
 
+纯文本流程（无需 Mermaid）：
+
+```text
+浏览器起止本地时间 -> Unix 秒 -> POST getFileListByDate
+  -> dated：设备 ID -> 日期子目录 -> 文件名本地时间 -> 范围筛选
+  -> flat-can：设备 ID -> 平铺文件 -> 14 位本地时间，失败用 mtime
+  -> erk：raw-data -> 文件名 UTC 起止区间 -> 相交判断
+  -> 返回 JSON -> sessionStorage / 列表
+     -> 单文件：getFile 下载
+     -> 批量：转入第 4.4 节
+```
+
 `dated` 目录名支持 `YYYYMMDD` 和 `YYMMDD`（两位年按 20YY 解释），范围查询先选日期目录，再解析文件名中的时间并按设备本地时区 `mktime` 比较；上限 2000 条。普通 `getFileList` 路径则扫描最多 500 条。`erk` 仅接收 `OM_MODBUS_` 或 `OM_CAN_` 开头且含 `_UTC_` 起止时间的 ZIP 名称，按 UTC 时间区间与查询区间相交判断，展示时转设备本地时间；`flat-can` 在文件名中寻找 14 位时间戳，找不到则用文件修改时间，两者范围查询也最多展示 2000 条，普通列表最多 500 条。依据：`src/src/action_func.c:19-40,675-725,874-939,1020-1224,1230-1687`。
 
 `getFileListByDateAction` 将请求秒值用 `atoi` 转换；起始值大于结束值或查询准备失败时回空数组。前端从 `datetime-local` 构造秒值并验证区间，在 `sessionStorage` 保存查询状态，列表项中 `dirPath/subDir/fileName` 组合成下载路径。三种模式对 `totalCount/truncated` 的计算方式并不完全相同，尤其 `dated` 到 2000 条即停止继续扫描，不能把 `totalCount` 当成全盘文件总数。依据：`src/src/action_func.c:1020-1224,1699-1762`，`webserver/html/js/queryByDate.js:51-225,394-416`。
 
-`action_func.c` 另有按单日列文件的 `get_file_list_by_date()`，`conf.c` 有 `log_level_parse()`、`machine_no_parse()`，`log_export.c` 有 `log_export_deinit()`；这些函数在本目录当前业务入口中没有调用点。它们属于源码能力，不能直接列成正在运行的页面流程。依据：`src/src/action_func.c:941-1018`，`src/src/conf.c:88-138`，`src/src/log_export.c:813-826`，以及 `src/src/goahead.c:404-425` 的实际注册和主循环。
+`action_func.c` 另有按单日列文件的 `get_file_list_by_date()`，`conf.c` 有 `log_level_parse()`、`machine_no_parse()`，`log_export.c` 有 `log_export_deinit()`；这些函数在本目录当前业务入口中没有调用点。它们属于源码能力，不能直接列成正在运行的页面流程。依据：`src/src/action_func.c:941-1018`，`src/src/conf.c:88-138`，`src/src/log_export.c:803-816`，以及 `src/src/goahead.c:404-425` 的实际注册和主循环。
+
+<a id="log-query"></a>
 
 ### 4.3 日志查询与单文件下载
 
-`logExport.js` 让用户选 `mem` 或 `sd` 并输入本地时间，转为秒值提交 `getLogList`。后端将 `mem` 固定映射到 `/tmp/rtms_log/`、`sd` 固定映射到 `/media/sdcard/rtms_log/`，仅考虑后缀为 `.log` 的目录项。时间优先解析 `<前缀>_YYYY-MM-DD_HHMMSS.log`，失败用 `stat` 修改时间；先筛选后保存最多 2000 项，再按所用时间降序排序。响应展示日期却再次读取文件修改时间，因此“筛选/排序时间”和“显示时间”可能不同。目录打不开时当前实现记录日志并返回空列表，而非 HTTP 错误。单文件下载仍调用公共 `getFile`，将所选根目录和文件名拼为 `Filename`。依据：`src/src/log_export.c:69-73,146-342`，`webserver/html/js/logExport.js:160-265,373-402`。
+`logExport.js` 让用户选 `mem` 或 `sd` 并输入浏览器本地时间，转为 Unix 秒提交 `getLogList`。后端将 `mem` 固定映射到 `/tmp/rtms_log/`、`sd` 固定映射到 `/media/sdcard/rtms_log/`。接口缺少参数、目录类型非法、内存分配失败时返回 `error`；`start_time/end_time` 用 `atol` 转换，服务端没有额外校验数值字符串或起止顺序，前端会检查时间有效性及顺序。目录打不开时记录日志并返回空列表，不改为 HTTP 错误。单文件下载仍调用公共 `getFile`，将所选根目录和文件名拼为 `Filename`。依据：`src/src/log_export.c:190-230,233-270`，`webserver/html/js/logExport.js:160-224,373-402`。
+
+当前查询逐个检查目录项：仅考虑以 `.log` 结尾的名称，再用 `sscanf` 解析 `<前缀>_YYYY-MM-DD_HHMMSS.log`。年份检查为 1970—2100，月为 1—12、日为 1—31、时分秒分别为 0—23/59/59；用设备本地时区的 `mktime` 得到秒值。解析失败或秒值小于 0 就跳过，**不再读取 mtime 作为兜底**。按闭区间 `[start_time, end_time]` 筛选，最多保存前 2000 个匹配项，后续匹配项使 `truncated=true`；最后只对已保存部分按 `log_time` 降序排序。因此这里仍不能保证返回整个目录中最新的 2000 个文件。依据：`src/src/log_export.c:146-174,181-187,233-272`。
+
+响应中每个列表项的 `date` 使用 `localtime(log_time)` 格式化，与筛选、排序使用同一时间来源；`stat` 只读取大小，失败时 `size` 为字符串 `"0"`。`dirPath`、`dirType`、`fileList`、`truncated` 的接口字段未变。示例：`RTMS_2026-10-14_153000.log` 即使复制后 mtime 变为 10 月 15 日，也按文件名中的 10 月 14 日 15:30:00 参与筛选和显示；`custom.log` 无法解析时间，会跳过。此处是对源码行为的举例，不是设备实测结果。依据：`src/src/log_export.c:281-320`。
+
+时间与命名边界需按实现理解：浏览器本地时间负责生成查询秒值，设备本地时区负责解析日志名，两端时区不一致可能造成查询偏移。`sscanf` 的前缀读取在第一个下划线处停止，所以不能将含下划线前缀视为通用兼容格式；解析器以六个数值转换成功为判断，没有完整文件名匹配校验。日期只做上述范围判断，诸如 2 月 31 日可能被 `mktime` 归一化；没有日期往返校验。年份为 1970 的文件若转换后秒值小于 0，仍会被跳过；目标平台 `time_t` 的可表示范围也需在设备验证。依据：`src/src/log_export.c:154-174,247-255`。
+
+```mermaid
+flowchart TD
+    query[选择 mem/sd 和起止时间] --> post[POST getLogList]
+    post --> params{必需参数和 dirType 有效？}
+    params -->|否| error[返回 error]
+    params -->|是| alloc{列表分配成功？}
+    alloc -->|否| error
+    alloc -->|是| open{能打开目录？}
+    open -->|否| empty[记录错误并返回空列表]
+    open -->|是| more{还有目录项？}
+    more -->|是| scan[读取下一目录项]
+    scan --> valid{以 .log 结尾且文件名时间可解析？}
+    valid -->|否| skip[跳过并检查下一项]
+    valid -->|是| range{秒值非负且位于起止闭区间？}
+    range -->|否| skip
+    range -->|是| capacity{已保存不足 2000 项？}
+    capacity -->|是| save[保存 fileName 和 log_time]
+    capacity -->|否| truncate[置 truncated 为 true]
+    save --> more
+    truncate --> more
+    skip --> more
+    more -->|否| sort[按 log_time 降序排列已保存项]
+    sort --> output[date 来自 log_time，stat 只取 size]
+    output --> page[返回 JSON 并由页面显示]
+    page --> download[选择单文件时由 getFile 下载]
+```
+
+纯文本流程（无需 Mermaid）：
+
+```text
+浏览器：mem/sd + 本地起止时间 -> Unix 秒 -> getLogList
+  -> 必需参数缺失 / dirType 非法：返回 error
+  -> 分配列表失败：返回 error
+  -> 目录打不开：记录错误 -> 返回空列表
+  -> 遍历目录项
+     -> 不是 .log / 文件名时间无法解析 / 秒值为负：跳过
+     -> 时间不在起止闭区间：跳过
+     -> 匹配且已存不足 2000 项：保存 fileName、log_time
+     -> 匹配但已满：truncated=true，继续遍历
+  -> 按 log_time 对已保存项降序排序
+  -> date 使用 log_time；stat 只取 size，失败填 "0"
+  -> 返回 JSON -> 页面显示 -> getFile 单文件下载
+```
 
 ### 4.4 两套批量导出的共同流程与差异
 
@@ -284,6 +443,20 @@ flowchart TD
     next -->|全部结束| cleanup[调用对应 cleanup action]
 ```
 
+纯文本流程（无需 Mermaid）：
+
+```text
+页面勾选、分批
+  -> 记录：batchDownload -> 记录任务表（16 项）-> ZIP 线程
+  -> 日志：startLogExport -> 日志任务表（8 项）-> ZIP 线程
+  -> 对应进度接口轮询
+     -> status=0：继续轮询
+     -> status=-1：显示错误并结束当前批次
+     -> status=1 且有 zipFile：getFile 触发下载
+          -> 有下一批：继续创建任务
+          -> 全部结束：对应 cleanup action 清理 ZIP
+```
+
 记录页面在 `home.html` 初始化时调用 `getExportConfig` 读取最大批量大小，默认 50 MB；日志模块也定义了 `fetchExportConfig()`，但当前 `logExport.js` 中没有调用点，因此日志前端实际使用写定的 50 MB。勾选文件后，前端按列表中的大小拆批，超出单批上限的单文件被跳过。ZIP 任务创建后每 500 ms 轮询进度，完成时通过 `getFile` 触发浏览器下载，依次处理下一批，最后请求清理。记录模块从 `queryByDate.js:445-727` 实现，日志模块从 `logExport.js:394-619` 实现。页面触发下载与随后发清理请求之间没有等待浏览器明确确认保存成功的回执，因此“下载完成”的界面文案只表示代码已触发下载动作。
 
 | 项目 | 记录批量导出 | 日志批量导出 |
@@ -296,7 +469,7 @@ flowchart TD
 | 成功判定 | 逐文件执行 `zip`；任意一次命令返回 0 即把任务标为成功，故可能产生仅含部分所选文件的 ZIP。 | 逐文件执行 `zip`；同样以至少一次成功作为任务成功条件。 |
 | 清理 | `cleanupBatchFile` 只检查 `/media/sdcard/` 字符串前缀即 `unlink`。 | `cleanupLogExportFile` 检查固定日志根目录、剩余文件名字符集及 `..` 后 `unlink`。 |
 
-依据：`src/src/action_func.c:44-131,1764-2139`，`src/src/log_export.c:25-73,104-143,345-826`。两套任务状态约定均为 `0` 处理中、`1` 完成、`-1` 失败；状态与进度保存在进程内存，重启后不能继续查旧任务。日志模块启动时清空任务表，`log_export_deinit()` 虽已实现，当前主程序退出路径未调用。依据：`src/src/goahead.c:421-425`，`src/src/log_export.c:34-45,795-826`。
+依据：`src/src/action_func.c:44-131,1764-2139`，`src/src/log_export.c:25-73,104-143,335-816`。两套任务状态约定均为 `0` 处理中、`1` 完成、`-1` 失败；状态与进度保存在进程内存，重启后不能继续查旧任务。日志模块启动时清空任务表，`log_export_deinit()` 虽已实现，当前主程序退出路径未调用。依据：`src/src/goahead.c:421-425`，`src/src/log_export.c:34-45,785-816`。
 
 ### 4.5 配置文件处理与文件下载
 
@@ -316,7 +489,9 @@ flowchart TD
 | `/media/sdcard/can_data_<dev_id>/` | `dated` 使用日期子目录、`flat-can` 使用平铺文件；两者是互斥的运行参数分支。 | `src/src/action_func.c:19-40` |
 | `/media/sdcard/erk-root/raw-data/` | `erk` 平铺记录目录；不读取 `/opt/conf.ini` 获取设备 ID。 | `src/src/action_func.c:26-40`、`src/src/goahead.c:95-120` |
 | `/media/sdcard/` | 记录批量 ZIP 输出；目录必须可写且设备有 `zip` 命令。 | `src/src/action_func.c:1819-1909` |
-| `/tmp/rtms_log/`、`/media/sdcard/rtms_log/` | 日志读取和对应 ZIP 输出目录；`mem/sd` 由后端固定映射。 | `src/src/log_export.c:69-73,428-432` |
+| `/tmp/rtms_log/`、`/media/sdcard/rtms_log/` | 日志读取和对应 ZIP 输出目录；`mem/sd` 由后端固定映射，列表以文件名时间为准。 | `src/src/log_export.c:69-73,418-422` |
+
+SDK 新增的工具暂存目录为构建根目录下的 `build_dir/bin/zip`、`bin/unzip`；它们与设备运行目录 `/usrdata/webserver` 是不同位置。两套后台导出仍需要服务进程环境的 PATH 能找到可执行的 `zip`；`unzip` 可用于人工核验归档内容。构建规则与部署边界见第 2.2 节。
 
 GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/UPLOAD 上限设为 204800000 字节；这属于 GoAhead 请求层容量常量，不等于业务 ZIP 的 20–100 MB 上限。静态页面依赖项目内的 JS/CSS 资源；`index.html` 还引用 Google Fonts 地址，断网环境下字体加载结果取决于浏览器网络，业务页面本身是本地静态文件。依据：`src/projects/goahead-linux-default-me.h:153-174,238-243`，`webserver/html/index.html:8-18`。
 
@@ -332,11 +507,11 @@ GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/U
 | `getFile` action 函数签名 | `getFileAction` 定义为三个参数，但当前 GoAhead 配置 `ME_GOAHEAD_LEGACY=0`，`actionHandler` 按一个 `Webs *` 参数调用注册函数；函数体只使用第一个参数。 | 这是当前源码的函数签名不一致；修改此入口时应按当前 GoAhead 回调类型核对，不能依靠未使用的附加参数。依据：`src/src/goahead.c:151-162`，`src/src/action.c:45-68`，`src/projects/goahead-linux-default-me.h:123-124`。 |
 | `uploadFile` | GoAhead 上传层拒绝路径分隔符等特定文件名字符；业务层仅用 `strstr` 判断包含 `.ini`/`.json`。上传需要工作目录的 `tmp/` 和网页目录的 `tmp/`；源码安装内容未提供它们。`mv` 通过 `system()` 执行且退出状态不参与 `OK` 判定。 | 先检查设备上的两个临时目录及权限，再确认 `/opt/` 是否真正落盘；现有返回 `OK` 不保证移动成功。依据：`src/src/upload.c:230-259,465-477`，`src/src/goahead.c:164-218`，`CMakeLists.txt:195-199`。 |
 | 记录批量导出 | `dirPath`、`files`、`zipName` 参与 shell 命令；服务端只拿客户端传的 `totalSize` 与上限比较，没有对文件逐个重算。`taskId` 仅由秒级时间组成。 | 路径和 ZIP 名称需要服务端约束；同一秒创建多个任务时存在相同 ID 的可能，任务表的行为需实测。依据：`src/src/action_func.c:1764-2037`。 |
-| 日志批量导出 | 所选日志文件名经 `log_export_path_valid()` 校验，但请求的 `zipName` 被复制到输出路径并传入 shell 命令，没有同等级字符校验；任务启动不复核总大小。 | 不应把文件名白名单等同于整个导出请求都已校验；核对 ZIP 名称和导出体积边界。依据：`src/src/log_export.c:104-143,428-479,513-674`。 |
-| 导出完成 | 两套后台线程均采用“至少一个 `zip` 命令成功”作为总体成功条件；前端随后发起下载及清理，没有等待浏览器确认文件已保存。 | 成功状态可能对应部分文件被打包；要验证 ZIP 条目和下载时序。依据：`src/src/action_func.c:1870-1908`，`src/src/log_export.c:467-505`，`webserver/html/js/queryByDate.js:685-727`，`webserver/html/js/logExport.js:540-585`。 |
+| 日志批量导出 | 所选日志文件名经 `log_export_path_valid()` 校验，但请求的 `zipName` 被复制到输出路径并传入 shell 命令，没有同等级字符校验；任务启动不复核总大小。 | 不应把文件名白名单等同于整个导出请求都已校验；核对 ZIP 名称和导出体积边界。依据：`src/src/log_export.c:104-143,418-469,503-664`。 |
+| 导出完成 | 两套后台线程均采用“至少一个 `zip` 命令成功”作为总体成功条件；前端随后发起下载及清理，没有等待浏览器确认文件已保存。 | 成功状态可能对应部分文件被打包；要验证 ZIP 条目和下载时序。依据：`src/src/action_func.c:1870-1908`，`src/src/log_export.c:457-495`，`webserver/html/js/queryByDate.js:685-727`，`webserver/html/js/logExport.js:540-585`。 |
 | 记录 ZIP 清理 | `cleanupBatchFile` 只做 `/media/sdcard/` 前缀比较，然后 `unlink`；没有检查路径规范化结果或文件是否为当前任务产物。 | 此接口的可删除范围取决于进程权限及请求路径；路径校验需要按实际权限模型审查。依据：`src/src/action_func.c:2114-2139`。 |
 | 文件列表与页面渲染 | 后端文件名和路径直接进入多处 `innerHTML`/拼接的 HTML 或内联 `onclick`；日志文件名和记录文件名来自设备目录。 | 若设备目录中出现特殊字符文件名，页面展示/点击行为可能异常；需要对输出编码作专项验证。依据：`webserver/html/js/queryByDate.js:191-225`，`webserver/html/js/logExport.js:225-265`。 |
-| 查询数量和时间 | `dated` 范围查询达到 2000 条就停止，`erk/flat-can` 扫描全目录后最多输出 2000 条；日志列表先存最多 2000 个再排序；日志按文件名时间筛选，但列表显示修改时间。 | “最新 2000 条”和 `totalCount` 的语义并非各模式严格一致；不同记录布局和时区应分别验证。依据：`src/src/action_func.c:1020-1224,1401-1468,1621-1687`，`src/src/log_export.c:190-342`。 |
+| 查询数量和时间 | `dated` 范围查询达到 2000 条就停止，`erk/flat-can` 扫描全目录后最多输出 2000 条；日志列表先存最多 2000 个再排序；日志筛选、排序、显示现已统一使用文件名时间，解析失败直接跳过。 | “最新 2000 条”和 `totalCount` 的语义并非各模式严格一致；不同记录布局和时区应分别验证。依据：`src/src/action_func.c:1020-1224,1401-1468,1621-1687`，`src/src/log_export.c:190-332`。 |
 | 会话与配置 | 任务状态仅在进程内存；`start_web.sh` 启动前强制结束同名进程；`dated/flat-can` 每次查询调用 `conf_parse`，依赖设备上的 `/opt/conf.ini`。 | 进程重启后旧任务 ID 不可继续查询；缺配置时记录查询会走失败/空表路径。依据：`webserver/start_web.sh:17-31`，`src/src/goahead.c:95-120`，`src/src/action_func.c:1699-1762`。 |
 
 这些风险的优先级应由部署环境决定。本文只记录可从实现直接确认的输入来源、判断条件和输出行为，不以设计文档承诺或界面隐藏状态替代服务端事实。
@@ -351,9 +526,9 @@ GoAhead 配置头还定义上传开关和 `tmp` 上传目录，并把 POST/PUT/U
 | 登录和权限 | `webserver/route.txt`、`webserver/auth.txt`；GoAhead `src/src/auth.c`、`route.c`、`http.c`；页面 `index.html`。 |
 | 记录模式或设备 ID | `src/src/goahead.c` 的 `--record-mode`；`src/src/action_func.c/.h` 的三套扫描/解析；`src/src/conf.c/.h`；`queryByDate.js` 的路径和展示。 |
 | 记录批量导出 | `queryByDate.js` 分批、命名、轮询；`action_func.c` 文件列表解析、任务表、ZIP 线程、清理；`getFile` 下载实现。 |
-| 日志导出 | `logExport.js`；`log_export.c/.h` 的目录映射、时间解析、任务和路径守卫；`goahead.c` 注册；`CMakeLists.txt` 构建目标。 |
+| 日志导出 | `logExport.js`；`log_export.c/.h` 的目录映射、文件名时间解析与统一显示、任务和路径守卫；`goahead.c` 注册；`CMakeLists.txt` 构建目标。 |
 | 配置文件导入/下载 | `importFile.js`、`exportFile.js`、`home.html` 导航；`goahead.c` 上传/删除/列表；`action_func.c` 下载与文件列表。 |
-| 打包与部署 | 顶层 `apps/CMakeLists.txt`、本目录 `CMakeLists.txt`、`webserver/` 安装内容、目标工具链与 `QL_MODULE_PLATFORM`。 |
+| 打包与部署 | 顶层 `apps/CMakeLists.txt`、本目录 `CMakeLists.txt`、`webserver/` 安装内容；SDK 根目录 `3rdparty/CMakeLists.txt`、`3rdparty/zip/`、工具链与部署时 PATH。 |
 
 <a id="analysis-8"></a>
 
@@ -378,6 +553,19 @@ flowchart TD
     output --> download[检查 getFile 返回与前端清理时序]
 ```
 
+纯文本流程（无需 Mermaid）：
+
+```text
+浏览器打不开 -> 检查 IP/端口、进程、二进制/库/部署文件
+能开页面但功能异常 -> 浏览器 Network 查看首次失败请求
+  -> 401：认证、会话
+  -> 404：静态文件、action 注册、路由
+  -> 200 但 error/空列表：业务 action、目录、配置、时间
+列表正常但导出/下载失败 -> taskId、进度、zipFile
+  -> zip 命令、权限、空间、ZIP 文件
+  -> getFile 响应及清理时序
+```
+
 先用**首次失败的请求**定位层次：静态页面失败多在监听/部署；登录失败查路由/认证；查询为空查记录模式、配置、目录与时间；打包失败查任务、`zip` 和存储；下载失败查 `getFile` 的实际路径。不要先删除文件、重启服务或清理 ZIP，否则可能丢失任务状态和证据。
 
 ### 8.2 首轮只读检查
@@ -394,6 +582,7 @@ ls -l /usrdata/webserver/route.txt /usrdata/webserver/auth.txt
 ls -ld /usrdata/webserver/tmp /usrdata/webserver/html/tmp
 df -h /media/sdcard /tmp /opt
 command -v zip
+command -v unzip
 ```
 
 `ls`/`df` 对不存在的目录报错本身就是线索。用 `ps` 获取 PID 后，可按设备提供的命令查看启动参数和当前工作目录：
@@ -405,7 +594,7 @@ readlink /proc/<PID>/fd/1
 readlink /proc/<PID>/fd/2
 ```
 
-启动参数能确认实际 `--record-mode`、`--max-export-size`、网页目录和监听地址；工作目录决定相对的 `route.txt` 与 GoAhead 上传暂存 `tmp/` 路径。`fd/1`、`fd/2` 用来定位标准输出和错误输出流。脚本当前传 `--log stdout:2`，源码不保证有固定的 `/var/log/web_app.log`；如果输出连到 pipe、终端或进程管理器，应从对应日志收集。启动日志中的 `Version`、`App Version`、`Directory`、`Documents` 可帮助确认实际运行程序。依据：`webserver/start_web.sh:3-31`，`src/src/goahead.c:232-337,434-448`。
+启动参数能确认实际 `--record-mode`、`--max-export-size`、网页目录和监听地址；工作目录决定相对的 `route.txt` 与 GoAhead 上传暂存 `tmp/` 路径。`fd/1`、`fd/2` 用来定位标准输出和错误输出流。脚本当前传 `--log stdout:2`，源码不保证有固定的 `/var/log/web_app.log`；如果输出连到 pipe、终端或进程管理器，应从对应日志收集。启动日志中的 `Version`、`App Version`、`Directory`、`Documents` 可帮助确认实际运行程序；本次应用升级应核对 `App Version: 2.9`，单独运行 `web_app --version` 仍会得到 GoAhead 版本 `5.2.0`。依据：`webserver/start_web.sh:3-31`，`src/src/goahead.c:232-337,434-448`。
 
 网络只读检查可用设备具备的工具执行其一：`ip addr`、`ss -lnt` 或 `netstat -lnt`；从能访问设备的主机请求 `http://192.168.1.1/index.html`。例如主机安装了 `curl` 时：
 
@@ -425,9 +614,9 @@ curl -i --max-time 5 http://192.168.1.1/index.html
 | 页面能登录但 JS 功能不显示 | 浏览器 Console 和 Network 里 `queryByDate.js`、`logExport.js`、`i18n.js` 的加载状态；确认 `home.html` 与脚本来自同一次安装。 | 页面入口及脚本引用位于 `home.html:262-265,355-380`；静态资产缺失与后端 action 错误分开判断。 |
 | 记录查询空白或提示无文件 | 先取 `getFileListByDate` 的原始响应：是 200 空体、`fileList:[]`、`error` 还是非 200；再查记录模式、`/opt/conf.ini` 可读性、对应目录和时间范围。 | `dated/flat-can` 要 `dev:id` 与 `dev:secret` 成功解析，`erk` 不读该文件。查询准备失败时会构造空列表，所以“无文件”不一定等于目录真实为空。依据：`conf.c:55-85`、`action_func.c:1699-1762`。 |
 | 只有部分记录显示或时间不符 | 检查设备 `date` 与时区、目录名和文件名格式、是否命中 2000 条上限；比较文件名时间与 `stat` 修改时间。 | `dated` 使用本地时间解析日期子目录；`erk` 文件名按 UTC 解析；`flat-can` 优先文件名时间、失败用 mtime。三种模式截断方式不同。依据：`action_func.c:1020-1687`。 |
-| 日志查询为空 | 核对前端选的是 `mem` 还是 `sd`，对应目录是否存在且可读，文件是否以 `.log` 结尾，查询时间是否覆盖文件名时间或 mtime。 | `getLogList` 目录打不开也返回空列表，日志可能含 `cannot open ... errno=...`；列表最多保留 2000 项。依据：`log_export.c:69-73,190-342`。 |
-| 导出开始后报 `Task not found` 或 `Task limit reached` | 记录 `taskId` 与进程 PID 是否变过、上次进程是否重启、是否有多个并发任务；检查任务年龄。 | 任务表在进程内存：记录最多 16 项，日志最多 8 项；记录成功任务过 300 秒后在新任务创建时回收，失败任务当前不会通过这条成功回收路径释放；日志已完成/失败且线程结束超过 1 小时可复用。依据：`action_func.c:44-131`、`log_export.c:25-45,345-369`。 |
-| ZIP 导出失败或进度停住 | 检查 `zip` 是否存在、输出目录可写/剩余空间、所选源文件仍存在；保留创建任务响应和轮询 JSON，并查 `Zip failed`、`zip file ... ret=...` 输出。 | 两套线程都逐文件执行系统 `zip`；返回 `status=-1` 或 `error` 是明确失败，`status=0` 是进行中。成功只要求至少一次 `zip` 命令成功，需用 ZIP 条目核对是否包含所有选中文件。依据：`action_func.c:1819-1909`、`log_export.c:401-505`。 |
+| 日志查询为空 | 核对前端选的是 `mem` 还是 `sd`，对应目录是否存在且可读，文件是否以 `.log` 结尾，文件名是否能解析出时间，查询区间是否覆盖该时间；升级后不再用 mtime 兜底。 | `getLogList` 目录打不开也返回空列表，日志可能含 `cannot open ... errno=...`；列表最多保留 2000 项。文件命名、年份范围、设备时区不匹配也会导致文件被跳过。依据：`log_export.c:69-73,190-332`。 |
+| 导出开始后报 `Task not found` 或 `Task limit reached` | 记录 `taskId` 与进程 PID 是否变过、上次进程是否重启、是否有多个并发任务；检查任务年龄。 | 任务表在进程内存：记录最多 16 项，日志最多 8 项；记录成功任务过 300 秒后在新任务创建时回收，失败任务当前不会通过这条成功回收路径释放；日志已完成/失败且线程结束超过 1 小时可复用。依据：`action_func.c:44-131`、`log_export.c:25-45,335-359`。 |
+| ZIP 导出失败或进度停住 | 检查 `zip` 是否存在、输出目录可写/剩余空间、所选源文件仍存在；保留创建任务响应和轮询 JSON，并查 `Zip failed`、`zip file ... ret=...` 输出。 | 两套线程都逐文件执行系统 `zip`；返回 `status=-1` 或 `error` 是明确失败，`status=0` 是进行中。成功只要求至少一次 `zip` 命令成功，需用 ZIP 条目核对是否包含所有选中文件。依据：`action_func.c:1819-1909`、`log_export.c:391-495`。 |
 | 进度 100%，但浏览器没拿到 ZIP | 在前端 Network 查看 `getFile?Filename=...` 状态，核对轮询返回的 `zipFile` 路径当时是否存在、是否已被清理；查看浏览器下载限制。 | 前端在触发下载后继续下一批，全部结束再调用 cleanup；没有浏览器保存成功确认。服务端下载按请求的 `Filename` 打开文件。依据：`queryByDate.js:685-727`、`logExport.js:540-585`、`action_func.c:225-357`。 |
 | 配置上传失败或页面报 OK 但 `/opt/` 没文件 | 依次检查 `/usrdata/webserver/tmp`（GoAhead 暂存）、`/usrdata/webserver/html/tmp`（业务重命名）、`/opt/` 是否存在且可写；收集 `Cannot create upload temp file`、`Cannot rename uploaded file` 输出。 | 源码安装内容没创建两个 `tmp/`；业务层调用 `mv` 后不核对返回值，`OK` 不代表最终文件已到 `/opt/`。依据：`upload.c:245-259,465-477`、`goahead.c:164-218`、`CMakeLists.txt:195-199`。 |
 
@@ -450,10 +639,45 @@ curl -i --max-time 5 http://192.168.1.1/index.html
 
 脚本当前把 GoAhead 日志指向 `stdout:2`，很多 `logmsg(9, ...)` 的详细 JSON/逐文件时间比对在级别 2 下不会出现；`printf`/`error` 还可能走不同标准流。先确认 `fd/1`、`fd/2` 指向哪里，再按设备的进程管理方式取日志。必要时在受控环境临时提高 `--log` 级别并做单次复现；参数改动和服务重启会改变现场，须先保存原始证据。系统级崩溃可查看目标设备可用的内核日志，例如 `dmesg`，但不能把缺少日志直接当作程序未出错。
 
-一份可复现的问题记录至少包括：设备平台与系统版本、`web_app --version` 输出、进程完整启动参数、发生时间及设备时区、记录模式或日志目录类型、首次失败请求/响应、对应进程输出、相关目录的存在性和权限、剩余空间、`zip` 可用性、任务 ID/状态变化。分享时遮盖用户名、密码、Cookie、`auth.txt` 散列、`/opt/conf.ini` 中的 `dev:secret` 及可能包含敏感数据的文件内容。依据：`src/src/goahead.c:265-315,434-448`，`src/src/conf.c:55-85`，`src/src/action_func.c:1718-1755`，`src/src/log_export.c:190-342,401-505`。
+一份可复现的问题记录至少包括：设备平台与系统版本、启动日志中的 `App Version` 及 `web_app --version` 输出（后者是 GoAhead 版本）、进程完整启动参数、发生时间及设备时区、记录模式或日志目录类型、首次失败请求/响应、对应进程输出、相关目录的存在性和权限、剩余空间、`zip` 可用性、任务 ID/状态变化。分享时遮盖用户名、密码、Cookie、`auth.txt` 散列、`/opt/conf.ini` 中的 `dev:secret` 及可能包含敏感数据的文件内容。依据：`src/src/goahead.c:265-315,434-448`，`src/src/conf.c:55-85`，`src/src/action_func.c:1718-1755`，`src/src/log_export.c:190-332,391-495`。
+
+<a id="update-checks"></a>
+
+### 8.6 本次升级后的专项排查与验证
+
+本节是**依据源码制定的待执行检查**，不是已经通过的设备测试。先核对运行进程对应的二进制、启动日志 `App Version: 2.9`、部署时间与文件校验值；`web_app --version` 仍只输出 GoAhead `5.2.0`，不能区分应用 2.8/2.9。页面 JS 本次没有修改，日志时间行为变化发生在服务端。若设备仍显示旧的 mtime 行为，先确认服务进程是否已经加载新二进制，再检查是否只看到了 `sessionStorage` 恢复的旧列表。
+
+| 检查场景 | 按当前源码应观察到的结果 | 不符时的排查方向 |
+| --- | --- | --- |
+| 文件名时间与 mtime 不同 | 例如文件名为 `RTMS_2026-10-14_153000.log`，mtime 为次日：按文件名时间范围可查到，`date` 显示文件名时间。 | 抓取 `getLogList` 原始 JSON；确认进程版本、浏览器与设备时区、是否重新发起查询。不要通过修改现场日志时间来制造案例，可在隔离测试目录/设备准备副本。 |
+| 只有 `.log` 后缀而无可解析时间 | 如 `custom.log`，即使 mtime 落在范围内也不会出现在列表。 | 这是取消 mtime 兜底后的行为；核对日志生成方实际命名，不能只扩大查询日期。 |
+| 1970—1999 年文件名 | 如 `RTMS_1999-12-31_235959.log`，若 `mktime` 可表示且位于查询区间，应能纳入；1970 年需额外检查转换结果是否非负。 | 设备时间未同步可能产生早期年份日志；同时检查目标时间库/`time_t`、设备时区和实际查询秒值。 |
+| 起止边界及两个来源目录 | 恰好等于起始或结束秒值的文件可纳入；`mem/sd` 分别只扫描各自根目录。 | 核对请求参数、秒与毫秒单位、浏览器本地时间、设备时区及文件名秒值。 |
+| 匹配数量超过 2000 | 返回已保存部分并置 `truncated=true`；排序对象是已保存部分。 | 不可据此认为拿到了全目录最新 2000 条；缩小时间范围后再查。 |
+| 工具构建与运行环境 | 构建日志能确认使用目标编译器，暂存目录有目标架构 zip/unzip；设备服务环境能执行 `zip`。 | 检查 `USE_ZIP`、环境 `CC`/目标主机、构建产物架构、镜像打包及 PATH。构建目录存在工具不能证明设备已安装。 |
+| 导出、下载与内容 | 分别验证记录和日志导出，轮询成功后能下载，ZIP 条目与所选文件相符。 | 本次没有修改“至少一个文件打包成功即可成功”的判断；缺文件仍按第 8.3 节核对逐文件退出状态和归档条目。 |
+
+设备上可先执行以下只读命令（按实际工具可用性选择）：
+
+```sh
+command -v zip
+command -v unzip
+zip -v
+unzip -v
+```
+
+如果命令存在但运行失败，检查可执行权限、目标架构和动态加载器/依赖库；有 `file`、`readelf` 时可用于检查实际二进制。登录 shell 能运行 `zip` 也不等于服务的 PATH 相同：可在有权限时只提取目标进程环境中的 PATH，避免导出整个环境；例如将 `<PID>` 换成实际 PID 后执行：
+
+```sh
+tr '\000' '\n' < /proc/<PID>/environ | grep '^PATH='
+```
+
+将得到的 PATH 与 `command -v zip` 对照。归档仍存在时用 `unzip -l '<实际 ZIP 路径>'` 检查内容；没有 `unzip` 时，可把已下载归档放到开发主机核验。涉及构建的检查以实际编译日志和镜像内容为准，本次文档更新没有执行工具交叉编译或设备导出请求。
+
+依据：`src/src/goahead.c:308-312,439-440`、`src/src/log_export.c:146-174,233-320,455-495`、`src/src/action_func.c:1870-1908`、`webserver/html/js/logExport.js:82-142,160-224,540-585`；SDK 根目录 `3rdparty/CMakeLists.txt:31,96-98`、`3rdparty/zip/CMakeLists.txt:13-14,29-52`、`3rdparty/zip/build.sh:13-32`。
 
 <a id="analysis-9"></a>
 
 ## 9. 核对方法与边界
 
-本文通过静态阅读当前工作树和对照前后端 action 名、CMake 实际编译列表、路由和启动脚本形成；未运行设备程序、未向服务发送请求、未确认目标设备上 `/opt`、SD 卡和内存日志目录的内容，也未据设计文档推断当前代码之外的功能。可复核的主线索集中在：`CMakeLists.txt`、`webserver/start_web.sh`、`webserver/route.txt`、`src/src/goahead.c`、`src/src/action_func.c`、`src/src/log_export.c`、`src/src/conf.c`、`webserver/html/home.html`、`webserver/html/js/queryByDate.js` 和 `webserver/html/js/logExport.js`。若切换 Git 分支或修改这些文件，应重新校对流程图和接口表。
+本文于 `2026-10-14` 通过对比 `bc60961e..b7323a76`、审阅更新提交 `0516720c`、静态阅读当前工作树和对照前后端 action 名、CMake 实际编译列表、路由和启动脚本形成；未运行设备程序、未向服务发送请求、未确认目标设备上 `/opt`、SD 卡和内存日志目录的内容，也未据设计文档推断当前代码之外的功能。可复核的主线索集中在：`CMakeLists.txt`、`webserver/start_web.sh`、`webserver/route.txt`、`src/src/goahead.c`、`src/src/action_func.c`、`src/src/log_export.c`、`src/src/conf.c`、`webserver/html/home.html`、`webserver/html/js/queryByDate.js` 和 `webserver/html/js/logExport.js`。本次还核对了 SDK 根目录 `3rdparty/CMakeLists.txt` 与 `3rdparty/zip/` 的构建、脚本和包配置；同步更新了日志时间语义、排查步骤及 `log_export.c` 行号。本文未执行交叉编译、未检查镜像内工具、未验证设备时间边界，以上专项检查仍需在目标环境执行。若切换 Git 分支或修改这些文件，应重新校对流程图和接口表。
