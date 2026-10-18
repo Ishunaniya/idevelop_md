@@ -76,8 +76,8 @@ flowchart LR
 | --- | --- | --- |
 | `jtt_808_1078` ↔ `aibox_stream` | `skes-apps/jtt_808_1078/src/udp/udp_server_stream.cpp:24-25,166-197`：向本机 1210～1219 发送控制，接收端口为 1236。 | `skes-apps/aibox_stream/src/udp/udp_server.cpp:21-22,41-74,109-128`：接收本机控制并把回复发往 1236。 |
 | `sep-faces` → `sound_light_alarm_sep` | `skes-apps/sep-faces/src/sep-face.cc:143-180,1247-1266`：周期发布 `FaceRecognitionResult` 和 `seatbelt_fasten`，符合条件时附 `face_id`。 | `skes-apps/sound_light_alarm_sep/src/sound_light_alarm_sep.c:420-464`：消费 `FaceRecognition` 中的识别结果与安全带布尔值；当前解析函数不读取 `face_id`。 |
-| `filter_sep` 与 `skes-aeb2vcu` 的属性区别 | `skes-apps/filter_sep/src/filter_pub/filter_pubsub.cpp:312-329,390-399`：发布 `data.type=filter_table`。 | `skes-apps/skes-aeb2vcu/skes-aeb2vcu.c:477-499`：过滤条件为 `data.type=AEB`。 |
-| `skes-aeb2vcu` → CAN0 TX 服务 | `skes-apps/skes-aeb2vcu/skes-aeb2vcu.c:1374-1402,1499-1502`：连接并发送整个 `can_frame_t`。 | 本次只核对发送端和 `skes-apps/skes-aeb2vcu/skes-aeb2vcu.h:26,34-42` 中的 26002 端口/结构定义；CAN 服务和物理 VCU 的实际接收须现场验证。 |
+| `filter_sep` 与 `skes-aeb2vcu` 的属性区别 | `skes-apps/filter_sep/src/filter_pub/filter_pubsub.cpp:312-329,390-399`：发布 `data.type=filter_table`。 | `skes-apps/skes-aeb2vcu/skes-aeb2vcu.c:468-491`：过滤条件为 `data.type=AEB`。 |
+| `skes-aeb2vcu` → CAN0 TX 服务 | `skes-apps/skes-aeb2vcu/skes-aeb2vcu.c:1360-1395,1484-1489`：连接并发送整个 `can_frame_t`。 | 本次只核对发送端和 `skes-apps/skes-aeb2vcu/skes-aeb2vcu.h:26,36-43` 中的 26002 端口/结构定义；CAN 服务和物理 VCU 的实际接收须现场验证。 |
 
 <a id="modules"></a>
 ## 四、核心模块深度分析
@@ -102,6 +102,15 @@ flowchart LR
 <a id="verification"></a>
 ## 六、核验方法与限制
 
-各篇报告依据核验时的源码、配置、构建清单及可达入口整理，并保留文件行号、未启用代码和需要目标板验证的限制。2026-09-29 检查时源码仓库 `main_ui` 的 HEAD 为 `d79a399`；相对于多篇报告记录的 `b28d0b8`，六个应用目录、所查的 SKES 工具与消息库、摄像头共享内存生产文件及上级 `skes-apps/CMakeLists.txt` 没有已提交差异。当前工作树的上级 CMake 另有启用 `skes-dataengine` 的未提交改动，本总览不分析该应用。
+各篇报告依据核验时的源码、配置、构建清单及可达入口整理，并保留文件行号、未启用代码和需要目标板验证的限制。此前 2026-09-29 的检查基线为 `main_ui` 的 `d79a399`，当时所核对的六个应用等路径相对 `b28d0b8` 没有已提交差异；该历史结论不代表之后源码未变化。
 
-本总览仅归纳这些已有静态核验结论；没有运行六个应用、注入车辆控制指令、验证真实平台协议或观察物理报警器。跨进程问题应保存同一时间段的上游输入、本进程处理证据和下游接收证据，再按各篇“设备排障”章节定位首个失败节点。
+**2026-10-18 本次更新基线为 `main_ui` / `3278128`**，重点复核并更新 `aibox_stream` 与 `skes-aeb2vcu` 两篇报告、两个目录的 `AGENTS.md` 和本总览相关引用。两个模块相对 HEAD 无本地差异；相对旧基线 `b28d0b8` 共八个文件变化，逐项核对了最终差异、关键调用链、配置、构建及测试覆盖。其他四篇报告的具体分析基线仍以其正文为准。
+
+| 模块 | 本次补充与修正 | 验证边界 |
+| --- | --- | --- |
+| `aibox_stream`，`V1.1.6` | 补充约 60 秒打印的每通道进程累计计数，明确参数类型与 IDR 都可能被计数；补充既有三字节起始码偏移问题及排障方法。 | 提取原 NAL 分类函数运行主机样例；未运行完整取流循环，不能证明设备日志周期、平台画面或录像成功。详见其 §6、§18。 |
+| `skes-aeb2vcu`，`1.1.3.1` | 修正后桥先转 8 位的旧问题描述，说明仍为 12 位且缺范围校验；分别说明 `filter` 返回值修复、`event` 仍返回失败和配重分发仍缺返回。 | 提取原属性解析函数，使用原头文件和仓库 cJSON 验证 `0/255/256/800/4095/4096` 及禁用样例；未验证目标 ABI、真实消息链路或车辆输出。详见其 §3、§7。 |
+
+上级 `skes-apps/CMakeLists.txt` 当前仍有启用 `skes-dataengine` 的未提交改动；源码仓库另有 `skes-ui/CMakeLists.txt` 合并冲突。因此，本次文档复核与主机函数样例不能作为当前整个工作树可完整构建的证明。`skes-dataengine/` 的业务分析仍不在本总览范围。
+
+本总览归纳静态核验及上述提取函数的主机验证；本次没有执行完整项目构建，也没有运行六个完整应用、注入车辆控制指令、验证真实平台协议或观察物理报警器。跨进程问题应保存同一时间段的上游输入、本进程处理证据和下游接收证据，再按各篇“设备排障”章节定位首个失败节点。

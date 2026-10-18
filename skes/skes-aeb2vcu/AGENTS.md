@@ -3,7 +3,8 @@
 ## 项目位置与用途
 
 - Git 仓库根目录：`/home/tronlong/lyp/code/skes`；项目源码目录：`skes-apps/skes-aeb2vcu`。仓库顶层 `CMakeLists.txt` 进入 `skes-apps/`，后者通过 `add_subdirectory(skes-aeb2vcu)` 纳入构建。本文档存放在独立的知识库目录，不参与程序构建。
-- 编写本文档时检出的 Git 分支：`main_ui`，跟踪 `origin/main_ui`。分支名表示当前工作树的代码版本线，不是设备型号或程序配置项。本文档依据该分支当前工作树的源码整理；切换分支后应核对功能、配置和端口。
+- 本次核验日期为 2026-10-18，源码 Git 分支为 `main_ui`，跟踪 `origin/main_ui`，HEAD 为 `3278128`；本模块相对 HEAD 无本地差异。分支名表示当前工作树的代码版本线，不是设备型号或程序配置项；切换分支后应核对功能、配置和端口。
+- 本目录分析对应 `skes-apps/skes-aeb2vcu/`。知识库 `skes-dataengine/analyse/skes-aeb2vcu-分析报告.md` 注明分析对象为 `skes-aeb2vcu-gj`；使用历史报告时先确认目录与版本，不能将 `Gj_ack_t`、`0x4BE` 等变体结论直接用于本模块。
 - `skes-aeb2vcu` 是 SKES 系统中把感知事件转成车辆控制与提示数据的应用。它从本机 SKES 消息总线接收过滤结果及事件，按设备类型生成 CAN 帧；DI 查询线程读取数字输入，用于判断叉车行驶方向。`aeb2vcu` 可理解为“自动紧急制动（AEB）到车辆控制单元（VCU）”的连接模块；实际代码同时处理盲区告警和履带吊配重识别。串口发送接口已实现，但当前主流程没有调用它。
 - 设备类型由安装时选择的 `skes-aeb2vcu.ini` 决定：装载机 `wheel_loader`、履带吊 `crawler_crane`、叉车 `forklift`。不同类型共用进程和通信框架，但 CAN 数据内容、周期及配置参数不同。
 
@@ -49,7 +50,7 @@
 - 从仓库顶层 CMake 构建；本目录不是独立完整的构建工程。本目录设置 C99、`debug` 构建类型，查找 `e2fsprogs-git`、`openssl-git`、`curl-git`、`zlib-git`、`cjson-git`、`collections-c-git`、`nanomsg-git`、`skes-log`、`skes-linker-git`，并链接 `skes-utils`、`pthread` 等库。测试子目录还查找 Google Test。工具链与第三方包的准备方式以仓库构建配置为准。
 - CMake 参数 `SKES_AEB2VCU_TYPE` 可选 `wheel_loader`、`crawler_crane`、`forklift`；未匹配时安装装载机模板。安装目标为 `apps/skes-aeb2vcu/` 下的可执行文件、`sep.ini` 和重命名后的 `skes-aeb2vcu.ini`，共享库安装到 `lib/`；实际绝对路径取决于顶层安装前缀。
 - `USE_NEWC_VEHICLE` 在本目录 CMake 中定义，会影响装载机 AEB 帧的 CAN ID、字段布局和校验相关逻辑。更改车辆协议时应同时核对该宏、`aeb_fault_t` 的 8 字节布局和接收端协议。
-- 当前头文件中的应用版本常量为 `1.1.3.0`（宏名沿用 `SKES_RELAY_VERSION_*`），`main.c` 启动时将它写入日志。它与仓库顶层的安装包版本是不同的版本字段。
+- 当前头文件中的应用版本常量为 `1.1.3.1`，版本宏已改名为 `SKES_AEB2VCU_VERSION_*`，`main.c` 启动时将它写入日志。它与仓库顶层的安装包版本是不同的版本字段。
 
 ## 配置、通信与运行关注点
 
@@ -58,6 +59,8 @@
 - CAN 发送线程当前连接 `tcp://127.0.0.1:26002`（CAN0 TX）。装载机生成 AEB 控制/故障和 BSD 声光提示帧；履带吊把两个摄像头通道识别的配重相加后写入 CAN ID `0x600`；叉车按前后告警、行驶方向和制动等级生成制动帧。头文件也定义了其他 CAN 收发端口，但当前线程没有连接它们。
 - 两路串口发送连接使用 `127.0.0.1:26006`（RS-485）和 `127.0.0.1:26007`（RS-232），但当前主流程未调用 `com_output` 发数据。DI 查询连接 `127.0.0.1:38000`，所有设备类型都会启动 DI 线程并循环读取通道 1；结果仅被叉车制动分支用于方向判断。DI 请求接收超时配置为 5 秒，循环间隔为 1 秒。端口上的服务需由设备其他组件提供。
 - 装载机约每 5 秒读取 `/tmp/ui_config.json` 中的 `aebEnabled` 和 `alarm.enabled` 开关；禁用 AEB 时清零相应控制字段，禁用告警时清零声音提示。修改使能行为应同时核对 UI 配置、事件解析及发送线程。
+- `19c5ae3` 已将 `BrkCurCmd_Rear` 的转换由 `uint8_t` 改为 `uint16_t`，前后桥均写入原有 12 位字段。合法非负整数范围为 `0..4095`；提取原解析函数的主机验证确认 `256/800/4095` 可保留、`4096` 写入为 0。当前没有完整数值范围校验，不能将已修复的 8 位截断问题继续写成现状，也不能断言超范围值会被限幅。
 - `skes_aeb2vcu_run` 启动消息轮询、CAN 发送和 DI 查询三个线程。`main.c` 轮询运行标志；`SIGUSR1` 会循环切换日志等级。程序使用相对路径查找 `skes-aeb2vcu.ini` 并写日志，运行时工作目录需要能找到配置且允许写日志。验证车辆输出还需要本机消息、CAN 服务和目标设备环境。
-- 当前 `on_msg_filter` 和 `on_msg_event` 即使完成解析也在函数末尾返回 `-1`；排查消息回调错误或重试行为时，应结合 `skes-linker` 的返回值约定核对。这是源码现状，本文档不将其解释为消息未被处理。
+- 当前 `on_msg_filter` 已按 AEB 属性解析结果返回 `0/-1`，`on_msg_event` 末尾仍固定返回 `-1`；底层 `do_skes_recv_msg` 未检查回调返回值，不能据此推断重试或丢弃。部分解析函数和 `di_loop` 已补返回，`on_msg_event_parse` 正常路径仍缺返回。AEB 禁用时属性解析也可能返回 0，成功返回不证明控制字段已更新。
 - `tests/CMakeLists.txt` 构建 `LoadDeviceTypeTest` 和 `Aeb2VcuTest`，但 CTest 只注册了前者。更重要的是，`LoadDeviceTypeTest` 虽然如此命名，实际模拟的是 `[log] level` 读取函数，既未调用真正的 `load_device_type`，也未覆盖 CAN 协议或车辆行为；`Aeb2VcuTest` 是需连接本机事件端口的手工消息发送示例。协议改动应结合目标环境验证。
+- 本次测试文件调整没有增加后桥电流、回调结果或 CAN 输出的自动回归断言。分析报告 §7 记录的提取函数主机验证使用原头文件和仓库 cJSON，覆盖正常范围、12 位越界与 AEB 禁用样例；没有执行完整项目构建、消息总线或实车联调，也不证明目标 ABI 位序。
