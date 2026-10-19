@@ -2,7 +2,7 @@
 
 这份指南用于接手项目、定位改动和执行验证。先看下面的状态与阅读入口，再按任务查阅细节。
 
-**当前状态（2026-10-15）**：mock 构建和测试已通过，`PASS=235 FAIL=0`；Linux x86 顶层配置存在 CMake 错误；两份文件带加密头，无法完成明文审阅；真实模型和板端未在本次验证。
+**当前状态（2026-10-19，提交 `137a845`）**：核心库与三组功能插件已拆分；固定提交快照的 mock 构建和测试通过，`PASS=235 FAIL=0`，并验证了插件单独链接与登记。Linux x86 顶层配置仍存在 CMake 错误；两份文件带加密头；真实模型和板端未在本次验证。
 
 | 你要做什么 | 从这里开始 |
 | --- | --- |
@@ -20,7 +20,8 @@
 - 本文件位于 `/home/tronlong/lyp/perCode/idevelop_md/edgevision/AGENTS.md`，是针对外部源码仓库生成的开发上下文。
 - 实际源码根目录：`/home/tronlong/lyp/code/edgevision`。当前文档目录没有复制源码；不要把这里误当成能直接执行 `cmake -S .` 的源码根目录。
 - 本文中的 `include/`、`src/`、`configs/`、`docs/` 等相对路径，除特别注明外，均相对于实际源码根目录。执行 Git、构建、搜索和运行命令时显式指定源码路径或先切换目录。
-- 初始化检查日期：2026-10-15；检查的源码提交：`b69bfdb2e76efe93585983d2c714d270be96724c`（`feat: 工况默认有效，并用焦距替换角速度`）。检查前后源码工作区均无改动。
+- 初次检查日期：2026-10-15；本次更新日期：2026-10-19。分析提交为 `137a845454d537085d28ab7b021a81581f545bc5`（`feat: 把核心库和功能插件拆成独立动态库`），核验开始时源码分支为 `feature/split-core-plugin-libs`，取代旧基线 `b69bfdb`。
+- 核验期间源码工作区出现未提交的冰雪功能改动。本次通过 `git archive` 提取上述提交到 `/tmp/edgevision_source_137a845_20261019`，所有新增构建和链接验证基于该固定快照；未提交内容不计入完成程度，也未被本次操作修改。后续接手时重新核对分支、HEAD 和工作区状态。
 - 这是当时源码的事实记录。以后修改前先检查 `git status --short` 和相关实现；源码变化后同步更新本文，不能把历史测试结果当作当前保证。
 - 本文件不会因放在文档目录而自动成为外部源码目录的祖先级指令文件；在这里接手项目时，应主动读取本文并核对目标仓库自己的适用指令。
 
@@ -46,7 +47,7 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 - RGA 加速放在宿主工具侧；宿主完成预处理后可调用 `VisionTask::detectPrepared()`。不要为某一摄像头在核心库里直接打开 `/dev/video*`。
 - 默认 `mock` 路径不依赖第三方算法 SDK。RKNN、ONNXRuntime 是各后端的可选依赖；RGA、GStreamer 属于采集工具依赖。
 - “零依赖”不能泛化为当前所有目标都可直接构建：Linux 非 mock 顶层构建还有现存 CMake 问题，见第 11 节。
-- 功能插件、decoder 和 mapper 是编译进库的静态登记对象，不是运行时通过 `dlopen` 加载的外部插件。
+- 功能插件分别编入人员、高度限位、冰雪三组库；decoder、mapper 和工厂表留在核心库。登记仍通过静态构造函数完成，动态插件在被系统加载器实际加载时向核心登记；项目尚无自动发现、`dlopen` 加载或卸载插件的管理器。
 
 ## 3. 代码地图与阅读入口
 
@@ -74,7 +75,7 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 | `src/core/model_registry.cpp` | 按后端与模型路径共享后端、引用计数和快照 |
 | `src/core/backend_factory.cpp` | 按编译宏创建后端；当前仍是显式分支 |
 | `src/core/preprocess.cpp` | CPU NV12/RGB/BGR 转换、定点双线性、letterbox 及坐标逆变换 |
-| `src/core/detection_decoder.cpp` | flat6、YOLO 行矩阵解析及静态登记 |
+| `src/core/detection_decoder.cpp` | flat6、YOLO 行矩阵解析及静态登记；`decode_person()` 已由人员插件移入核心 |
 | `src/backend/yolo_decode.h` | 共用 YOLOv5、YOLOv11、YOLOX 原始头解析及 NMS |
 | `src/backend/mock/` | 无 SDK 占位后端，所有构建均编入 |
 | `src/backend/x86/` | 参考检测器/ONNXRuntime 后端；当前 `.cpp` 带加密头 |
@@ -121,14 +122,16 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 需要 CMake 3.14 以上及 C++17 编译器。本次环境为 GNU C++ 13.3.0。把构建目录放到 `/tmp`，避免向源码或文档目录产生测试临时文件。
 
 ```bash
-cmake -S /home/tronlong/lyp/code/edgevision \
-  -B /tmp/edgevision_init_mock_20261015 \
+cmake -S /tmp/edgevision_source_137a845_20261019 \
+  -B /tmp/edgevision_docs_137a845_frozen_20261019 \
   -DEVS_BACKEND=mock -DEVS_WITH_GSTREAMER=OFF
-cmake --build /tmp/edgevision_init_mock_20261015 -j4
-ctest --test-dir /tmp/edgevision_init_mock_20261015 --output-on-failure -V
+cmake --build /tmp/edgevision_docs_137a845_frozen_20261019 -j4
+ctest --test-dir /tmp/edgevision_docs_137a845_frozen_20261019 --output-on-failure -V
 ```
 
-2026-10-15 实测结果：构建成功；CTest **1/1 通过**，程序内部 **`PASS=235 FAIL=0`**。产生 `evs_tests`、`libevs.a`、`libevs.so.1` 及链接名 `libevs.so`。README 的 `161`、`137` 是历史计数，不是本版本断言。
+上述源码目录是第 1 节所述固定提交快照，提取方法见分析报告 8.3；临时目录被清理后需先重新提取。若验证当前开发工作区，可将 `-S` 改为实际源码根目录，但结果将对应当时工作区而非本次固定基线。
+
+2026-10-19 实测结果：构建成功；CTest **1/1 通过**，程序内部 **`PASS=235 FAIL=0`**。产生 `evs_tests`、四份静态库以及核心与三组插件的共享库，详见 4.2。README 的 `161`、`137` 是历史计数，不是本版本断言。
 
 - 后续工作换用独立构建目录，或确认已有目录的后端、编译器和缓存符合任务需求。
 - 测试会在工作目录生成相对路径的 YAML、PPM、数据集等；优先用 CTest 从构建目录运行。
@@ -140,7 +143,7 @@ ctest --test-dir /tmp/edgevision_init_mock_20261015 --output-on-failure -V
 | 变量 | 默认值/语义 |
 | --- | --- |
 | `EVS_BACKEND` | `mock`；实现的选择为 `mock`、`x86`、`onnx`、`rknn`；`qnn` 仅有预留文字，没有可用实现 |
-| `EVS_BUILD_SHARED` | `ON`，同时生成动态库，Linux SONAME 为 `libevs.so.1` |
+| `EVS_BUILD_SHARED` | `ON`，同时生成核心与三组插件的动态库；`OFF` 时四份静态库仍构建 |
 | `EVS_WITH_ORT` | `OFF`；用于 x86/onnx 的真实 ONNXRuntime 路径 |
 | `ONNXRUNTIME_LIB_DIR`、`ONNXRUNTIME_INCLUDE_DIR` | ORT 库目录、头文件目录 |
 | `RKNN_API_LIB`、`RKNN_API_LIB_DIR`、`RKNN_API_INCLUDE_DIR` | RKNN 目标运行库与头文件位置 |
@@ -150,18 +153,29 @@ ctest --test-dir /tmp/edgevision_init_mock_20261015 --output-on-failure -V
 | `GSTREAMER_SYSROOT` | 覆盖硬编码的板端 sysroot；不是通用的本机 pkg-config 检测 |
 | `EVS_WITH_OPENCV` | `OFF`；当前只定义宏，没有 `find_package`、include 或链接配置 |
 
-- `evs_objs` 是启用 PIC 的对象库；`evs` 是静态库；`evs_shared` 是动态库。工具和测试仍链接静态库。
+- `evs_objs` 是核心 PIC 对象库；`evs` 产出 `libevs.a`；`evs_shared` 产出 `libevs_core.so.1` 和链接名 `libevs_core.so`。核心不再包含功能规则实现。
+- `evs_add_plugin()` 为每组插件创建 `<name>_objs`、静态目标 `<name>` 和可选动态目标 `<name>_shared`。工具和测试仍链接四份静态库。
 - 只有顶层构建才创建测试/工具。`eval_offline` 只在 x86/onnx/rknn 构建创建；`v4l2_detect` 还受非 Windows 条件限制；`evs_task_cam` 还需要 GStreamer 头文件检测成功。
 - CMake 中的 `if(NOT WIN32)` 并非严格 Linux 检查；不要据此宣称采集工具支持 macOS。
-- 静态登记依赖完整保留目标文件。仓库内可执行程序使用 `evs_link_whole(target)`；外部静态消费者必须采用相同整库链接策略。
+- 静态登记依赖完整保留目标文件。仓库内 `evs_link_whole(target)` 整库链接 `evs`、`evs_person`、`evs_height_limit`、`evs_ice` 四份归档；外部消费者可仅整库链接核心和所需插件。
 
-Linux 外部静态链接的核心形式：
+| 功能库名 | 功能号 | 静态产物 | Linux 动态产物（SONAME） |
+| --- | --- | --- | --- |
+| `evs_person` | `0x0004/0x0005/0x0006` | `libevs_person.a` | `libevs_person.so.1` |
+| `evs_height_limit` | `0x0007` | `libevs_height_limit.a` | `libevs_height_limit.so.1` |
+| `evs_ice` | `0x0008` | `libevs_ice.a` | `libevs_ice.so.1` |
+
+Linux 外部静态链接的人员功能示例：
 
 ```text
--Wl,--whole-archive /path/to/libevs.a -Wl,--no-whole-archive
+-Wl,--whole-archive /path/to/libevs.a /path/to/libevs_person.a -Wl,--no-whole-archive
 ```
 
-SDK 运行库等依赖放在适当链接位置；MSVC 使用 `/WHOLEARCHIVE`。直接普通链接 `libevs.a` 可能丢失登记对象，出现插件/decoder/mapper 找不到。动态库从完整对象列表生成，已包含登记。
+SDK 运行库等依赖放在适当链接位置；MSVC 对各归档使用 `/WHOLEARCHIVE`。只有 `libevs.a` 时即使整库链接也没有功能插件；普通静态链接还可能丢失 decoder/mapper 登记。
+
+动态插件由完整对象列表生成，依赖 `libevs_core.so.1`，自身 RUNPATH 为 `$ORIGIN`，可与核心放在同一目录。当前没有 CMake `install()` 规则，产物仍需由集成方打包部署。GNU/Linux 宿主还要保证插件未被 `--as-needed` 裁掉，例如 `-Wl,--no-as-needed -levs_person -Wl,--as-needed -levs_core`，并配置宿主的运行库搜索路径。实测核心单独加载时 flat6 可解码，但人员任务初始化返回 `0x00041009`；显式保留人员插件后成功。仅在命令中写 `-levs_person` 不保证它被加载。
+
+旧 `libevs.so.1` 已改为 `libevs_core.so.1`；旧宿主需更新链接配置并重新链接，不能只把新库按新文件名复制过去。公共 API 在这条提交中未改变，但库名、依赖和部署集合已改变。
 
 ### 4.3 x86/ONNX 与离线评测
 
@@ -194,12 +208,12 @@ ctest --test-dir /tmp/edgevision_x86 --output-on-failure
 ### 4.4 RKNN 与交叉编译
 
 - 使用仓库工具链文件，准备 `aarch64-linux-gnu-g++`、`rknn_api.h`、目标架构 `librknnrt.so`。更换工具链必须使用新构建目录，不能指望修改已有缓存里的 `CMAKE_TOOLCHAIN_FILE` 生效。
-- 库构建使用 `EVS_BACKEND=rknn`、`RKNN_API_LIB`、`RKNN_API_INCLUDE_DIR`；纯库交付关闭 GStreamer/RGA，并构建 `evs`、`evs_shared`。
+- 库构建使用 `EVS_BACKEND=rknn`、`RKNN_API_LIB`、`RKNN_API_INCLUDE_DIR`；纯库交付关闭 GStreamer/RGA，构建核心及所需插件目标，例如动态人员功能的 `evs_shared evs_person_shared`。
 - 注意：当前顶层仍会配置 `v4l2_detect`，仅指定 `--target evs evs_shared` 不能绕过配置阶段的链接签名错误。先修 CMake 工具配置，或由外部父项目 `add_subdirectory` 只集成库；后者不会自动建立本仓库顶层测试。
 - `/home/xp/...` 是历史编译机路径，不能当成本机已安装依赖。显式核对实际 SDK、sysroot 与架构。
 - RKNN 运行库应与板端匹配；历史记录指出 SDK 旧 runtime 与板端版本不一致。交叉链接使用编译机上的目标库副本，板端实际使用自己的兼容 runtime。
 - RGA 库和头文件必须配套。历史文档指出精简版 RGA 可能符号齐全却缩放失败；不要只凭“链接成功”认定硬件预处理有效。
-- 用 `file` 检查产物为 ARM aarch64；动态宿主需能找到 `libevs.so.1`。库自身未写入编译机 SDK RPATH，宿主负责运行时搜索路径。
+- 用 `file` 检查产物为 ARM aarch64；动态宿主需能找到 `libevs_core.so.1` 及所需插件的 `.so.1`。插件 RUNPATH 为 `$ORIGIN`，核心未写入编译机 SDK RPATH，宿主仍负责自身直接依赖及 SDK 的运行时搜索路径。
 - 公共结构布局或接口变化时必须同步头文件并重编宿主；只有内部实现变化且 ABI 兼容时，才适合只替换动态库。
 
 ## 5. 公共 API 与数据契约
@@ -441,16 +455,17 @@ int main() {
 
 ## 11. 已核实的现存问题与文档偏差
 
-以下是初始化时观察到的既有状态，不是本次引入的修改，也不应在无关任务里顺手扩大修复范围：
+以下是固定提交 `137a845` 中核实的状态，不是本次文档更新引入的修改，也不应在无关任务里顺手扩大修复范围：
 
-1. **Linux 非 mock 顶层配置失败。** 实测 `EVS_BACKEND=x86`、`EVS_WITH_GSTREAMER=OFF` 仍在 `CMakeLists.txt:270` 报 `target_link_libraries` keyword/plain 签名混用；`evs_link_whole()` 在约第 148 行使用 `PRIVATE`，采集工具后续调用使用 plain 签名。该工具分支也覆盖 onnx/rknn。
+1. **Linux 非 mock 顶层配置失败。** 2026-10-19 对固定快照实测 `EVS_BACKEND=x86`、`EVS_WITH_GSTREAMER=OFF` 仍在 `CMakeLists.txt:305` 报 `target_link_libraries` keyword/plain 签名混用；`evs_link_whole()` 在第 181 行使用 `PRIVATE`，采集工具后续调用使用 plain 签名。该工具分支也覆盖 onnx/rknn。
 2. **采集工具硬编码 zlib。** `v4l2_detect` 无条件链接 `/home/xp/rk3576/rk3576_linux6.1_release/ubuntu/sysroots/armv8a-linux/usr/lib/aarch64-linux-gnu/libz.so`。关闭 GStreamer 不消除此依赖；修复签名冲突后还需按目标平台处理它。
 3. **两份源码带 E-SafeNet 加密头。** `src/backend/x86/x86_backend.cpp` 和 `tools/eval_offline/gen_selfcheck_dataset.py` 含二进制/非 UTF-8 数据；工作区与 Git HEAD 都如此。重新 checkout HEAD 不会恢复明文；需要从有权限的正常源码来源恢复。不要当乱码重编码、用占位实现覆盖或宣称已完成对它们的明文审阅。
 4. **旧构建脚本不可作当前基线。** `build_check.bat` 包含个人 Windows 路径和已失效的 `src/tasks/person_plugin.cpp` 位置，遗漏当前源文件集合；以 CMake 为准。
-5. **README 部分过时。** 包括测试计数、只产静态库的描述、工况角速度、热更新拒绝字段及 fixtures 输出位置。`src/tasks/README.md` 也仍有地面距离留 0、高度始终 0 等旧阶段描述。
+5. **README 部分过时。** 本提交已更新核心/插件拆分与交付说明，但测试计数、工况角速度、热更新拒绝字段及 fixtures 输出位置等仍需结合实现核对。`src/tasks/README.md` 也仍有地面距离留 0、高度始终 0 等旧阶段描述。
 6. **静态登记说明已更新到代码，部分现场文档尚未同步。** 新增 mapper 应在自身 `.cpp` 登记并加入 `EVS_SRC`，通常无需改工厂表或公共配置结构。
 7. **示例不等于部署包。** `models/`、训练后的高度/冰雪模型、`yolox.rknn`、README 提到的若干 yolo11 YAML/板端改名二进制并未全部入库。启动前核对实际文件。
 8. **目录中的历史文件需辨认。** `tools/v4l2_detect/main.cpp.bak_20261007_200859` 是备份，不是编译入口；不要误改备份或将其作为当前行为依据。
+9. **动态插件可能被链接器裁掉。** GNU/Linux `--as-needed` 可移除仅含登记副作用的插件依赖；需要显式保留。2026-10-19 已分别验证核心单独加载、三组插件独立加载、全插件加载与人员静态链接，功能登记符合库边界。
 
 本次只读分析与 `/tmp` 构建验证，没有修复这些源码问题。
 
@@ -469,14 +484,14 @@ int main() {
 | 任务参考点和人员规则 | `src/tasks/person/person_plugin.cpp` |
 | 高度安装判断 | `src/tasks/height_limit/height_limit_mount.cpp` |
 | 冰雪面积及退出策略 | `src/tasks/winch_ice/` |
-| 新功能 | 新 `IFunctionPlugin`、模块号登记、`EVS_SRC`、配置及必要测试 |
+| 新功能 | 新 `IFunctionPlugin`、模块号登记、`evs_add_plugin()` 或所属插件源列表、配置及必要测试 |
 | 框输出到 Qt | `detection_shm.*`，同时核对外部消费者协议 |
 
 ### 12.2 扩展流程
 
 1. 新功能实现 `IFunctionPlugin` 的 `configure()`、`decide()`、`reset()`；需要地面量时实现 `ground_reference()`，不要复制公共地面换算。
 2. 新功能在自身 `.cpp` 用 `FunctionPluginRegistration` 登记唯一模块号；新 decoder 用 `DecoderRegistration`；新 mapper 用 `GroundMapperRegistration`。
-3. 所有新增编译单元加入 `CMakeLists.txt::EVS_SRC`；检查静态消费目标使用 `evs_link_whole()`。
+3. 新 decoder/mapper 等核心编译单元加入 `CMakeLists.txt::EVS_SRC`；功能编译单元加入所属 `evs_add_plugin()` 源列表，新插件组新增该调用，并维护 `evs_link_whole()` 的归档列表。核对外部静态消费者的整库链接，以及动态消费者对插件的保留和部署。
 4. backend 是例外：仍需修改后端工厂及 CMake 编译选择，并保持 mock 始终可用。
 5. 新配置同时维护结构/解析/样例/文档，并明确初始化限定或热更新语义；mapper 专属参数优先使用现有通用 params。
 6. 只在相应实现目录引入可选 SDK/OpenCV 代码，公共接口保留 C++17 类型及现有依赖隔离。
