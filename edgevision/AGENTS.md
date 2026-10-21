@@ -2,7 +2,7 @@
 
 这份指南用于接手项目、定位改动和执行验证。先看下面的状态与阅读入口，再按任务查阅细节。
 
-**当前状态（2026-10-19，提交 `137a845`）**：核心库与三组功能插件已拆分；固定提交快照的 mock 构建和测试通过，`PASS=235 FAIL=0`，并验证了插件单独链接与登记。Linux x86 顶层配置仍存在 CMake 错误；两份文件带加密头；真实模型和板端未在本次验证。
+**当前状态（2026-10-22，提交 `5427d18`）**：冰雪已实现“RKNN卷扬定位＋OpenCV框内HSV候选面积估计”，新增Detector API、CLI和单路Qt宿主。固定快照mock测试：无OpenCV共享4/4、有OpenCV共享6/6、有OpenCV纯静态4/4；核心仍PASS=235 FAIL=0。旧工具默认关闭，开启仍有CMake错误；x86受保护源仍阻碍编译。已有通道0历史板测，本次未重跑硬件。详细契约、限制和证据见[分析报告](edgevision分析报告.md)第5.10、6.7、8章。
 
 | 你要做什么 | 从这里开始 |
 | --- | --- |
@@ -20,8 +20,8 @@
 - 本文件位于 `/home/tronlong/lyp/perCode/idevelop_md/edgevision/AGENTS.md`，是针对外部源码仓库生成的开发上下文。
 - 实际源码根目录：`/home/tronlong/lyp/code/edgevision`。当前文档目录没有复制源码；不要把这里误当成能直接执行 `cmake -S .` 的源码根目录。
 - 本文中的 `include/`、`src/`、`configs/`、`docs/` 等相对路径，除特别注明外，均相对于实际源码根目录。执行 Git、构建、搜索和运行命令时显式指定源码路径或先切换目录。
-- 初次检查日期：2026-10-15；本次更新日期：2026-10-19。分析提交为 `137a845454d537085d28ab7b021a81581f545bc5`（`feat: 把核心库和功能插件拆成独立动态库`），核验开始时源码分支为 `feature/split-core-plugin-libs`，取代旧基线 `b69bfdb`。
-- 核验期间源码工作区出现未提交的冰雪功能改动。本次通过 `git archive` 提取上述提交到 `/tmp/edgevision_source_137a845_20261019`，所有新增构建和链接验证基于该固定快照；未提交内容不计入完成程度，也未被本次操作修改。后续接手时重新核对分支、HEAD 和工作区状态。
+- 初次检查日期：2026-10-15；本次更新日期：2026-10-22。分析提交为 `5427d180dc849d3a2961be200a52435c3471df99`，直接父提交及上一版基线为 `137a845454d537085d28ab7b021a81581f545bc5`。核验开始及结束时分支为 `feature/split-core-plugin-libs`、HEAD为目标提交，工作区干净。
+- 本次通过 `git archive` 提取目标提交到 `/tmp/edgevision_audit_5427_20261021/source`；独立构建不修改外部源码。结果见[报告核验记录](edgevision分析报告.md#125-核验记录与复现归档)。后续接手时重新核对分支、HEAD和工作区状态。
 - 这是当时源码的事实记录。以后修改前先检查 `git status --short` 和相关实现；源码变化后同步更新本文，不能把历史测试结果当作当前保证。
 - 本文件不会因放在文档目录而自动成为外部源码目录的祖先级指令文件；在这里接手项目时，应主动读取本文并核对目标仓库自己的适用指令。
 
@@ -46,7 +46,7 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 - 算法库负责上述同步处理流程。摄像头采集、GStreamer 管线、Qt/QML、录像、PLC/MCU 通信、声光及主控联锁由宿主负责。
 - RGA 加速放在宿主工具侧；宿主完成预处理后可调用 `VisionTask::detectPrepared()`。不要为某一摄像头在核心库里直接打开 `/dev/video*`。
 - 默认 `mock` 路径不依赖第三方算法 SDK。RKNN、ONNXRuntime 是各后端的可选依赖；RGA、GStreamer 属于采集工具依赖。
-- “零依赖”不能泛化为当前所有目标都可直接构建：Linux 非 mock 顶层构建还有现存 CMake 问题，见第 11 节。
+- “零依赖”不能泛化为当前所有目标都可直接构建：显式开启旧工具时还有现存 CMake 问题，见第 11 节。
 - 功能插件分别编入人员、高度限位、冰雪三组库；decoder、mapper 和工厂表留在核心库。登记仍通过静态构造函数完成，动态插件在被系统加载器实际加载时向核心登记；项目尚无自动发现、`dlopen` 加载或卸载插件的管理器。
 
 ## 3. 代码地图与阅读入口
@@ -59,7 +59,9 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 | `include/evs/vision_task.h` | 宿主主入口、生命周期、同步检测与调试接口 |
 | `include/evs/frame.h` | `PixelFormat`、`Frame`、`MachineContext` |
 | `include/evs/status.h` | 错误码、`AlarmState`、`Target`、`Result`、相机号打包 |
-| `include/evs/task_config.h` | 任务配置结构与解析接口 |
+| `include/evs/task_config.h` | 原配置布局保持；专属选项独立保存 |
+| `include/evs/winch_ice.h` | 冰雪Detector、紧凑RGB/灰度、逐对象结果 |
+| `include/evs/function_task_hooks.h` | 可选配置校验、预热及拒帧扩展，不改旧插件虚表 |
 | `include/evs/iinfer_backend.h` | 推理后端接口；公共接口不暴露 SDK 头文件 |
 | `include/evs/detection_decoder.h` | 检测输出解析接口与工厂 |
 | `include/evs/function_plugin.h` | 功能插件接口与工厂 |
@@ -82,7 +84,7 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 | `src/backend/rknn/` | RKNN SDK 加载、输入输出处理与解码；另有局部 README |
 | `src/tasks/person/` | 0x0004/0x0005/0x0006 共用人员策略引擎及待办 |
 | `src/tasks/height_limit/` | 高度限位插件、安装姿态判断入口及待办 |
-| `src/tasks/winch_ice/` | 卷扬冰雪插件骨架及待办 |
+| `src/tasks/winch_ice/` | 卷扬框筛选/NMS、HSV面积、Detector及文件配置适配 |
 | `src/ground/` | homography、crane_pose、mapper 工厂、参数与几何换算 |
 | `src/core/log.cpp`、`src/core/debug.cpp` | 日志、环形缓冲、快照、耗时统计和取证落盘 |
 | `src/core/offline_eval.cpp` | 离线检测评测引擎，不执行功能插件告警 |
@@ -93,10 +95,12 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 | --- | --- |
 | `tools/eval_offline/` | 离线评测 CLI、合成数据脚本与已入库 fixtures |
 | `tools/v4l2_detect/` | 采集验证 CLI、GStreamer/共享内存/MP4、RGA、检测框共享内存、启动脚本 |
-| `tools/task_cam/main.cpp` | 经 `VisionTask` 执行完整功能插件的板端采集示例 |
+| `tools/task_cam/main.cpp` | 经 `VisionTask` 执行完整功能插件的旧板端示例 |
+| `tools/ice_replay/`、`tools/winch_ice_demo/` | P6回放、无窗口相机CLI和可选宿主工况门控 |
+| `tools/winch_ice_ui/` | 严格选路、同帧图像结果、单通道Qt Quick宿主 |
 | `tools/linux_source/` | 宿主分工说明，当前只有 README，不是另一个可执行程序 |
 | `configs/` | 功能及评测 YAML、多摄像头 JSON |
-| `tests/test_core.cpp` | 一个自带 `CHECK` 计数的测试程序，注册为一个 CTest 用例 |
+| `tests/` | 核心、冰雪、分配失败、旧插件兼容、CLI；UI目录另有支持层测试 |
 | `eval_onnx_demo/` | bus.ppm 与模型自检标注；不等同于现场独立人工标注集 |
 | `yolov5s.onnx` | 已入库的约 29 MB 模型资产，避免无关替换与格式化 |
 | `cmake/aarch64-linux-gnu.toolchain.cmake` | 发行版 aarch64 GNU 工具链配置 |
@@ -119,24 +123,19 @@ EdgeVision 是面向起重机安全检测的 C++17 算法库，采用 CMake 构�
 
 ### 4.1 当前已实测可用的基础验证
 
-需要 CMake 3.14 以上及 C++17 编译器。本次环境为 GNU C++ 13.3.0。把构建目录放到 `/tmp`，避免向源码或文档目录产生测试临时文件。
+源码固定快照来自5427d18，C++17、GNU13.3.0；临时目录若被清理，按分析报告8.3先重新git archive提取。
 
 ```bash
-cmake -S /tmp/edgevision_source_137a845_20261019 \
-  -B /tmp/edgevision_docs_137a845_frozen_20261019 \
+cmake -S /tmp/edgevision_audit_5427_20261021/source \
+  -B /tmp/edgevision_audit_5427_20261021/build_mock \
   -DEVS_BACKEND=mock -DEVS_WITH_GSTREAMER=OFF
-cmake --build /tmp/edgevision_docs_137a845_frozen_20261019 -j4
-ctest --test-dir /tmp/edgevision_docs_137a845_frozen_20261019 --output-on-failure -V
+cmake --build /tmp/edgevision_audit_5427_20261021/build_mock -j4
+ctest --test-dir /tmp/edgevision_audit_5427_20261021/build_mock --output-on-failure -V
 ```
 
-上述源码目录是第 1 节所述固定提交快照，提取方法见分析报告 8.3；临时目录被清理后需先重新提取。若验证当前开发工作区，可将 `-S` 改为实际源码根目录，但结果将对应当时工作区而非本次固定基线。
+本次无OpenCV共享CTest4/4，core235、ice静动各95；有OpenCV共享6/6，core235、ice静动各225、allocation75；有OpenCV纯静态4/4，失败均0。OpenCV依赖仅解包到/tmp，完整命令见[报告核验记录](edgevision分析报告.md#125-核验记录与复现归档)。正式冰雪必须OpenCV ON和RKNN，mock测试不证明真实模型/相机有效。
 
-2026-10-19 实测结果：构建成功；CTest **1/1 通过**，程序内部 **`PASS=235 FAIL=0`**。产生 `evs_tests`、四份静态库以及核心与三组插件的共享库，详见 4.2。README 的 `161`、`137` 是历史计数，不是本版本断言。
-
-- 后续工作换用独立构建目录，或确认已有目录的后端、编译器和缓存符合任务需求。
-- 测试会在工作目录生成相对路径的 YAML、PPM、数据集等；优先用 CTest 从构建目录运行。
-- mock 测试跳过 x86 参考检测器与其离线评测专属段；通过不能证明 ONNX、RKNN 或摄像头可用。
-- 本次未执行真实 ONNX/RKNN 推理、交叉编译或板端运行。
+测试从构建目录运行，避免相对路径临时文件写入源码。旧235是核心程序检查数，不能代替全部CTest结果；此次未重跑真实ORT/RKNN、交叉编译或设备UI。
 
 ### 4.2 CMake 选项与目标
 
@@ -149,13 +148,16 @@ ctest --test-dir /tmp/edgevision_docs_137a845_frozen_20261019 --output-on-failur
 | `RKNN_API_LIB`、`RKNN_API_LIB_DIR`、`RKNN_API_INCLUDE_DIR` | RKNN 目标运行库与头文件位置 |
 | `EVS_WITH_RGA` | `OFF`；启用采集工具的硬件预处理 |
 | `RGA_LIB`、`RGA_API_INCLUDE_DIR`、`DRM_LIB` | RGA/DRM 目标库、配套头文件；多个 include 目录用带引号的分号列表传入 |
-| `EVS_WITH_GSTREAMER` | `ON`；查板端 sysroot 以构建相关工具 |
-| `GSTREAMER_SYSROOT` | 覆盖硬编码的板端 sysroot；不是通用的本机 pkg-config 检测 |
-| `EVS_WITH_OPENCV` | `OFF`；当前只定义宏，没有 `find_package`、include 或链接配置 |
+| `EVS_WITH_GSTREAMER` | ON；新CLI通过pkg-config，旧工具通过板端sysroot；UI独立要求GStreamer |
+| `GSTREAMER_SYSROOT` | 仅旧工具覆盖历史板端sysroot |
+| `EVS_WITH_OPENCV` | OFF；实际查找/链接core、imgproc，正式冰雪须ON |
+| `EVS_BUILD_TESTS`、`EVS_BUILD_TOOLS` | ON；常规测试、新冰雪CLI总开关 |
+| `EVS_BUILD_LEGACY_TOOLS` | OFF；旧采集/评测工具显式启用 |
+| `EVS_BUILD_ICE_UI` | OFF；独立开关，要求Linux、共享库、OpenCV、Qt5≥5.12及GStreamer≥1.16 |
 
 - `evs_objs` 是核心 PIC 对象库；`evs` 产出 `libevs.a`；`evs_shared` 产出 `libevs_core.so.1` 和链接名 `libevs_core.so`。核心不再包含功能规则实现。
-- `evs_add_plugin()` 为每组插件创建 `<name>_objs`、静态目标 `<name>` 和可选动态目标 `<name>_shared`。工具和测试仍链接四份静态库。
-- 只有顶层构建才创建测试/工具。`eval_offline` 只在 x86/onnx/rknn 构建创建；`v4l2_detect` 还受非 Windows 条件限制；`evs_task_cam` 还需要 GStreamer 头文件检测成功。
+- `evs_add_plugin()` 为每组插件创建 `<name>_objs`、静态目标 `<name>` 和可选动态目标 `<name>_shared`。常规静态测试整库链接四份归档；新动态冰雪工具直接链接core+ice。
+- 常规测试/CLI仅在顶层且总开关开启时创建；UI为独立子目录开关。旧工具另需LEGACY_TOOLS=ON。`eval_offline` 只在 x86/onnx/rknn 构建创建；`v4l2_detect` 还受非 Windows 条件限制；`evs_task_cam` 还需要 GStreamer 头文件检测成功。
 - CMake 中的 `if(NOT WIN32)` 并非严格 Linux 检查；不要据此宣称采集工具支持 macOS。
 - 静态登记依赖完整保留目标文件。仓库内 `evs_link_whole(target)` 整库链接 `evs`、`evs_person`、`evs_height_limit`、`evs_ice` 四份归档；外部消费者可仅整库链接核心和所需插件。
 
@@ -173,19 +175,20 @@ Linux 外部静态链接的人员功能示例：
 
 SDK 运行库等依赖放在适当链接位置；MSVC 对各归档使用 `/WHOLEARCHIVE`。只有 `libevs.a` 时即使整库链接也没有功能插件；普通静态链接还可能丢失 decoder/mapper 登记。
 
-动态插件由完整对象列表生成，依赖 `libevs_core.so.1`，自身 RUNPATH 为 `$ORIGIN`，可与核心放在同一目录。当前没有 CMake `install()` 规则，产物仍需由集成方打包部署。GNU/Linux 宿主还要保证插件未被 `--as-needed` 裁掉，例如 `-Wl,--no-as-needed -levs_person -Wl,--as-needed -levs_core`，并配置宿主的运行库搜索路径。实测核心单独加载时 flat6 可解码，但人员任务初始化返回 `0x00041009`；显式保留人员插件后成功。仅在命令中写 `-levs_person` 不保证它被加载。
+动态插件由完整对象列表生成，依赖 `libevs_core.so.1`，自身 RUNPATH 为 `$ORIGIN`，可与核心放在同一目录。已有GNUInstallDirs安装core+ice静动库、头、配置、说明及存在的新增工具；人员/高度库不在install集合，模型也不自动安装。GNU/Linux 宿主还要保证插件未被 `--as-needed` 裁掉，例如 `-Wl,--no-as-needed -levs_person -Wl,--as-needed -levs_core`，并配置宿主的运行库搜索路径。2026-10-19历史实测核心单独加载时flat6 可解码，但人员任务初始化返回 `0x00041009`；显式保留人员插件后成功。仅在命令中写 `-levs_person` 不保证它被加载。
 
-旧 `libevs.so.1` 已改为 `libevs_core.so.1`；旧宿主需更新链接配置并重新链接，不能只把新库按新文件名复制过去。公共 API 在这条提交中未改变，但库名、依赖和部署集合已改变。
+旧 `libevs.so.1` 已改为 `libevs_core.so.1`；旧宿主需更新链接配置并重新链接，不能只把新库按新文件名复制过去。库拆分发生于父提交137a845；5427d18新增冰雪API和非虚任务重载，保持原IFunctionPlugin/TaskConfig布局。同工具链v1头兼容测试通过，不能推广任意C++ ABI。
 
 ### 4.3 x86/ONNX 与离线评测
 
 设计上，`x86` 未接 ORT 时使用红/蓝色块参考检测器；`onnx` 复用同一实现并接受 `onnx` 和 `x86` 后端名。仅选择 `onnx` 不代表真实模型已启用：必须核对 ORT 检测日志、头文件、运行库与模型加载结果。
 
-**当前 Linux 非 mock 顶层配置存在已复现故障，且 x86 源文件带加密头。以下是修复/恢复后应使用的流程，不是本次已通过的命令。**
+**普通x86配置已通过，编译仍被加密源码阻碍；启用旧工具仍复现CMake错误。以下含旧评测工具的流程需先修复/恢复，不是本次通过的命令。**
 
 ```bash
 cmake -S /home/tronlong/lyp/code/edgevision \
-  -B /tmp/edgevision_x86 -DEVS_BACKEND=x86 -DEVS_WITH_GSTREAMER=OFF
+  -B /tmp/edgevision_x86 -DEVS_BACKEND=x86 -DEVS_WITH_GSTREAMER=OFF \
+  -DEVS_BUILD_LEGACY_TOOLS=ON
 cmake --build /tmp/edgevision_x86 -j4 --target evs_tests eval_offline
 ctest --test-dir /tmp/edgevision_x86 --output-on-failure
 /tmp/edgevision_x86/eval_offline \
@@ -209,7 +212,7 @@ ctest --test-dir /tmp/edgevision_x86 --output-on-failure
 
 - 使用仓库工具链文件，准备 `aarch64-linux-gnu-g++`、`rknn_api.h`、目标架构 `librknnrt.so`。更换工具链必须使用新构建目录，不能指望修改已有缓存里的 `CMAKE_TOOLCHAIN_FILE` 生效。
 - 库构建使用 `EVS_BACKEND=rknn`、`RKNN_API_LIB`、`RKNN_API_INCLUDE_DIR`；纯库交付关闭 GStreamer/RGA，构建核心及所需插件目标，例如动态人员功能的 `evs_shared evs_person_shared`。
-- 注意：当前顶层仍会配置 `v4l2_detect`，仅指定 `--target evs evs_shared` 不能绕过配置阶段的链接签名错误。先修 CMake 工具配置，或由外部父项目 `add_subdirectory` 只集成库；后者不会自动建立本仓库顶层测试。
+- 默认LEGACY_TOOLS=OFF，可直接配置纯库。显式启用旧工具时，`--target evs evs_shared`仍不能绕过配置阶段错误。父项目add_subdirectory不会自动建立常规测试。
 - `/home/xp/...` 是历史编译机路径，不能当成本机已安装依赖。显式核对实际 SDK、sysroot 与架构。
 - RKNN 运行库应与板端匹配；历史记录指出 SDK 旧 runtime 与板端版本不一致。交叉链接使用编译机上的目标库副本，板端实际使用自己的兼容 runtime。
 - RGA 库和头文件必须配套。历史文档指出精简版 RGA 可能符号齐全却缩放失败；不要只凭“链接成功”认定硬件预处理有效。
@@ -222,7 +225,7 @@ ctest --test-dir /tmp/edgevision_x86 --output-on-failure
 
 - `VisionTask` 不可复制。通常每个功能创建一个实例，以对应 YAML 初始化。
 - `initialize(path)` 成功后再次调用直接返回 0，不切换配置或重新加载；换模型需先 `release()` 后重新初始化，或使用新实例。
-- 初始化失败应回滚已取得的模型引用及临时资源，不能留下半初始化对象。`release()` 可重复调用，析构也会调用。
+- 初始化通过模型租约回滚已取得的引用和半初始化状态；冰雪启用warmup时要求成功，旧插件仍只警告。`release()` 可重复调用，析构也会调用。
 - `detect()` 为同步调用；同一实例一次只处理一帧。不要并发执行该实例的检测、更新和释放。
 - `ModelRegistry` 以 `(backend_type, model_path)` 共享后端并有互斥保护；这不等于共享 SDK 上下文的 `infer()` 自动线程安全。跨实例共用后端的并发需另行核对/串行化。
 - 路径字符串决定共享键，不会自动规范化为同一物理文件；同一后端的输入配置也可能被不同任务设置，修改共享模型机制时需考虑这些约束。
@@ -247,7 +250,8 @@ ctest --test-dir /tmp/edgevision_x86 --output-on-failure
 - `AlarmState`：`None=0`、`LogOnly=1`、`Alarm=2`。`limit_state`：0 未知、1 未安装、2 装错、3 装对。`ice_ratio` 为面积占比。
 - `Result.camera_channel` 每字节一个相机号，低字节为本帧，其余用 `0xFF` 填充。0 是真实相机号；当前一次 detect 只填一路，多路合并由宿主完成。
 - 错误码为 `0xMMMMEEEE`，高 16 位为功能号。`with_module()` 保留成功 0 和已带模块的错误；私有错误使用 `make_module_error()` 的 `0xC000..0xFFFF` 区间。
-- 调用方以函数返回值判断成功；早期失败分支未必重置/写入 `Result`，不能只检查复用结果里的 `out.status`。
+- functionPlugin返回可写借用指针，不是只读接口；正式Detector无人工框入口。
+- 调用方以返回值判断成功；冰雪hooks会清拒帧旧结果，旧插件前置失败仍未必重置Result。
 - 未知 decoder 在 `VisionTask::initialize()` 返回 `ModelInvalidFormat`，未知 plugin/backend 返回 `NotSupported`；不要照旧文档把所有不支持都混为同一码。
 
 ### 5.4 最小接入示例
@@ -324,7 +328,7 @@ int main() {
 | `0x0005` | `load_under.yaml` | 圆形区域排除载荷遮挡扇区；无工况只记录 |
 | `0x0006` | `boom_under.yaml` | 半径 `max(50, hoist_radius)` 的扇形，轴线暂固定 0°，默认半角 40° |
 | `0x0007` | `height_limit.yaml` | 没有框输出 `limit_state=1`；保留最高置信度框并调用安装姿态入口，当前有框仍返回 0 |
-| `0x0008` | `winch_ice.yaml` | 骨架，每帧 `ice_ratio=0`、`alarm=None`，尚未计算面积或实现退出锁存 |
+| `0x0008` | `winch_ice.yaml` | RKNN定位卷扬＋框内HSV候选占比；任一有效对象≥阈值报警；每帧重算，无工况门控/锁存 |
 
 ### 6.2 人员告警与连续帧规则
 
@@ -334,21 +338,21 @@ int main() {
 4. 作业时区内有人连续计数，达到 `consecutive_frames` 报警。只有未知距离目标的帧既不推进也不清零；明确无区内目标且无未知目标时清零。
 5. 热更新插件配置不清除连续计数；`reset()`/释放清除。计数目前属于整个实例，不是每个相机一份；修改多路策略前先确认业务期望。
 
-### 6.3 待实现部分
+### 6.3 剩余边界与冰雪接入约束
 
-- `height_limit_mount.cpp::judge_switch_mount()` 尚无安装几何判断；开 `EVS_WITH_OPENCV` 也仍返回 0。角度窗口、最少帧、静止超时和基本臂规则未进入实际判断。
-- 冰雪配置仅校验阈值并保存；模型/区域面积、重叠处理、告警后退出尚未接通。`reset()` 已清除预留的 `ice_exited_` 标志，但当前检测流程不使用该标志。
-- 当前公共 decoder 只交付检测框，没有通用分割掩码接口。
-- `crane_pose`/`crane` mapper 仅占位，始终返回未知地面位置。
-- 缺少绝对回转角：task 参考系中吊钩暂放 `(0, hoist_radius)`，0x0006 轴线固定；`focal_length` 不能替代回转角。
-- 致盲检测目前占位为 false；没有已实现的通用跟踪器或真正 QNN 后端。
+- 高度安装几何、观测窗口、基本臂规则及crane_pose仍占位；致盲、通用跟踪、QNN仍无实现。缺绝对回转角，人员task参考吊钩位置/扇形轴线仍有临时假设。
+- 冰雪真实路径为单类YOLOX模型＋OpenCV矩形框内HSV粗估，非真实表面分割。正式Detector一实例一路、紧凑RGB24/灰度、同模型实例也须串行；工况、重试、告警保持由宿主负责，exit_on_alarm仅兼容保存。
+- 结果读WinchSnowResult.objects的valid/ice_ratio，编号仅帧内排序；snow_detections始终空。通用Result.targets被清空，ice_ratio仅单有效对象有值，多对象/无/无效均-1。
+- NMS后超过两个候选整帧OutOfRange；小于3×3、交叠、极暗/均匀极白对象无效，detect仍可能返回0。HSV默认S≤80、V≥180，3×3开闭运算，分母包含框内背景；反光误计/暗雪漏计及模型误检仍待现场精度验收。
+- 公共TaskConfig.area_ratio仍.3；客户DetectConfig及冰雪文件默认.5。专用updateConfig整体更新置信度、NMS、面积阈值，非法值保留旧配置。
+- 冰雪细节见[报告5.10及9.6](edgevision分析报告.md#510-winchiceplugin卷扬定位与框内冰雪候选面积)；UI与CLI选路差异见报告6.7。
 
 ## 7. 地面坐标与标定
 
 ### 7.1 相机配置与矩阵加载
 
 - mapper 按相机独立配置；`camera.video_channel` 各路应有对应 `ground.cameras[].id`。漏配会警告，检测可继续但该路距离未知；重复/非法相机配置由构建 mapper 阶段校验。
-- 未写 `ground:` 时，兼容相机 0–3，读取 `/userdata/matrix_<id>_1280x720.txt`，缺失可回退各路内置矩阵。
+- 其它功能未写`ground:`时，兼容相机 0–3，读取 `/userdata/matrix_<id>_1280x720.txt`，缺失可回退各路内置矩阵。
 - 显式提供矩阵路径会默认按严格模式处理；现场样例还明确写 `params.strict_matrix: true`。因此即使后端为 mock，缺标定文件也可能初始化失败，不代表 mock 需要读取模型。
 
 ### 7.2 单应投影、距离与角度
@@ -369,7 +373,7 @@ int main() {
 - 兼容 `model`/`Model_path`、`camera_ids`/`video_channel`、`score_threshold`/`confidence_threshold`、`thresholds.score`；样例优先保持现有规范拼写。
 - 解析器并不严格拒绝全部未知键/非法数值，部分转换会默认为 0 或回退默认值；“成功解析”不代表每个字段有效或已参与算法。
 - `module_id` 决定功能；`task` 文本主要用于标识，改文件名或 `task:` 不会切换算法。
-- `VisionTask` 的模型及标定相对路径按进程当前目录处理，不自动相对 YAML 所在目录。离线评测器还会在原路径不存在时尝试数据集目录下的模型路径。
+- load_config成功不等于冰雪参数范围/模型检查通过；仍须检查initialize返回值。其它功能的`VisionTask`模型及标定相对路径按进程当前目录；加载冰雪库后，其文件适配器将模型相对路径按YAML目录归一化。直接构造ModelConfig/TaskConfig仍不经过文件适配。离线评测器还会在原路径不存在时尝试数据集目录下的模型路径。
 - `camera_config.json` 属于宿主采集配置，与任务 YAML 是两套配置；仓库样例是 JSON 数组，不要用说明文档中的单个对象片段覆盖完整数组。
 
 ### 8.2 热更新以实现为准
@@ -380,11 +384,11 @@ int main() {
 | --- | --- |
 | 明确拒绝变更并返回 `NotSupported` | `backend`、`Model_path`、`output_format`、`decoder_classes`、`person_class_id`、`module_id` |
 | 实际应用 | 人员阈值与 `zone`、无工况策略、`work_motion_epsilon`、完整 `ground`、延迟预算、高度/冰雪专属参数、`debug` |
-| 未比较且未应用到任务配置 | 输入宽高、颜色格式、letterbox、`video_channel` 等；不能把返回成功当作这些字段已生效 |
+| 输入宽高、颜色格式、letterbox、`video_channel` | 人员/高度仍未比较也未应用；冰雪hooks拒绝改变 |
 
-- README 宣称输入参数与相机变更必然被拒绝，但当前 `src/vision_task.cpp` 没有相应比较；改这些字段应重新初始化，若任务要求补验证则增加对应回归。
+- 人员/高度输入与相机热更新仍未拒绝也未应用，改这些字段应重新初始化；冰雪通过可选hooks拒绝，不能混写。
 - ground mapper 先在临时容器构建，插件 `configure()` 成功后再提交；失败保留现有有效配置。新增插件的 `configure()` 也应先完整验证再修改状态。
-- `nms_threshold` 会被解析和保存，但当前共享 YOLO NMS 使用内部常量，没有看到该字段传入解码路径；不能宣称热改它能改变 NMS。
+- 旧COCO helper的NMS仍用内部常量；冰雪插件自有NMS实际使用并支持热更新nms_threshold。
 - YAML `npu_core_mask` 尚未透传 RKNN，实际使用 `EVS_NPU_CORE_MASK`。RKNN `init_timeout_s` 也没有形成 SDK 调用超时机制；`min_fps` 不是自动调速保证。
 - 文件改动不会被自动监控；必须由宿主显式热更新或重建任务。
 
@@ -399,10 +403,10 @@ int main() {
 
 ### 9.2 更换模型时必须核对的契约
 
-- RKNN 的原始头解析在 `src/backend/yolo_decode.h`，随后交上层 decoder。YOLOv5 anchor 头、YOLOv11 DFL 解耦头、YOLOX packed/per-scale 输出在这里分派。
-- 当前共享 YOLO helper 仍固定 COCO 80 类、640 输入和 YOLOv5 anchors；YAML `decoder_classes`/输入尺寸不能自动改变这些原始头常量。换自训模型要核对后端原始形状和上层行宽两层契约。
+- RKNN的旧COCO原始头解析在`src/backend/yolo_decode.h`，新非80类显式解析在`src/backend/rknn/detection_rows.h`，随后交上层decoder。YOLOv5 anchor 头、YOLOv11 DFL 解耦头、YOLOX packed/per-scale 输出在这里分派。
+- 旧COCO helper仍固定80类/640/anchors；新增rknn且classes!=80的flat6/v8/YOLOX显式单输出路径，校验模型输入/行宽/元素数与数值。正式冰雪640单类YOLOX raw为[1,8400,6]、概率已激活，输出归一化[N,5]，NMS在插件执行。换模型核对具体分支，不能泛化任意raw布局。
 - 类别数/行宽不匹配可能安静地产生 0 框。模型结构、输出激活、输入缩放、颜色顺序、类别号与 letterbox 映射应一起核对。
-- 当前 NMS 常量：YOLOv5/v11 路径 IoU 0.45；YOLOX 路径 IoU 0.5 且不分类别。改共用解码需同时评估 PC/板端一致性。
+- 旧COCO helper的NMS常量：YOLOv5/v11 路径 IoU 0.45；YOLOX 路径 IoU 0.5 且不分类别。改共用解码需同时评估 PC/板端一致性。
 - RKNN 按模型输入属性处理张量并将输出取为 float；float 输入缩放与模型预处理是否已融合有关，不要无证据重复除以 255。
 - ORT 实现文件在本次快照中无法作为明文阅读，不能据旧文档推断所有模型布局都已支持。
 
@@ -448,6 +452,7 @@ int main() {
 
 - RGA `wstride` 单位是像素，自行计算缓冲地址/letterbox 偏移使用字节；RGB 的两者相差 3 倍。保留 `dst_stride_px`、`dst_row_bytes` 的区分。
 - `--rga-fd` 依赖相机导出 DMA buffer 的能力；历史板卡不支持该路径，不能等同于常规 `--rga` 已验证。
+- 插件decide失败会在核心dbg.note之前返回，不计入frames/error；专用inference_time_ms此时可为0。
 - 调试 API 包括 `debugStats()`、`debugSnapshot()`、`setDebugConfig()`、`saveLastInput()`、`library_snapshot()`。默认不缓存每帧输入张量、不落盘，但基础统计仍会更新，不能把文档的“零开销”当作绝对事实。
 - 取证受 `enabled`、间隔/告警策略和 `max_dumps` 限制；性能修改避免无条件张量拷贝、逐框日志或无限落盘。
 - 全局日志 sink 不得长期引用已析构局部对象；退出作用域前解除回调。
@@ -455,19 +460,16 @@ int main() {
 
 ## 11. 已核实的现存问题与文档偏差
 
-以下是固定提交 `137a845` 中核实的状态，不是本次文档更新引入的修改，也不应在无关任务里顺手扩大修复范围：
+当前基线为5427d18，完整证据与历史区分见[报告8、12章](edgevision分析报告.md#八编译构建体系)。本次只读源码并在/tmp验证，未修复源码。
 
-1. **Linux 非 mock 顶层配置失败。** 2026-10-19 对固定快照实测 `EVS_BACKEND=x86`、`EVS_WITH_GSTREAMER=OFF` 仍在 `CMakeLists.txt:305` 报 `target_link_libraries` keyword/plain 签名混用；`evs_link_whole()` 在第 181 行使用 `PRIVATE`，采集工具后续调用使用 plain 签名。该工具分支也覆盖 onnx/rknn。
-2. **采集工具硬编码 zlib。** `v4l2_detect` 无条件链接 `/home/xp/rk3576/rk3576_linux6.1_release/ubuntu/sysroots/armv8a-linux/usr/lib/aarch64-linux-gnu/libz.so`。关闭 GStreamer 不消除此依赖；修复签名冲突后还需按目标平台处理它。
-3. **两份源码带 E-SafeNet 加密头。** `src/backend/x86/x86_backend.cpp` 和 `tools/eval_offline/gen_selfcheck_dataset.py` 含二进制/非 UTF-8 数据；工作区与 Git HEAD 都如此。重新 checkout HEAD 不会恢复明文；需要从有权限的正常源码来源恢复。不要当乱码重编码、用占位实现覆盖或宣称已完成对它们的明文审阅。
-4. **旧构建脚本不可作当前基线。** `build_check.bat` 包含个人 Windows 路径和已失效的 `src/tasks/person_plugin.cpp` 位置，遗漏当前源文件集合；以 CMake 为准。
-5. **README 部分过时。** 本提交已更新核心/插件拆分与交付说明，但测试计数、工况角速度、热更新拒绝字段及 fixtures 输出位置等仍需结合实现核对。`src/tasks/README.md` 也仍有地面距离留 0、高度始终 0 等旧阶段描述。
-6. **静态登记说明已更新到代码，部分现场文档尚未同步。** 新增 mapper 应在自身 `.cpp` 登记并加入 `EVS_SRC`，通常无需改工厂表或公共配置结构。
-7. **示例不等于部署包。** `models/`、训练后的高度/冰雪模型、`yolox.rknn`、README 提到的若干 yolo11 YAML/板端改名二进制并未全部入库。启动前核对实际文件。
-8. **目录中的历史文件需辨认。** `tools/v4l2_detect/main.cpp.bak_20261007_200859` 是备份，不是编译入口；不要误改备份或将其作为当前行为依据。
-9. **动态插件可能被链接器裁掉。** GNU/Linux `--as-needed` 可移除仅含登记副作用的插件依赖；需要显式保留。2026-10-19 已分别验证核心单独加载、三组插件独立加载、全插件加载与人员静态链接，功能登记符合库边界。
-
-本次只读分析与 `/tmp` 构建验证，没有修复这些源码问题。
+1. 默认旧工具关闭，普通x86配置可过；开启LEGACY_TOOLS后CMakeLists.txt:416仍报keyword/plain签名混用，zlib和旧GStreamer仍有历史绝对路径。
+2. x86_backend.cpp及gen_selfcheck_dataset.py仍带E-SafeNet保护头；需授权正常明文来源，普通x86编译未通过。build_check.bat仍过时。
+3. README等旧工况、热更新、fixtures、mapper说明可能落后，按模块/路径核对；不能再沿用“冰雪骨架”“OpenCV只加宏”“没有install”的旧结论。
+4. 冰雪模型已入库但install不部署；人员/高度库也不在安装集合。纯VisionTask动态宿主仍防as-needed裁掉插件，Detector直接引用ice符号。
+5. 新Qt UI严格选通道，单路同帧显示；相机CLI复用旧selector，缺失channel会回退、禁用项可能仍使用，存在采错设备但标任务通道的路径。UI保证不能推广到CLI。
+6. 冰雪当前是HSV粗估，snow_detections为空；真值精度、其它物理通道及长时稳定性未验收。历史通道0 7/7、1000帧等本次未重跑；源码包哈希边界见报告8.7。
+7. 人员/高度输入热更新、评测异常图统计/mAP口径、旧共享内存首次创建等问题未由本提交修复。
+8. 新旧插件兼容只验证特定v1头及同工具链；模型共享不等于infer线程安全，仍无自动dlopen插件管理器。
 
 ## 12. 实施改动时的约定
 
@@ -493,7 +495,7 @@ int main() {
 2. 新功能在自身 `.cpp` 用 `FunctionPluginRegistration` 登记唯一模块号；新 decoder 用 `DecoderRegistration`；新 mapper 用 `GroundMapperRegistration`。
 3. 新 decoder/mapper 等核心编译单元加入 `CMakeLists.txt::EVS_SRC`；功能编译单元加入所属 `evs_add_plugin()` 源列表，新插件组新增该调用，并维护 `evs_link_whole()` 的归档列表。核对外部静态消费者的整库链接，以及动态消费者对插件的保留和部署。
 4. backend 是例外：仍需修改后端工厂及 CMake 编译选择，并保持 mock 始终可用。
-5. 新配置同时维护结构/解析/样例/文档，并明确初始化限定或热更新语义；mapper 专属参数优先使用现有通用 params。
+5. 新配置明确初始化/热更新语义；功能私有配置优先独立FunctionConfigRegistration和FunctionOptions，可选IFunctionTaskHooks，不扩张原TaskConfig/插件虚表；mapper仍用params。
 6. 只在相应实现目录引入可选 SDK/OpenCV 代码，公共接口保留 C++17 类型及现有依赖隔离。
 
 ### 12.3 风格、验证与交付
@@ -513,6 +515,6 @@ int main() {
 
 1. 确认当前所在目录与实际源码目录，读取适用指令，检查 Git 状态及最近提交。
 2. 按需求读取对应公共契约、实现、配置和局部待办，不只依赖 README。
-3. 先选合适后端和独立构建目录；需要 x86/onnx/rknn 时先核对第 11 节阻碍是否仍存在。
+3. 先选合适后端和独立构建目录；需要x86/onnx/rknn或冰雪时，先核对第11节及相应依赖/旧工具开关。
 4. 完成范围明确的改动，更新必要样例和说明，并运行匹配的验证。
 5. 检查最终差异及生成物，报告已验证事实；区分“代码完成”“仅 mock 验证”“需要模型/板端验证”。
