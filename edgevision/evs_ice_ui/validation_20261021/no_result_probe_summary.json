@@ -1,0 +1,78 @@
+{
+  "name": "no_result_probe",
+  "detections": 5,
+  "displayed_observations": 5,
+  "elapsed_seconds": 7.03,
+  "processed_per_wall_second": 0.711,
+  "detect_ms_median": 56.49,
+  "detect_ms_p95": 74.308,
+  "inference_ms_median": 29,
+  "rss_samples": [
+    {
+      "seconds": 0.002,
+      "rss_kib": 448
+    },
+    {
+      "seconds": 0.503,
+      "rss_kib": 79292
+    },
+    {
+      "seconds": 1.006,
+      "rss_kib": 79496
+    },
+    {
+      "seconds": 1.508,
+      "rss_kib": 79496
+    },
+    {
+      "seconds": 2.01,
+      "rss_kib": 79496
+    },
+    {
+      "seconds": 2.512,
+      "rss_kib": 79496
+    },
+    {
+      "seconds": 3.014,
+      "rss_kib": 79496
+    },
+    {
+      "seconds": 3.515,
+      "rss_kib": 79496
+    },
+    {
+      "seconds": 4.017,
+      "rss_kib": 132064
+    },
+    {
+      "seconds": 4.519,
+      "rss_kib": 111524
+    },
+    {
+      "seconds": 5.02,
+      "rss_kib": 99752
+    },
+    {
+      "seconds": 5.522,
+      "rss_kib": 99752
+    },
+    {
+      "seconds": 6.023,
+      "rss_kib": 99752
+    },
+    {
+      "seconds": 6.525,
+      "rss_kib": 99752
+    }
+  ],
+  "session_summary": {
+    "api_errors": 0,
+    "camera_channel": 0,
+    "captured": 6,
+    "error": "",
+    "event": "session_finished",
+    "exit_code": 0,
+    "processed": 5
+  },
+  "note": "Confidence deliberately raised to 0.99 to verify NO RESULT handling"
+}

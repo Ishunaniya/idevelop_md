@@ -1,0 +1,22 @@
+{
+  "passed": [
+    "X11 window created",
+    "Snapshot disabled before first observation",
+    "Start button: real frames displayed",
+    "Snapshot button saved a frame",
+    "Snapshot frame identity matches a delivered GUI observation",
+    "Channel button disabled while running",
+    "Stop button releases first session",
+    "Restart acquires new real frames",
+    "Second stop completes",
+    "Missing camera reports an error and stops",
+    "Missing camera never displays old channel results",
+    "Switch back to channel 0 recovers",
+    "Stop before editing camera configuration",
+    "Camera config reread on Start",
+    "Edited camera configuration recovers without restarting application",
+    "Quit button stops workers and exits cleanly"
+  ],
+  "count": 16,
+  "exit_code": 0
+}

@@ -1,0 +1,393 @@
+{
+  "name": "sustained_camera_probe",
+  "detections": 500,
+  "displayed_observations": 500,
+  "elapsed_seconds": 46.69,
+  "processed_per_wall_second": 10.709,
+  "detect_ms_median": 66.522,
+  "detect_ms_p95": 82.258,
+  "inference_ms_median": 29.0,
+  "rss_samples": [
+    {
+      "seconds": 0.002,
+      "rss_kib": 4
+    },
+    {
+      "seconds": 0.504,
+      "rss_kib": 79108
+    },
+    {
+      "seconds": 1.006,
+      "rss_kib": 79312
+    },
+    {
+      "seconds": 1.508,
+      "rss_kib": 79312
+    },
+    {
+      "seconds": 2.009,
+      "rss_kib": 79312
+    },
+    {
+      "seconds": 2.511,
+      "rss_kib": 79312
+    },
+    {
+      "seconds": 3.013,
+      "rss_kib": 79312
+    },
+    {
+      "seconds": 3.515,
+      "rss_kib": 79312
+    },
+    {
+      "seconds": 4.016,
+      "rss_kib": 115208
+    },
+    {
+      "seconds": 4.517,
+      "rss_kib": 147216
+    },
+    {
+      "seconds": 5.019,
+      "rss_kib": 138920
+    },
+    {
+      "seconds": 5.521,
+      "rss_kib": 131988
+    },
+    {
+      "seconds": 6.022,
+      "rss_kib": 145820
+    },
+    {
+      "seconds": 6.523,
+      "rss_kib": 147240
+    },
+    {
+      "seconds": 7.024,
+      "rss_kib": 141592
+    },
+    {
+      "seconds": 7.526,
+      "rss_kib": 145640
+    },
+    {
+      "seconds": 8.027,
+      "rss_kib": 139156
+    },
+    {
+      "seconds": 8.528,
+      "rss_kib": 140300
+    },
+    {
+      "seconds": 9.029,
+      "rss_kib": 134420
+    },
+    {
+      "seconds": 9.53,
+      "rss_kib": 144340
+    },
+    {
+      "seconds": 10.031,
+      "rss_kib": 144440
+    },
+    {
+      "seconds": 10.533,
+      "rss_kib": 134492
+    },
+    {
+      "seconds": 11.034,
+      "rss_kib": 144288
+    },
+    {
+      "seconds": 11.536,
+      "rss_kib": 140084
+    },
+    {
+      "seconds": 12.037,
+      "rss_kib": 144508
+    },
+    {
+      "seconds": 12.538,
+      "rss_kib": 134256
+    },
+    {
+      "seconds": 13.039,
+      "rss_kib": 144632
+    },
+    {
+      "seconds": 13.54,
+      "rss_kib": 134764
+    },
+    {
+      "seconds": 14.042,
+      "rss_kib": 144376
+    },
+    {
+      "seconds": 14.543,
+      "rss_kib": 144452
+    },
+    {
+      "seconds": 15.044,
+      "rss_kib": 140204
+    },
+    {
+      "seconds": 15.545,
+      "rss_kib": 144000
+    },
+    {
+      "seconds": 16.046,
+      "rss_kib": 150248
+    },
+    {
+      "seconds": 16.547,
+      "rss_kib": 144120
+    },
+    {
+      "seconds": 17.05,
+      "rss_kib": 140248
+    },
+    {
+      "seconds": 17.551,
+      "rss_kib": 146284
+    },
+    {
+      "seconds": 18.052,
+      "rss_kib": 144480
+    },
+    {
+      "seconds": 18.553,
+      "rss_kib": 144704
+    },
+    {
+      "seconds": 19.055,
+      "rss_kib": 140256
+    },
+    {
+      "seconds": 19.556,
+      "rss_kib": 144904
+    },
+    {
+      "seconds": 20.057,
+      "rss_kib": 144532
+    },
+    {
+      "seconds": 20.558,
+      "rss_kib": 144336
+    },
+    {
+      "seconds": 21.06,
+      "rss_kib": 134692
+    },
+    {
+      "seconds": 21.561,
+      "rss_kib": 144788
+    },
+    {
+      "seconds": 22.062,
+      "rss_kib": 150728
+    },
+    {
+      "seconds": 22.563,
+      "rss_kib": 150472
+    },
+    {
+      "seconds": 23.064,
+      "rss_kib": 144704
+    },
+    {
+      "seconds": 23.565,
+      "rss_kib": 150604
+    },
+    {
+      "seconds": 24.067,
+      "rss_kib": 144200
+    },
+    {
+      "seconds": 24.568,
+      "rss_kib": 140612
+    },
+    {
+      "seconds": 25.069,
+      "rss_kib": 146720
+    },
+    {
+      "seconds": 25.57,
+      "rss_kib": 144040
+    },
+    {
+      "seconds": 26.071,
+      "rss_kib": 128568
+    },
+    {
+      "seconds": 26.574,
+      "rss_kib": 140384
+    },
+    {
+      "seconds": 27.075,
+      "rss_kib": 150180
+    },
+    {
+      "seconds": 27.576,
+      "rss_kib": 150536
+    },
+    {
+      "seconds": 28.078,
+      "rss_kib": 146584
+    },
+    {
+      "seconds": 28.58,
+      "rss_kib": 147096
+    },
+    {
+      "seconds": 29.08,
+      "rss_kib": 146644
+    },
+    {
+      "seconds": 29.582,
+      "rss_kib": 152964
+    },
+    {
+      "seconds": 30.083,
+      "rss_kib": 146456
+    },
+    {
+      "seconds": 30.584,
+      "rss_kib": 146752
+    },
+    {
+      "seconds": 31.085,
+      "rss_kib": 134484
+    },
+    {
+      "seconds": 31.586,
+      "rss_kib": 134484
+    },
+    {
+      "seconds": 32.087,
+      "rss_kib": 140504
+    },
+    {
+      "seconds": 32.588,
+      "rss_kib": 144536
+    },
+    {
+      "seconds": 33.09,
+      "rss_kib": 144788
+    },
+    {
+      "seconds": 33.591,
+      "rss_kib": 144760
+    },
+    {
+      "seconds": 34.092,
+      "rss_kib": 140428
+    },
+    {
+      "seconds": 34.594,
+      "rss_kib": 146708
+    },
+    {
+      "seconds": 35.095,
+      "rss_kib": 146736
+    },
+    {
+      "seconds": 35.596,
+      "rss_kib": 146276
+    },
+    {
+      "seconds": 36.097,
+      "rss_kib": 146792
+    },
+    {
+      "seconds": 36.598,
+      "rss_kib": 132488
+    },
+    {
+      "seconds": 37.1,
+      "rss_kib": 134696
+    },
+    {
+      "seconds": 37.601,
+      "rss_kib": 140504
+    },
+    {
+      "seconds": 38.102,
+      "rss_kib": 140636
+    },
+    {
+      "seconds": 38.603,
+      "rss_kib": 144200
+    },
+    {
+      "seconds": 39.104,
+      "rss_kib": 140484
+    },
+    {
+      "seconds": 39.605,
+      "rss_kib": 146608
+    },
+    {
+      "seconds": 40.107,
+      "rss_kib": 134848
+    },
+    {
+      "seconds": 40.608,
+      "rss_kib": 134492
+    },
+    {
+      "seconds": 41.109,
+      "rss_kib": 134488
+    },
+    {
+      "seconds": 41.61,
+      "rss_kib": 134784
+    },
+    {
+      "seconds": 42.111,
+      "rss_kib": 139208
+    },
+    {
+      "seconds": 42.613,
+      "rss_kib": 146108
+    },
+    {
+      "seconds": 43.114,
+      "rss_kib": 146320
+    },
+    {
+      "seconds": 43.615,
+      "rss_kib": 146444
+    },
+    {
+      "seconds": 44.117,
+      "rss_kib": 119136
+    },
+    {
+      "seconds": 44.619,
+      "rss_kib": 107316
+    },
+    {
+      "seconds": 45.12,
+      "rss_kib": 107316
+    },
+    {
+      "seconds": 45.622,
+      "rss_kib": 107316
+    },
+    {
+      "seconds": 46.123,
+      "rss_kib": 107316
+    }
+  ],
+  "session_summary": {
+    "api_errors": 0,
+    "camera_channel": 0,
+    "captured": 501,
+    "error": "",
+    "event": "session_finished",
+    "exit_code": 0,
+    "processed": 500
+  }
+}

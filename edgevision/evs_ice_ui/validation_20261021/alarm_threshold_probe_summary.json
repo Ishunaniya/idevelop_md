@@ -1,0 +1,78 @@
+{
+  "name": "alarm_threshold_probe",
+  "detections": 5,
+  "displayed_observations": 5,
+  "elapsed_seconds": 7.028,
+  "processed_per_wall_second": 0.711,
+  "detect_ms_median": 64.155,
+  "detect_ms_p95": 68.566,
+  "inference_ms_median": 29,
+  "rss_samples": [
+    {
+      "seconds": 0.001,
+      "rss_kib": 4
+    },
+    {
+      "seconds": 0.502,
+      "rss_kib": 79124
+    },
+    {
+      "seconds": 1.004,
+      "rss_kib": 79328
+    },
+    {
+      "seconds": 1.506,
+      "rss_kib": 79328
+    },
+    {
+      "seconds": 2.007,
+      "rss_kib": 79328
+    },
+    {
+      "seconds": 2.509,
+      "rss_kib": 79328
+    },
+    {
+      "seconds": 3.01,
+      "rss_kib": 79328
+    },
+    {
+      "seconds": 3.512,
+      "rss_kib": 79328
+    },
+    {
+      "seconds": 4.013,
+      "rss_kib": 131632
+    },
+    {
+      "seconds": 4.515,
+      "rss_kib": 118792
+    },
+    {
+      "seconds": 5.017,
+      "rss_kib": 107052
+    },
+    {
+      "seconds": 5.518,
+      "rss_kib": 107052
+    },
+    {
+      "seconds": 6.02,
+      "rss_kib": 107052
+    },
+    {
+      "seconds": 6.521,
+      "rss_kib": 107052
+    }
+  ],
+  "session_summary": {
+    "api_errors": 0,
+    "camera_channel": 0,
+    "captured": 7,
+    "error": "",
+    "event": "session_finished",
+    "exit_code": 0,
+    "processed": 5
+  },
+  "note": "Threshold deliberately lowered to 10% for wiring verification; not snow accuracy evidence"
+}

@@ -1,0 +1,20 @@
+Internal ctest changing into directory: /home/hytop/l_evs/winch_ice_ui_demo_20261021/build
+Test project /home/hytop/l_evs/winch_ice_ui_demo_20261021/build
+    Start 1: evs_tests
+1/7 Test #1: evs_tests ........................   Passed    0.13 sec
+    Start 2: evs_ice_tests
+2/7 Test #2: evs_ice_tests ....................   Passed    0.06 sec
+    Start 3: evs_ice_allocation_tests
+3/7 Test #3: evs_ice_allocation_tests .........   Passed    0.03 sec
+    Start 4: evs_plugin_integration_tests
+4/7 Test #4: evs_plugin_integration_tests .....   Passed    0.01 sec
+    Start 5: evs_ice_dynamic_tests
+5/7 Test #5: evs_ice_dynamic_tests ............   Passed    0.06 sec
+    Start 6: evs_ice_cli
+6/7 Test #6: evs_ice_cli ......................   Passed    0.16 sec
+    Start 7: evs_ice_ui_tests
+7/7 Test #7: evs_ice_ui_tests .................   Passed    0.12 sec
+
+100% tests passed, 0 tests failed out of 7
+
+Total Test time (real) =   0.57 sec

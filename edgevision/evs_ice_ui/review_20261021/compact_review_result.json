@@ -1,0 +1,10 @@
+{
+  "pid": 114184,
+  "compact_dimensions": [
+    800,
+    480
+  ],
+  "camera": "/dev/video0",
+  "restored_maximized": true,
+  "running": true
+}

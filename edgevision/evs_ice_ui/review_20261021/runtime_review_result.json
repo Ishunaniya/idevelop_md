@@ -1,0 +1,305 @@
+[
+  {
+    "name": "final_frame_0",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.6,
+    "detect_ms_median": 115.723976,
+    "detect_ms_p95": 115.723976
+  },
+  {
+    "name": "final_frame_1",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.696,
+    "detect_ms_median": 117.283565,
+    "detect_ms_p95": 117.283565
+  },
+  {
+    "name": "final_frame_2",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.681,
+    "detect_ms_median": 113.897851,
+    "detect_ms_p95": 113.897851
+  },
+  {
+    "name": "final_frame_3",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.639,
+    "detect_ms_median": 119.8063,
+    "detect_ms_p95": 119.8063
+  },
+  {
+    "name": "final_frame_4",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.533,
+    "detect_ms_median": 115.427149,
+    "detect_ms_p95": 115.427149
+  },
+  {
+    "name": "final_frame_5",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.637,
+    "detect_ms_median": 116.492209,
+    "detect_ms_p95": 116.492209
+  },
+  {
+    "name": "final_frame_6",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.629,
+    "detect_ms_median": 118.502996,
+    "detect_ms_p95": 118.502996
+  },
+  {
+    "name": "final_frame_7",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.683,
+    "detect_ms_median": 116.73787,
+    "detect_ms_p95": 116.73787
+  },
+  {
+    "name": "final_frame_8",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.717,
+    "detect_ms_median": 108.689138,
+    "detect_ms_p95": 108.689138
+  },
+  {
+    "name": "final_frame_9",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1,
+    "displayed": 1,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 3,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1
+      }
+    ],
+    "seconds": 6.636,
+    "detect_ms_median": 120.181249,
+    "detect_ms_p95": 120.181249
+  },
+  {
+    "name": "graceful_SIGINT",
+    "exit_code": 0,
+    "signal_sent": true,
+    "detections": 3,
+    "displayed": 3,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 6,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 3
+      }
+    ],
+    "seconds": 4.719,
+    "detect_ms_median": 93.382821,
+    "detect_ms_p95": 93.382821
+  },
+  {
+    "name": "graceful_SIGTERM",
+    "exit_code": 0,
+    "signal_sent": true,
+    "detections": 2,
+    "displayed": 2,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 5,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 2
+      }
+    ],
+    "seconds": 4.571,
+    "detect_ms_median": 96.0760095,
+    "detect_ms_p95": 71.973811
+  },
+  {
+    "name": "graceful_SIGHUP",
+    "exit_code": 0,
+    "signal_sent": true,
+    "detections": 2,
+    "displayed": 2,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 4,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 2
+      }
+    ],
+    "seconds": 4.58,
+    "detect_ms_median": 82.21918050000001,
+    "detect_ms_p95": 53.766061
+  },
+  {
+    "name": "idle_sigterm",
+    "exit_code": 0,
+    "signal_sent": true,
+    "detections": 0,
+    "displayed": 0,
+    "session_summary": [],
+    "seconds": 0.311
+  },
+  {
+    "name": "review_sustained",
+    "exit_code": 0,
+    "signal_sent": false,
+    "detections": 1000,
+    "displayed": 1000,
+    "session_summary": [
+      {
+        "api_errors": 0,
+        "camera_channel": 0,
+        "captured": 1001,
+        "error": "",
+        "event": "session_finished",
+        "exit_code": 0,
+        "processed": 1000
+      }
+    ],
+    "seconds": 86.568,
+    "detect_ms_median": 66.653704,
+    "detect_ms_p95": 79.948087
+  }
+]
