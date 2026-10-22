@@ -1,0 +1,2 @@
+cd '/home/hytop/l_evs/winch_sdk_d6b63ba_20261022_162744/edgevision_winch_ice_sdk_rk3588_d6b63ba'
+'/home/hytop/l_evs/winch_sdk_d6b63ba_20261022_162744/edgevision_winch_ice_sdk_rk3588_d6b63ba/bin/winch_ice_api_demo' 'configs/winch_ice.yaml' 'demo/sample.ppm' '--out' '/home/hytop/l_evs/winch_sdk_d6b63ba_20261022_162744/edgevision_winch_ice_sdk_rk3588_d6b63ba/records/default_run' 

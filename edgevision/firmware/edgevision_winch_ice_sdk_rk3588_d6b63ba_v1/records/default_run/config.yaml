@@ -1,0 +1,14 @@
+# Paths are relative to this YAML file, not the process working directory.
+task: winch_ice
+module_id: 0x0008
+camera:
+  video_channel: [0]
+ground:
+  enabled: false
+Model_path: ../models/winch_model.rknn
+input_width: 640
+input_height: 640
+warmup: false
+confidence_threshold: 0.45
+nms_threshold: 0.5
+area_ratio: 0.5

@@ -1,0 +1,15 @@
+# RK3588 native build and sample run
+# prepare a separate application directory:
+mkdir -p '/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/bin'
+cp /home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/demo/minimal.cpp '/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/main.cpp'
+cp -a /home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/lib '/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/lib'
+
+cd /home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba
+g++ -std=c++17 -O2 -I/home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/include '/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/main.cpp' '-L/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/lib' -levs_ice -levs_core '-Wl,-rpath,$ORIGIN/../lib' -o '/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/bin/my_winch_app'
+# exit_code=0
+
+cd /tmp
+'/home/hytop/l_evs/winch_sdk_customer_20261022_190124/customer app_retry1/bin/my_winch_app' /home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/models/winch_model.rknn /home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/demo/sample.ppm
+# exit_code=0
+
+# Absolute paths describe the original run; use README commands after relocation.

@@ -1,0 +1,8 @@
+2026-10-22 19:05:40.346 [INFO] rknn_backend.cpp:193 [algo] rknn:model ready: in 640x640x3 type=int8 fmt=NHWC elems=1228800, outputs=1, in_scale=1.0000
+2026-10-22 19:05:40.346 [INFO] rknn_backend.cpp:206 [algo] rknn:  out[0] name=predictions dims=[1 8400 6 0] type=int8 elems=50400
+2026-10-22 19:05:40.346 [INFO] model_registry.cpp:32 [algo] loaded rknn:/home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/models/winch_model.rknn (timeout=60s)
+2026-10-22 19:05:40.346 [INFO] vision_task.cpp:222 [algo] task ready: module=0x0008 backend=rknn model=/home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/models/winch_model.rknn input=640x640 letterbox=1 debug=0
+2026-10-22 19:05:40.397 [INFO] vision_task.cpp:518 [algo] releasing rknn:/home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/models/winch_model.rknn (1 frames processed)
+2026-10-22 19:05:40.397 [INFO] model_registry.cpp:54 [algo] destroying rknn:/home/hytop/l_evs/winch_sdk_customer_20261022_190124/edgevision_winch_ice_sdk_rk3588_d6b63ba/models/winch_model.rknn (ref=0)
+result_code=1 alert_level=0 winch_candidates=7146 objects=1
+object[0] class_id=0 confidence=0.951441228 x=113 y=87 width=534 height=489 valid=1 ice_ratio=0.393097579
