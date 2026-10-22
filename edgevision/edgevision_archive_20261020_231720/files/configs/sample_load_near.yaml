@@ -1,0 +1,25 @@
+task: load_near
+module_id: 0x0004
+camera:
+  video_channel: [0]
+
+backend: mock          # rknn | qnn | mock
+Model_path: models/person.rknn
+input_width: 640
+input_height: 640
+warmup: true
+init_timeout_s: 60
+npu_core_mask: 1
+
+latency_budget_ms: 200
+min_fps: 5
+
+on_missing_context: alarm   # alarm | log_only
+work_motion_epsilon: 0.1    # 判定「作业中」的角速度或动作阈值
+
+zone:
+  type: circle
+  radius_m: 10
+  consecutive_frames: 3
+
+confidence_threshold: 0.45

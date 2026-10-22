@@ -1,0 +1,14 @@
+Internal ctest changing into directory: /tmp/ice_slim_static
+Test project /tmp/ice_slim_static
+    Start 1: evs_tests
+1/4 Test #1: evs_tests ........................   Passed    0.72 sec
+    Start 2: evs_ice_tests
+2/4 Test #2: evs_ice_tests ....................   Passed    0.25 sec
+    Start 3: evs_ice_allocation_tests
+3/4 Test #3: evs_ice_allocation_tests .........   Passed    0.09 sec
+    Start 4: evs_ice_cli
+4/4 Test #4: evs_ice_cli ......................   Passed    0.35 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   1.42 sec

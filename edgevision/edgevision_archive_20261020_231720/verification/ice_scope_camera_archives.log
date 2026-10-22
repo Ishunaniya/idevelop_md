@@ -1,0 +1,6 @@
+[ 94%] Built target evs_objs
+[100%] Linking CXX static library libevs.a
+[100%] Built target evs
+[ 75%] Built target evs_ice_objs
+[100%] Linking CXX static library libevs_ice.a
+[100%] Built target evs_ice

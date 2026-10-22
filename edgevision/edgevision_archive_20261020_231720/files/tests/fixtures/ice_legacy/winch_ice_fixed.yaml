@@ -1,0 +1,21 @@
+# Fixed-view rule-based coarse estimate. OpenCV core/imgproc required.
+# EXAMPLE ROI ONLY: measure the entire working surface on the actual camera.
+# Do not use this polygon unchanged on a different installation.
+task: winch_ice
+module_id: 0x0008
+camera:
+  video_channel: [0] # exactly one camera per task; one camera; one or two objects per frame
+
+inference_enabled: false
+ground:
+  enabled: false
+
+# Reference is the ORIGINAL frame, before model resize/letterbox.
+ice_reference_width: 704
+ice_reference_height: 576
+ice_surface_polygon: [0.299,0.113,0.555,0.090,0.768,0.122,0.903,0.200,0.953,0.435,0.925,0.817,0.711,0.896,0.341,0.913,0.235,0.774,0.206,0.470,0.228,0.235]
+# Provisional defaults, not validated field thresholds. OpenCV uint8 S/V: 0..255.
+ice_saturation_max: 80
+ice_value_min: 180
+area_ratio: 0.5
+ice_mode: fixed_surface

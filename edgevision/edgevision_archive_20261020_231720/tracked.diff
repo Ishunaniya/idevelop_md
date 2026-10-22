@@ -1,0 +1,3638 @@
+diff --git a/.gitignore b/.gitignore
+index 0289f33..c8452dc 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,3 +29,7 @@ Makefile
+ .DS_Store
+ .directory
+ *.code-workspace
++
++# Python verification caches
++__pycache__/
++*.pyc
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 18b6f30..76dbcd0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -34,6 +34,7 @@ endif()
+ 
+ set(EVS_SRC
+     src/core/config.cpp
++    src/core/monotonic_clock.cpp
+     src/core/model_registry.cpp
+     src/core/backend_factory.cpp
+     src/core/detection_decoder.cpp
+@@ -116,7 +117,7 @@ if(EVS_BUILD_SHARED)
+     add_library(evs_shared SHARED $<TARGET_OBJECTS:evs_objs>)
+     set_target_properties(evs_shared PROPERTIES
+         OUTPUT_NAME evs_core
+-        SOVERSION 1
++        SOVERSION 3
+         # Do not bake the build machine's SDK directory into the library.
+         # On the board, librknnrt.so is already on the default linker path.
+         SKIP_BUILD_RPATH TRUE
+@@ -145,8 +146,8 @@ function(evs_add_plugin name)
+         add_library(${name}_shared SHARED $<TARGET_OBJECTS:${name}_objs>)
+         set_target_properties(${name}_shared PROPERTIES
+             OUTPUT_NAME ${name}
+-            SOVERSION 1
+-            # Look for libevs_core.so.1 beside this plugin, not on the build machine.
++            SOVERSION 3
++            # Look for libevs_core.so.3 beside this plugin, not on the build machine.
+             BUILD_RPATH "\$ORIGIN"
+             INSTALL_RPATH "\$ORIGIN"
+             BUILD_WITH_INSTALL_RPATH TRUE
+@@ -162,7 +163,35 @@ evs_add_plugin(evs_person src/tasks/person/person_plugin.cpp)
+ evs_add_plugin(evs_height_limit
+     src/tasks/height_limit/height_limit_plugin.cpp
+     src/tasks/height_limit/height_limit_mount.cpp)
+-evs_add_plugin(evs_ice src/tasks/winch_ice/winch_ice_plugin.cpp)
++evs_add_plugin(evs_ice
++    src/tasks/winch_ice/winch_ice_plugin.cpp
++    src/tasks/winch_ice/ice_measurement.cpp
++    src/tasks/winch_ice/winch_ice_api.cpp)
++
++if(EVS_WITH_OPENCV)
++    find_package(OpenCV QUIET COMPONENTS core imgproc)
++    if(OpenCV_FOUND)
++        set(EVS_CV_INCLUDE ${OpenCV_INCLUDE_DIRS})
++        set(EVS_CV_LIBS ${OpenCV_LIBS})
++    else()
++        find_path(EVS_CV_INCLUDE opencv2/core.hpp PATH_SUFFIXES opencv4)
++        find_library(EVS_CV_CORE NAMES opencv_core)
++        find_library(EVS_CV_IMGPROC NAMES opencv_imgproc)
++        if(NOT EVS_CV_INCLUDE OR NOT EVS_CV_CORE OR NOT EVS_CV_IMGPROC)
++            message(FATAL_ERROR "EVS_WITH_OPENCV needs target OpenCV core/imgproc headers and libraries")
++        endif()
++        set(EVS_CV_LIBS ${EVS_CV_IMGPROC} ${EVS_CV_CORE})
++    endif()
++    foreach(_name evs_ice evs_height_limit)
++        target_include_directories(${_name}_objs PRIVATE ${EVS_CV_INCLUDE})
++        target_include_directories(${_name} PUBLIC ${EVS_CV_INCLUDE})
++        target_link_libraries(${_name} PUBLIC ${EVS_CV_LIBS})
++        if(EVS_BUILD_SHARED)
++            target_include_directories(${_name}_shared PUBLIC ${EVS_CV_INCLUDE})
++            target_link_libraries(${_name}_shared PRIVATE ${EVS_CV_LIBS})
++        endif()
++    endforeach()
++endif()
+ 
+ # Decoder and ground-mapper objects still register from static initializers
+ # inside libevs. Plugin objects do the same from their own archives. A normal
+@@ -264,147 +293,215 @@ if(EVS_WITH_RGA AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+     endif()
+ endif()
+ 
+-# Build tests only when this is the top-level project.
++# Independent controls; camera tools do not require a model backend.
++option(EVS_BUILD_TESTS "Build regression tests" ON)
++option(EVS_BUILD_TOOLS "Build demos and evaluation tools" ON)
+ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+-    enable_testing()
+-    add_executable(evs_tests tests/test_core.cpp)
+-    evs_link_whole(evs_tests)
+-    add_test(NAME evs_tests COMMAND evs_tests)
+-
+-    # Offline evaluation tool: meaningful for every backend that produces real
+-    # detections -- x86 / onnx (host) and rknn (on the board itself, so the NPU
+-    # numbers come from the same harness as the PC numbers).
+-    if(EVS_BACKEND STREQUAL "x86" OR EVS_BACKEND STREQUAL "onnx" OR
+-       EVS_BACKEND STREQUAL "rknn")
++    if(EVS_BUILD_TESTS)
++        enable_testing()
++        if(UNIX AND NOT APPLE)
++            find_package(Python3 COMPONENTS Interpreter QUIET)
++            if(Python3_Interpreter_FOUND)
++                add_test(NAME evs_camera_cmake COMMAND ${Python3_EXECUTABLE}
++                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_camera_cmake.py
++                    ${CMAKE_CURRENT_SOURCE_DIR} --cmake ${CMAKE_COMMAND})
++            endif()
++        endif()
++        add_executable(evs_tests tests/test_core.cpp)
++        evs_link_whole(evs_tests)
++        add_test(NAME evs_tests COMMAND evs_tests)
++        add_executable(evs_ice_tests tests/test_ice.cpp)
++        target_include_directories(evs_ice_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
++        evs_link_whole(evs_ice_tests)
++        target_compile_definitions(evs_ice_tests PRIVATE EVS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
++        add_test(NAME evs_ice_tests COMMAND evs_ice_tests)
++        if(EVS_WITH_OPENCV)
++            add_executable(evs_ice_allocation_tests tests/test_ice_allocation.cpp)
++            target_include_directories(evs_ice_allocation_tests PRIVATE src ${EVS_CV_INCLUDE})
++            if(EVS_BUILD_SHARED)
++                # Logger/update faults use a generic person task, not an ice bypass.
++                target_sources(evs_ice_allocation_tests PRIVATE $<TARGET_OBJECTS:evs_person_objs>)
++                target_include_directories(evs_ice_allocation_tests PRIVATE include)
++                target_link_libraries(evs_ice_allocation_tests PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++                set_target_properties(evs_ice_allocation_tests PROPERTIES BUILD_RPATH "\$ORIGIN")
++            else()
++                evs_link_whole(evs_ice_allocation_tests)
++            endif()
++            add_test(NAME evs_ice_allocation_tests COMMAND evs_ice_allocation_tests)
++        endif()
++        if(EVS_BUILD_SHARED)
++            add_executable(evs_ice_dynamic_tests tests/test_ice.cpp)
++            target_include_directories(evs_ice_dynamic_tests PRIVATE include src ${EVS_CV_INCLUDE})
++            target_compile_definitions(evs_ice_dynamic_tests PRIVATE EVS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
++            target_link_libraries(evs_ice_dynamic_tests PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++            set_target_properties(evs_ice_dynamic_tests PROPERTIES BUILD_RPATH "\$ORIGIN")
++            add_test(NAME evs_ice_dynamic_tests COMMAND evs_ice_dynamic_tests)
++        endif()
++    endif()
++    if(EVS_BUILD_TOOLS AND EVS_WITH_OPENCV)
++        add_executable(ice_replay tools/ice_replay/main.cpp)
++        target_include_directories(ice_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
++        if(EVS_BUILD_SHARED)
++            # Direct Detector symbols ensure libevs_ice cannot be pruned by --as-needed.
++            target_link_libraries(ice_replay PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++            target_include_directories(ice_replay PRIVATE ${EVS_CV_INCLUDE})
++            set_target_properties(ice_replay PROPERTIES BUILD_RPATH "\$ORIGIN;\$ORIGIN/../lib")
++        else()
++            evs_link_whole(ice_replay)
++        endif()
++        if(EVS_BUILD_TESTS)
++            find_package(Python3 COMPONENTS Interpreter QUIET)
++            if(Python3_Interpreter_FOUND)
++                add_test(NAME evs_ice_cli COMMAND ${Python3_EXECUTABLE}
++                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ice_cli.py
++                    $<TARGET_FILE:ice_replay> ${CMAKE_CURRENT_SOURCE_DIR})
++            endif()
++        endif()
++    endif()
++    if(EVS_BUILD_TOOLS AND (EVS_BACKEND STREQUAL "x86" OR EVS_BACKEND STREQUAL "onnx" OR EVS_BACKEND STREQUAL "rknn"))
+         add_executable(eval_offline tools/eval_offline/main.cpp)
+         evs_link_whole(eval_offline)
+     endif()
+-
+-    # Live-camera bring-up tool (V4L2 capture -> the same pipeline). Linux only:
+-    # this is the one executable that talks to /dev/video*, which the library
+-    # itself never does (frame source stays outside the algorithm library).
+-    if(EVS_BACKEND STREQUAL "x86" OR EVS_BACKEND STREQUAL "onnx" OR
+-       EVS_BACKEND STREQUAL "rknn")
+-        # Linux-only: it includes <linux/videodev2.h> and talks to /dev/video*.
+-        if(NOT WIN32)
+-        add_executable(v4l2_detect tools/v4l2_detect/main.cpp
+-                                tools/v4l2_detect/rga_preprocess.cpp
+-                                tools/v4l2_detect/capture.cpp
+-                                tools/v4l2_detect/detection_shm.cpp)
+-        evs_link_whole(v4l2_detect)
+-        # capture.h / rga_preprocess.h / detection_shm.h live next to the sources.
+-        target_include_directories(v4l2_detect PRIVATE
+-            ${CMAKE_CURRENT_SOURCE_DIR}/tools/v4l2_detect)
+-        # detection_shm.cpp publishes into /dev/shm/detection_boxes, which the
+-        # Qt HMI (qt5_qml_c001 DetectionBoxShmBridge) already reads. shm_open
+-        # and mmap both live in libc on this glibc, so no extra -lrt is needed.
+-        # zlib: main.cpp's PNG encoder (save_png) uses crc32/compress; GStreamer
+-        # also pulls it in transitively, so the reference surfaces at link time.
+-        # The cross toolchain's default sysroot has no libz, so link the board
+-        # sysroot copy by absolute path (same approach as the gstreamer libs).
+-        target_link_libraries(v4l2_detect /home/xp/rk3576/rk3576_linux6.1_release/ubuntu/sysroots/armv8a-linux/usr/lib/aarch64-linux-gnu/libz.so)
+-        # Optional hardware preprocessing (RGA). Kept in the host tool, not in
+-        # the library: the library stays dependency-free and the RGA buffers
+-        # belong to whoever owns the capture buffers.
+-        if(EVS_WITH_RGA)
+-            target_compile_definitions(v4l2_detect PRIVATE EVS_WITH_RGA)
+-            if(EVS_RGA_INCLUDE_DIRS)
+-                target_include_directories(v4l2_detect PRIVATE ${EVS_RGA_INCLUDE_DIRS})
+-            else()
+-                message(WARNING "EVS_WITH_RGA=ON but librga headers not found; "
+-                        "pass -DRGA_API_INCLUDE_DIR=<linux-rga/include>;<linux-rga/im2d_api>")
+-            endif()
+-            if(EVS_RGA_LIB)
+-                target_link_libraries(v4l2_detect ${EVS_RGA_LIB})
+-                # librga 2.x resolves DRM helpers (drmIoctl/drmPrimeHandleToFD)
+-                # from libdrm; link it explicitly or the cross link fails.
+-                # Priority: -DDRM_LIB=... > find in the target sysroot.
+-                if(DEFINED DRM_LIB)
+-                    target_link_libraries(v4l2_detect ${DRM_LIB})
+-                else()
+-                    find_library(EVS_DRM_LIB NAMES drm
+-                                 HINTS ${RGA_LIB_DIR} /usr/lib
+-                                       /usr/lib/aarch64-linux-gnu)
+-                    if(EVS_DRM_LIB)
+-                        target_link_libraries(v4l2_detect ${EVS_DRM_LIB})
+-                    else()
+-                        message(WARNING "librga needs libdrm; pass "
+-                                "-DDRM_LIB=/path/to/libdrm.so (aarch64 target sysroot, "
+-                                "or the board's /usr/lib/libdrm.so.2)")
+-                    endif()
++    if(EVS_BUILD_TOOLS AND EVS_WITH_GSTREAMER AND UNIX AND NOT APPLE)
++        # An explicit target sysroot takes precedence over the host pkg-config.
++        # Keep the legacy argument usable without adding a target libc to -L.
++        if(GSTREAMER_SYSROOT)
++            set(_gst_inc "${GSTREAMER_SYSROOT}/usr/include")
++            set(_gst_lib_paths
++                "${GSTREAMER_SYSROOT}/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
++                "${GSTREAMER_SYSROOT}/usr/lib/aarch64-linux-gnu"
++                "${GSTREAMER_SYSROOT}/usr/lib")
++            unset(EVS_GST_CONFIG_INCLUDE CACHE)
++            find_path(EVS_GST_CONFIG_INCLUDE glibconfig.h
++                PATHS ${_gst_lib_paths} PATH_SUFFIXES glib-2.0/include
++                NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
++            set(EVS_GST_FOUND TRUE)
++            set(_gst_libraries "")
++            foreach(_lib gstapp-1.0 gstbase-1.0 gstreamer-1.0 gobject-2.0 glib-2.0)
++                # Re-resolve on reconfigure if GSTREAMER_SYSROOT has changed.
++                unset(_gst_library CACHE)
++                find_library(_gst_library NAMES ${_lib}
++                    PATHS ${_gst_lib_paths} NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
++                if(NOT _gst_library)
++                    set(EVS_GST_FOUND FALSE)
+                 endif()
+-            else()
+-                message(WARNING "EVS_WITH_RGA=ON but librga not found; "
+-                        "pass -DRGA_LIB=/path/to/librga.so")
++                list(APPEND _gst_libraries "${_gst_library}")
++            endforeach()
++            if(NOT EXISTS "${_gst_inc}/gstreamer-1.0/gst/gst.h" OR
++               NOT EXISTS "${_gst_inc}/glib-2.0/glib.h" OR NOT EVS_GST_CONFIG_INCLUDE)
++                set(EVS_GST_FOUND FALSE)
++            endif()
++            if(NOT EVS_GST_FOUND)
++                message(FATAL_ERROR "Incomplete GSTREAMER_SYSROOT=${GSTREAMER_SYSROOT}: need target GStreamer/glib headers and libraries")
++            endif()
++            add_library(evs_gstreamer INTERFACE)
++            target_include_directories(evs_gstreamer SYSTEM INTERFACE
++                "${_gst_inc}/gstreamer-1.0" "${_gst_inc}/glib-2.0"
++                "${EVS_GST_CONFIG_INCLUDE}")
++            target_link_libraries(evs_gstreamer INTERFACE ${_gst_libraries})
++            message(STATUS "GStreamer target sysroot: ${GSTREAMER_SYSROOT}")
++        else()
++            find_package(PkgConfig QUIET)
++            if(PkgConfig_FOUND)
++                pkg_check_modules(EVS_GST QUIET IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
++            endif()
++            if(EVS_GST_FOUND)
++                add_library(evs_gstreamer INTERFACE)
++                target_link_libraries(evs_gstreamer INTERFACE PkgConfig::EVS_GST)
+             endif()
+         endif()
+-        # ---- GStreamer for the gst/shm capture paths (--shm / --config+--channel
+-        #      gstreamer capture). The cross toolchain's default sysroot
+-        #      (/usr/aarch64-linux-gnu) ships no gstreamer dev packages, so point
+-        #      at the board sysroot that carries gstreamer-1.0 + glib-2.0 headers
+-        #      and the matching target .so's -- the same sysroot the Makefile
+-        #      (evs_build_aarch64) build uses.
+-        if(EVS_WITH_GSTREAMER)
+-            if(DEFINED GSTREAMER_SYSROOT)
+-                set(_gst_sys "${GSTREAMER_SYSROOT}")
+-            else()
+-                set(_gst_sys "/home/xp/rk3576/rk3576_linux6.1_release/ubuntu/sysroots/armv8a-linux")
++        if(EVS_GST_FOUND)
++            find_package(Threads REQUIRED)
++            if(EVS_WITH_OPENCV)
++                add_executable(winch_ice_demo tools/winch_ice_demo/main.cpp tools/v4l2_detect/capture.cpp)
++                target_include_directories(winch_ice_demo PRIVATE tools/v4l2_detect tools/ice_replay)
++                if(EVS_BUILD_SHARED)
++                    target_link_libraries(winch_ice_demo PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++                    target_include_directories(winch_ice_demo PRIVATE ${EVS_CV_INCLUDE})
++                    set_target_properties(winch_ice_demo PROPERTIES BUILD_RPATH "\$ORIGIN;\$ORIGIN/../lib")
++                else()
++                    evs_link_whole(winch_ice_demo)
++                endif()
++                target_link_libraries(winch_ice_demo PRIVATE evs_gstreamer Threads::Threads)
+             endif()
+-            set(_gst_inc "${_gst_sys}/usr/include")
+-            if(EXISTS "${_gst_inc}/gstreamer-1.0/gst/gst.h")
+-                target_include_directories(v4l2_detect PRIVATE
+-                    "${_gst_inc}/gstreamer-1.0"
+-                    "${_gst_inc}/glib-2.0"
+-                    "${_gst_sys}/usr/lib/aarch64-linux-gnu/glib-2.0/include")
+-                # Link the gstreamer/glib shared libs by ABSOLUTE path (not via
+-                # -L). Adding the board sysroot's generic lib dir to -L makes the
+-                # linker pick up the board's libc and break the C-runtime link,
+-                # because the cross toolchain's default sysroot is /usr/aarch64-linux-gnu.
+-                # Absolute paths keep libc coming from the toolchain sysroot while
+-                # still resolving gstreamer at link time (transitive deps resolve
+-                # on the board at runtime).
+-                set(_gst_lib "${_gst_sys}/usr/lib/aarch64-linux-gnu")
+-                target_link_libraries(v4l2_detect
+-                    ${_gst_lib}/libgstreamer-1.0.so
+-                    ${_gst_lib}/libgstapp-1.0.so.0
+-                    ${_gst_lib}/libgstbase-1.0.so
+-                    ${_gst_lib}/libgobject-2.0.so
+-                    ${_gst_lib}/libglib-2.0.so)
+-                # Live camera -> VisionTask. Same capture unit as v4l2_detect,
+-                # but detect() goes through the function plugin.
+-                add_executable(evs_task_cam tools/task_cam/main.cpp
+-                                            tools/v4l2_detect/capture.cpp
+-                                            tools/v4l2_detect/rga_preprocess.cpp)
+-                target_include_directories(evs_task_cam PRIVATE
+-                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/v4l2_detect
+-                    "${_gst_inc}/gstreamer-1.0"
+-                    "${_gst_inc}/glib-2.0"
+-                    "${_gst_sys}/usr/lib/aarch64-linux-gnu/glib-2.0/include")
++            if(NOT EVS_BACKEND STREQUAL "mock")
++                # Legacy cross sysroots also carry zlib for the PNG writer.
++                if(GSTREAMER_SYSROOT)
++                    unset(EVS_CAMERA_ZLIB CACHE)
++                    find_library(EVS_CAMERA_ZLIB NAMES z PATHS ${_gst_lib_paths}
++                        NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
++                    if(NOT EVS_CAMERA_ZLIB)
++                        message(FATAL_ERROR "GSTREAMER_SYSROOT needs target libz for v4l2_detect")
++                    endif()
++                else()
++                    find_package(ZLIB REQUIRED)
++                    set(EVS_CAMERA_ZLIB ZLIB::ZLIB)
++                endif()
++                add_executable(v4l2_detect tools/v4l2_detect/main.cpp tools/v4l2_detect/rga_preprocess.cpp
++                    tools/v4l2_detect/capture.cpp tools/v4l2_detect/detection_shm.cpp)
++                evs_link_whole(v4l2_detect)
++                target_link_libraries(v4l2_detect PRIVATE evs_gstreamer Threads::Threads ${EVS_CAMERA_ZLIB})
++                add_executable(evs_task_cam tools/task_cam/main.cpp tools/v4l2_detect/capture.cpp
++                    tools/v4l2_detect/rga_preprocess.cpp)
++                target_include_directories(evs_task_cam PRIVATE tools/v4l2_detect)
+                 evs_link_whole(evs_task_cam)
+-                target_link_libraries(evs_task_cam
+-                    ${_gst_lib}/libgstreamer-1.0.so
+-                    ${_gst_lib}/libgstapp-1.0.so.0
+-                    ${_gst_lib}/libgstbase-1.0.so
+-                    ${_gst_lib}/libgobject-2.0.so
+-                    ${_gst_lib}/libglib-2.0.so)
++                target_link_libraries(evs_task_cam PRIVATE evs_gstreamer Threads::Threads)
+                 if(EVS_WITH_RGA)
+-                    target_compile_definitions(evs_task_cam PRIVATE EVS_WITH_RGA)
+-                    if(EVS_RGA_INCLUDE_DIRS)
+-                        target_include_directories(evs_task_cam PRIVATE ${EVS_RGA_INCLUDE_DIRS})
++                    if(DEFINED DRM_LIB)
++                        set(EVS_DRM_LIB "${DRM_LIB}")
++                    else()
++                        unset(EVS_DRM_LIB CACHE)
++                        if(GSTREAMER_SYSROOT)
++                            find_library(EVS_DRM_LIB NAMES drm HINTS ${RGA_LIB_DIR}
++                                PATHS ${_gst_lib_paths} NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
++                        else()
++                            find_library(EVS_DRM_LIB NAMES drm
++                                HINTS ${RGA_LIB_DIR} /usr/lib /usr/lib/aarch64-linux-gnu)
++                        endif()
+                     endif()
+-                    if(EVS_RGA_LIB)
+-                        target_link_libraries(evs_task_cam ${EVS_RGA_LIB})
++                    if(NOT EVS_RGA_INCLUDE_DIRS OR NOT EVS_RGA_LIB)
++                        message(WARNING "RGA requested: pass RGA_API_INCLUDE_DIR and RGA_LIB if target headers/libraries are missing")
+                     endif()
+-                    if(DEFINED DRM_LIB)
+-                        target_link_libraries(evs_task_cam ${DRM_LIB})
++                    if(NOT EVS_DRM_LIB)
++                        message(WARNING "librga needs libdrm; pass -DDRM_LIB=/path/to/target/libdrm.so")
+                     endif()
++                    foreach(_tool v4l2_detect evs_task_cam)
++                        target_compile_definitions(${_tool} PRIVATE EVS_WITH_RGA)
++                        if(EVS_RGA_INCLUDE_DIRS)
++                            target_include_directories(${_tool} PRIVATE ${EVS_RGA_INCLUDE_DIRS})
++                        endif()
++                        if(EVS_RGA_LIB)
++                            target_link_libraries(${_tool} PRIVATE ${EVS_RGA_LIB})
++                        endif()
++                        if(EVS_DRM_LIB)
++                            target_link_libraries(${_tool} PRIVATE ${EVS_DRM_LIB})
++                        endif()
++                    endforeach()
+                 endif()
+-            else()
+-                message(WARNING "EVS_WITH_GSTREAMER=ON but gstreamer headers not "
+-                        "found under ${_gst_sys}; pass "
+-                        "-DGSTREAMER_SYSROOT=<board-sysroot> to build v4l2_detect.")
+             endif()
++        else()
++            message(WARNING "GStreamer development files missing: camera tools omitted; library/replay remain available")
+         endif()
+-        endif() # NOT WIN32
+     endif()
+ endif()
++
++include(GNUInstallDirs)
++# Follow GNUInstallDirs for relocatable lib, lib64 and multiarch layouts.
++file(RELATIVE_PATH EVS_INSTALL_LIB_FROM_BIN
++    "${CMAKE_INSTALL_FULL_BINDIR}"
++    "${CMAKE_INSTALL_FULL_LIBDIR}")
++install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
++install(TARGETS evs evs_ice ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++if(EVS_BUILD_SHARED)
++    install(TARGETS evs_shared evs_ice_shared LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
++endif()
++foreach(_tool ice_replay winch_ice_demo)
++    if(TARGET ${_tool})
++        install(TARGETS ${_tool} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++        set_target_properties(${_tool} PROPERTIES INSTALL_RPATH "\$ORIGIN/${EVS_INSTALL_LIB_FROM_BIN}")
++    endif()
++endforeach()
++install(FILES configs/winch_ice.yaml
++    DESTINATION share/edgevision/configs)
++install(FILES docs/winch_ice.md
++    DESTINATION share/edgevision/docs)
+diff --git a/README.md b/README.md
+index 500ab2f..d637a97 100755
+--- a/README.md
++++ b/README.md
+@@ -1,681 +1,271 @@
+-# EdgeVision 边缘视觉框架 —— 使用说明
++# EdgeVision 边缘视觉框架
+ 
+-起重机 AI 安全检测算法库（C++17，无第三方依赖）。同一份代码可以构建在
+-**x86 PC** 上做离线评测，也可以交叉编译后部署到 **RK3576 板子**上跑 NPU 实时检测。
++起重机安全检测算法库，使用C++17。公共执行链与业务插件分别构建，取图、PLC数据、界面、录像和声光控制由宿主负责。
+ 
+----
++当前卷扬冰雪版本提供**模型定位卷扬、OpenCV面积粗估和逐帧接入demo**，根目录已有面向RK3588的`ice_model.rknn`，本批精简尚未重新实机复测。不同功能的输入接口和依赖不同：
+ 
+-## 0. 一句话理解它做什么
+-
+-```
+-相机帧(NV12/RGB) → 预处理(letterbox 到模型输入) → 推理后端(mock/x86+ONNX/RKNN)
+-   → 解码器(flat6 / yolov8) → 人员目标(0..1 归一化框+置信度) → 功能插件(区/规则/告警)
+-```
++| 用途 | 入口 | 依赖与当前能力 |
++|---|---|---|
++| 基础构建及规则回归 | `evs::VisionTask`、mock后端 | C++17与CMake；mock不读取真实模型，推理输出为空 |
++| 卷扬冰雪 | `evs::winch_ice::Detector` | OpenCV core/imgproc；RKNN卷扬框＋HSV整框面积粗估；人工框用于测试 |
++| 人员/高度模型链路 | `evs::VisionTask` | 根据构建选择RKNN或x86/ORT；高度安装姿态仍有未完成规则 |
++| 图片回放 | `ice_replay` | OpenCV；人工框不等于模型检测结果 |
++| 冰雪摄像头demo | `winch_ice_demo` | OpenCV、GStreamer及目标相机驱动/运行插件 |
+ 
+-**边界**：算法库只做上面这一段。取帧、录像、UI、声光、主控联锁**都不在库里**，
+-由宿主程序（如 `qt5_qml_c001`、`tools/linux_source`）负责。
++## 1. 接口与执行流程
+ 
+-`VisionTask` 只调用接口。具体算法按 YAML 在工厂里换成另一份实现。
+-公共部分在 `libevs_core.so`。人员、高度限位、卷扬冰雪各自一个动态库，宿主按需要链接。
++人员/高度的默认推理路径：
+ 
+-| 插口 | 接口 | 工厂 | YAML 选择 |
+-|---|---|---|---|
+-| 功能规则 | `IFunctionPlugin` | `create_function_plugin` | `module_id`：`0x0004`–`0x0006` 人员，`0x0007` 高度限位，`0x0008` 卷扬冰雪 |
+-| 推理后端 | `IInferBackend` | `create_backend` | `backend`：`mock` / `rknn` / `x86` / `onnx` |
+-| 模型输出解析 | `IDetectionDecoder` | `create_decoder` | `output_format`：`flat6` / `yolov8` / `yolo11` / `yolox` |
+-| 地面距离 | `IGroundMapper` | `create_ground_mapper` | 每路相机的 `ground.cameras[].mapper`：`homography` / `crane_pose` |
++```text
++Frame + MachineContext
++  → 预处理 → 推理后端 → 输出行解码 → 原图坐标还原
++  → 地面映射（按配置）→ 功能规则 → Result
++```
+ 
+-`initialize` 按配置把这四样创建好。之后每帧只走推理、解码、地面映射、`plugin->decide()`。
+-功能插件、解码器、地面映射在各自的 `.cpp` 里静态登记，工厂只查注册表。
++卷扬冰雪的客户接口：
+ 
+-| 库 | 内容 |
+-|---|---|
+-| `libevs_core.so` | `VisionTask`、YAML、推理后端、解码器、地面映射、注册表 |
+-| `libevs_person.so` | 人员 `0x0004` / `0x0005` / `0x0006` |
+-| `libevs_height_limit.so` | 高度限位 `0x0007` |
+-| `libevs_ice.so` | 卷扬冰雪 `0x0008` |
++```text
++宿主判断功能开启、工况有效且新鲜、boom_angle == 0、is_working == 1
++  → Detector::detect(ImageData, WinchSnowResult)
++  → RKNN卷扬检测框 + 框内HSV冰雪候选 → 逐框面积占比 → 本帧结果及全局报警
++```
+ 
+-插件库加载时把自己的 `module_id` 写进 `libevs_core.so` 的注册表。宿主要同时链接 `libevs_core.so` 和用到的插件库，只链公共库时对应功能会初始化失败。
+-加一种功能时：在 `src/tasks/` 实现 `IFunctionPlugin`，用 `FunctionPluginRegistration` 登记 `module_id`，并在 `CMakeLists.txt` 里为它增加一个插件库目标。
+-解码器和地面映射仍在 `libevs_core.so` 里，按 `output_format`、`mapper` 登记，不用改工厂文件。
+-链静态库的程序要整库链入 `libevs.a` 和对应插件的 `.a`。推理后端仍由编译选项 `EVS_BACKEND` 选择，不进这张表。
+-摄像头采集和 RGA 预处理在宿主里，不走这套接口。
++冰雪`detect`只有图像入参和结果出参，不接收工况。一个实例绑定一个摄像头，
++每次调用处理当前帧内一个或两个卷扬；任一有效对象超阈值则本帧全局报警。
++没有首次结果锁定、重试上限、重复帧缓存或跨帧报警保持，宿主负责这些业务策略。
++覆盖率为每个框内冰雪像素数除以该框面积，框面积已包含冰雪部分。
+ 
+----
++正式配置为`configs/winch_ice.yaml`、RKNN模型模式，加载根目录`ice_model.rknn`，
++按单类YOLOX的`[1,8400,6]`原始输出接入；重锤模型不能识别卷扬。
++固定区域与人工框只用于测试，加载模型失败不会自动回退。详细接入见[冰雪说明](docs/winch_ice.md)。
+ 
+-## 1. 目录结构
++## 2. 目录与链接方式
+ 
+ | 路径 | 内容 |
+ |---|---|
+-| `include/evs/` | 对外头文件：`frame.h` `vision_task.h` `preprocess.h` `iinfer_backend.h` `detection_decoder.h` `backend_factory.h` `status.h` `log.h` `debug.h` `offline_eval.h` |
+-| `src/core/` | 配置解析、模型注册、解码器、预处理、离线评测引擎、可观测性 |
+-| `src/backend/` | 推理后端：`mock/`（永远编译）、`x86/`（参考检测器 / ONNXRuntime）、`rknn/`（NPU） |
+-| `src/backend/yolo_decode.h` | **PC 与板端共用**的 YOLOv5 解码（通道主序 + 激活方式判别 + NMS + 退化框过滤） |
+-| `src/vision_task.cpp` `src/tasks/` | 功能插件：人员（`person/`）、高度限位骨架（`height_limit/`）、卷扬冰雪骨架（`winch_ice/`） |
+-| `tools/eval_offline/` | 离线精度评测工具（`eval_offline`）+ 示例数据集生成 |
+-| `tools/v4l2_detect/` | 现场取景验证工具（实时管线 / MP4 关键帧 / 共享内存 / 裸 NV12） |
+-| `tools/linux_source/` | Linux 宿主取帧示例说明（**不链进算法库**） |
+-| `configs/` | 任务 YAML：`eval_demo` / `eval_onnx` / `eval_rknn` / `load_near` / `load_under` / `boom_under` / `height_limit` / `winch_ice` |
+-| `eval_onnx_demo/` | 自检数据集（`images/bus.ppm` + `annotations.json`） |
+-| `cmake/` | aarch64 交叉编译工具链文件 |
+-| `docs/` | `api.md`（给宿主开发的 API）、`capture_test.md`（板端四种取帧测试）、`observability.md`（日志/调试）、`x86_offline_eval.md`（离线评测 + ONNX 模式）、`rknn_backend.md`（NPU 交叉编译与真机验证） |
+-
+----
+-
+-## 2. PC（x86）上怎么用
+-
+-### 2.1 零依赖先跑通（推荐第一步）
++| `include/evs/winch_ice.h` | 冰雪客户接口、配置和结果 |
++| `include/evs/vision_task.h`、`frame.h`、`task_config.h` | 通用执行链及任务配置 |
++| `include/evs/testing/ice_replay.h` | 人工框注入及掩码诊断，仅作验证 |
++| `src/core/`、`src/vision_task.cpp` | 配置、模型资源、推理执行链、日志及调试 |
++| `src/tasks/person/`、`height_limit/`、`winch_ice/` | 业务插件；冰雪含面积算法和接口适配 |
++| `src/backend/`、`src/ground/` | 模型后端与地面映射 |
++| `tools/ice_replay/`、`tools/winch_ice_demo/` | 冰雪回放、样例生成及摄像头demo |
++| `tools/eval_offline/`、`tools/v4l2_detect/`、`tools/task_cam/` | 模型离线评测、取景验证及通用任务摄像头宿主 |
++| `configs/winch_ice*.yaml` | 单对象、双对象和人工框示例，现场须重新标定 |
++| `docs/` | API、部署、冰雪实现、测试记录及历史资料 |
+ 
+-不装任何第三方库，用内置参考检测器验证链路与单测。
+-
+-```bash
+-# Linux
+-cmake -S . -B build -DEVS_BACKEND=x86
+-cmake --build build -j
+-./build/evs_tests            # 单测，应输出 PASS=161 FAIL=0
+-
+-# 生成示例数据集并跑一次离线评测
+-python3 tools/eval_offline/gen_fixtures.py       # 产出 fixtures/
+-./build/eval_offline --task configs/eval_demo.yaml --dataset ./fixtures \
+-                     --iou 0.5 --score 0.45 --dump --out ./out
+-```
++| 库 | 内容 |
++|---|---|
++| `libevs_core.so.3` / `libevs.a` | 公共执行链、配置、后端、decoder、地面映射及注册表 |
++| `libevs_person.so.3` / `libevs_person.a` | 人员功能0x0004/0x0005/0x0006 |
++| `libevs_height_limit.so.3` / `libevs_height_limit.a` | 高度限位0x0007 |
++| `libevs_ice.so.3` / `libevs_ice.a` | 卷扬冰雪0x0008 |
+ 
+-```powershell
+-# Windows（MSVC 2022）
+-cmake -S . -B build -DEVS_BACKEND=x86
+-cmake --build build --config Release
+-.\build\Release\evs_tests.exe
+-.\build\Release\eval_offline.exe --task configs\eval_demo.yaml --dataset .\fixtures --out .\out
+-```
++无版本链接名仍是`libevs_core.so`、`libevs_ice.so`等。动态消费者链接公共库与所用插件；仅依赖静态注册的宿主需要保留插件的加载/登记对象。静态消费者应整库链接所用插件归档及`libevs.a`，并链接对应第三方依赖；单独`libevs.a`不包含全部业务插件。
+ 
+-### 2.2 跑真实模型（ONNXRuntime）
++当前ABI为3，公共结构及插件虚表已有变化，宿主、头文件、核心库及相关插件须成套重编。为什么版本后缀变化、如何检查实际加载路径，见[交叉编译说明](docs/cross_compile.md)。`cmake --install`当前安装核心与冰雪库、头文件、冰雪工具及资料；其他插件需按实际产品交付范围另外收集。
+ 
+-```powershell
+-cmake -S . -B build_onnx -DEVS_BACKEND=onnx -DEVS_WITH_ORT=ON `
+-      -DONNXRUNTIME_LIB_DIR=<ort>/lib -DONNXRUNTIME_INCLUDE_DIR=<ort>/include
+-cmake --build build_onnx --config Release
+-```
++## 3. 快速开始
+ 
+-**配置里必须出现这两行**，否则说明 ORT 没接上（会静默退回参考检测器）：
+-
+-```
+--- ONNXRuntime enabled: .../onnxruntime.lib
+--- ONNXRuntime include: .../include
+-```
++### 3.1 PC基础回归：mock、无OpenCV
+ 
+-把 `onnxruntime.dll` 放到 `eval_offline.exe` 同目录，然后：
++在仓库根目录执行，需要C++17编译器与CMake；Python可供附加检查使用：
+ 
+ ```bash
+-./build_onnx/Release/eval_offline --task configs/eval_onnx.yaml \
+-    --dataset ./eval_onnx_demo --iou 0.5 --score 0.25 --out ./out
++cmake -S . -B build_mock -DEVS_BACKEND=mock \
++  -DEVS_WITH_OPENCV=OFF -DEVS_WITH_GSTREAMER=OFF -DEVS_BUILD_TOOLS=OFF
++cmake --build build_mock -j2
++ctest --test-dir build_mock --output-on-failure
+ ```
+ 
+-> 怎么把 ONNX 接到 Windows（含 pip 只有 dll 没有 .lib 的自制导入库办法）见
+-> `docs/x86_offline_eval.md` 的「真实模型（ONNXRuntime）模式」。
++这验证基础执行链和现有规则，不证明真实模型推理或冰雪像素算法可用。以实际CTest结果和日志验收，不固定要求历史某个`PASS`计数。
+ 
+----
++当前`src/backend/x86/x86_backend.cpp`含非文本内容，`EVS_BACKEND=x86/onnx`完整构建存在已复现阻塞。本轮未修复该后端；不把mock构建通过称作x86/ORT真实模型通过。需要该路径时，先恢复正确源文件，再按[离线评测说明](docs/x86_offline_eval.md)验证。
+ 
+-## 3. RK3576 板子上怎么用
+-
+-### 3.1 交叉编译
+-
+-推荐用 Rockchip SDK 自带工具链（138 上路径）：
++示例数据生成脚本实际写入`tools/eval_offline/fixtures`。后端恢复后，离线命令应使用该目录：
+ 
+ ```bash
+-SDK=/home/xp/rk3576/rk3576_linux6.1_release
+-TC=$SDK/prebuilts/gcc/linux-x86/aarch64/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu
+-cat > /home/xp/tc_sdk.cmake <<EOF
+-set(CMAKE_SYSTEM_NAME Linux)
+-set(CMAKE_SYSTEM_PROCESSOR aarch64)
+-set(CMAKE_C_COMPILER   $TC/bin/aarch64-none-linux-gnu-gcc)
+-set(CMAKE_CXX_COMPILER $TC/bin/aarch64-none-linux-gnu-g++)
+-set(CMAKE_FIND_ROOT_PATH $TC/aarch64-none-linux-gnu)
+-EOF
+-
+-cmake -S . -B build_sdk -DCMAKE_TOOLCHAIN_FILE=/home/xp/tc_sdk.cmake \
+-      -DEVS_BACKEND=rknn \
+-      -DRKNN_API_LIB=/home/xp/rknn_sdk/lib/librknnrt.so \
+-      -DRKNN_API_INCLUDE_DIR=/home/xp/rknn_sdk/include
+-cmake --build build_sdk -j4
++python3 tools/eval_offline/gen_fixtures.py
++./build_x86/eval_offline --task configs/eval_demo.yaml \
++  --dataset tools/eval_offline/fixtures --iou 0.5 --score 0.45 --dump --out ./out
+ ```
+ 
+-`librknnrt.so` 从板子上拉（**不要**用 SDK 里那份，版本比板端旧）：
+-`cat /usr/lib/librknnrt.so` → 存到编译机；`rknn_api.h` 取自 rknn-toolkit2。
+-
+-### 3.2 部署与运行
++上面的`build_x86`须已用x86后端成功构建；当前阻塞未解除前，该命令不作为可通过的快速开始。
+ 
+-```bash
+-# 推三个可执行文件到板子
+-scp build_sdk/{evs_tests,eval_offline,v4l2_detect} root@192.168.11.1:/root/evs/
+-scp configs/eval_rknn.yaml                   root@192.168.11.1:/root/evs/
+-scp -r eval_onnx_demo                        root@192.168.11.1:/root/evs/
+-```
++### 3.2 Ubuntu板端或PC：冰雪像素算法与demo
+ 
+-板端三种用法：
++Ubuntu板可以直接原生编译，不要求先交叉编译。以下依赖安装命令仅适用于具备相应软件源和权限的Ubuntu环境：
+ 
+ ```bash
+-cd /root/evs
+-
+-# ① 单测（板端 137 项，x86/ONNX 专属段不参与）
+-./evs_tests                                  # PASS=137 FAIL=0
+-
+-# ② 离线精度评测（与 PC 同一份数据集，可直接对比）
+-./eval_offline --task eval_rknn.yaml --dataset ./eval_onnx_demo \
+-               --iou 0.5 --score 0.25 --out ./out
+-
+-# ③ 现场摄像头检测
+-v4l2-ctl -d /dev/video0 --set-fmt-video=width=1280,height=720,pixelformat=NV12
+-v4l2-ctl -d /dev/video0 --stream-mmap=3 --stream-count=1 --stream-to=/root/evs/cap.nv12
+-./v4l2_detect --task eval_rknn.yaml --raw /root/evs/cap.nv12 \
+-              --raw-width 1280 --raw-height 720 --frames 5 --score 0.25 \
+-              --save /root/evs/shot.ppm
++sudo apt-get update
++sudo apt-get install build-essential cmake pkg-config python3 libopencv-dev \
++  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
++  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
++cmake -S . -B build_ice -DCMAKE_BUILD_TYPE=Release \
++  -DEVS_BACKEND=mock -DEVS_WITH_OPENCV=ON -DEVS_WITH_GSTREAMER=ON
++cmake --build build_ice -j2
++ctest --test-dir build_ice --output-on-failure
++cmake --install build_ice --prefix "$PWD/package_ice"
+ ```
+ 
+-> 板端 root 密码为空，请先 `passwd root` 加固。
++这里的mock构建仅供内部插件像素回归，正式Detector和demo始终要求卷扬模型，须用RKNN构建，见[冰雪编译说明](docs/winch_ice.md#编译与运行)。摄像头demo需要GStreamer开发依赖；缺失时CMake可能省略摄像头工具，回放与库仍可构建。跨架构部署前核对`file`和`ldd`，PC x86_64库不能直接放到ARM板运行。
+ 
+----
++合成像素和人工框测试已移到 `tests/`，由CTest调用内部插件，不再通过正式库切换模式，
++也不随安装包交付。真实模型图片/相机demo的编译、调用和限制见[冰雪说明](docs/winch_ice.md)。
+ 
+-## 4. 在自己的程序里调用
++## 4. 冰雪客户API示例
+ 
+-### 4.0 分工：哪些你要写，哪些库已经写了
+-
+-| 环节 | 谁负责 | 说明 |
+-|---|---|---|
+-| 打开相机 / V4L2 / AHD 解码 / RTSP / dma-buf 循环 | **你（宿主）** | 库不链接任何采集库，也不碰 `/dev/video*` |
+-| 把像素填进 `evs::Frame` | **你（宿主）** | 就 6 行赋值 |
+-| `camera_id` 与 `video_channel` 对账 | 库 | 不匹配会丢帧并打日志 |
+-| 预处理（NV12/BGR→RGB、letterbox 到模型输入） | 库 | 输出 packed NHWC uint8 |
+-| 推理（mock / ONNXRuntime / RKNN） | 库 | 模型文件与 runtime 由库管理 |
+-| 后处理（NMS、通道主序解码、坐标回映射原图） | 库 | PC 与板端共用同一份代码 |
+-| 功能规则（区域/连续帧/告警/高度限位状态） | 库 | `person_plugin` |
+-| 日志、p95 延迟、输入张量落盘取证 | 库 | `docs/observability.md` |
+-| 把结果接到 UI / 声光 / 录像 / 上位机 | **你（宿主）** | 读 `Result` 即可 |
+-
+-**为什么这样切**：算法库要能在 x86 上零依赖编译做离线评测（没有摄像头），
+-也要能在板子上不绑 Qt/GStreamer/mpp 才方便交叉编译。取帧、录像、UI、声光是
+-产品形态的一部分，留在宿主。
+-
+-### 4.1 最小宿主骨架（这就是你要写的全部）
++以下程序示范两参API的缓冲区填写与结果读取，运行目录为仓库根目录，须使用RKNN构建。
++输入为合成像素，模型可能检不出卷扬；实际宿主应填入相机图像，不接真实PLC：
+ 
+ ```cpp
+-#include "evs/vision_task.h"
+-#include "evs/log.h"
+-#include <chrono>
++#include "evs/winch_ice.h"
++#include <iostream>
++#include <vector>
+ 
+ int main() {
+-    // ① 初始化一次：读 YAML、加载模型、装配预处理/解码/规则
+-    evs::VisionTask task;
+-    if (task.initialize("/root/cameras/eval_rknn.yaml") != 0u) return 1;
+-
+-    evs::MachineContext ctx{};          // 工况：MCU/PLC 每帧更新
+-    ctx.context_valid = true;
+-    ctx.hoist_radius = 55.f;
+-
+-    // ② 取帧循环（这一段就是"输入层"，由你实现）
+-    //    板端可用 v4l2-ctl / V4L2 mmap / camera_shm_multi / rtspsrc ...
+-    while (running) {
+-        int w = 0, h = 0, stride = 0;
+-        const uint8_t* data = fetch_next_frame(&w, &h, &stride);   // ← 你的取帧函数
+-        if (!data) continue;
+-
+-        // ③ 填 Frame：库只认这一个结构
+-        evs::Frame frame{};
+-        frame.camera_id    = 0;
+-        frame.width        = w;
+-        frame.height       = h;
+-        frame.stride       = stride;
+-        frame.format       = evs::PixelFormat::NV12;   // 或 RGB / BGR
+-        frame.data         = data;
+-        frame.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+-                                std::chrono::steady_clock::now().time_since_epoch()).count();
+-
+-        // ④ 一次调用，拿到结果
+-        evs::Result res{};
+-        if (task.detect(frame, ctx, res) != 0u) continue;
+-
+-        // ⑤ 消费结果（接 UI / 声光 / 录像）
+-        for (const auto& t : res.targets) {
+-            int x1 = int(t.x * w), y1 = int(t.y * h);
+-            int x2 = int((t.x + t.w) * w), y2 = int((t.y + t.h) * h);
+-            draw_box(x1, y1, x2, y2, t.class_id, t.confidence);      // ← 你的绘制
+-        }
+-        if (res.alarm != evs::AlarmState::None) trigger_alarm(res);
+-    }
+-    task.release();
+-    return 0;
++    using namespace evs::winch_ice;
++    WinchSnowConfig config;
++    if (load_config("configs/winch_ice.yaml", config) != 0)
++        return 1;
++    Detector detector;
++    if (detector.initialize(config) != 0)
++        return 2;
++
++    std::vector<uint8_t> pixels(200 * 100 * 3, 60);
++    for (int y = 0; y < 100; ++y)
++        for (int x = 0; x < 60; ++x)
++            for (int c = 0; c < 3; ++c)
++                pixels[(y * 200 + x) * 3 + c] = 230;
++    ImageData image;
++    image.data = pixels.data();
++    image.width = 200;
++    image.height = 100;
++    image.channels = 3;
++    image.timestamp_ms = 0; // 诊断信息，重复时间戳也处理当前图像
++    image.size_bytes = pixels.size();
++
++    WinchSnowResult result;
++    const auto status = detector.detect(image, result);
++    // 库只返回本帧；宿主自行决定是否保持历史报警。
++    if (result.alert_level == AlertLevel::ALERT_WARN)
++        std::cout << "alarm\n";
++    std::cout << "status=" << status << " objects=" << result.objects.size() << '\n';
++    return status ? 3 : 0;
+ }
+ ```
+ 
+-`fetch_next_frame()` 就是你要写的全部"输入层"——如果你的系统已经有取帧
+-（`qt5_qml_c001` 的 `camera_shm_multi`），通常只是把它的缓冲指针赋给 `frame.data`。
+-可运行的完整示例见 `tools/v4l2_detect/main.cpp`（含 V4L2 取帧 + 画框 + 存图 + 计时）。
+-
+-### 4.2 方式 A：`VisionTask`（推荐，功能完整）
++保存为`ice_example.cpp`后，在常见`lib`安装布局下动态链接：
+ 
+-```cpp
+-#include "evs/vision_task.h"
+-
+-evs::VisionTask task;
+-if (task.initialize("configs/eval_rknn.yaml") != 0u) { /* 处理错误 */ }
++```bash
++c++ -std=c++17 ice_example.cpp -Ipackage_ice/include -Lpackage_ice/lib \
++  -levs_ice -levs_core '-Wl,-rpath,$ORIGIN/../lib' -o package_ice/bin/ice_example
++./package_ice/bin/ice_example
++```
+ 
+-evs::Frame frame{};
+-frame.camera_id = 0;
+-frame.width = 1280; frame.height = 720; frame.stride = 1280;
+-frame.format  = evs::PixelFormat::NV12;      // 或 RGB / BGR
+-frame.data    = nv12_ptr;                    // 宿主自己的缓冲
+-frame.timestamp_us = now_us();
++若自定义了`CMAKE_INSTALL_LIBDIR`，请相应调整链接路径和RUNPATH。生产宿主先根据功能开关、真实工况有效性与时效、零角度及工作状态决定是否调用；`detect`不自行检查这些工况。调用期间图像内存必须有效。
+ 
+-evs::MachineContext ctx{};                   // 来自 MCU/PLC 的工况
+-ctx.context_valid = true;
+-ctx.hoist_radius = 55.f;
++RGB/BGR使用3通道；NV12须显式指定格式、1通道、偶数宽高和合法行距，UV紧随Y且使用同一行距。灰度尚不支持。`size_bytes=0`表示调用者自行保证缓冲区足够；非零时库校验长度。
+ 
+-evs::Result res{};
+-const uint32_t rc = task.detect(frame, ctx, res);
+-// res.targets[i]: class_id / confidence / x,y,w,h（0..1，相对原图）
+-// res.alarm  : 是否告警；res.limit_state : 高度限位状态
+-```
++结果分别读取调用status、逐对象valid/status及本帧alert_level。无框返回空对象，
++不可观测对象比例无效，不使用上一帧结果。对象框和本帧编号均在结果中返回；
++没有跨帧主副卷扬身份跟踪。完整说明见[冰雪说明](docs/winch_ice.md)。
+ 
+-`initialize()` 失败会自动回滚，不留半初始化状态；重复调用不会重复加载模型。
+-`updateConfig()` 只能改阈值/区域/开关，**拒绝**改 backend 与 model。
++## 5. 人员/高度的通用宿主接入
+ 
+-### 4.3 方式 B：只用三件套（取景验证、单测、自研管线）
++通用入口为`VisionTask::detect(const Frame&, const MachineContext&, Result&)`。`Frame`使用原图像素；工况由宿主真实采集并按帧更新。下面是可编译的接入函数示例，任务初始化、采集和实际绘制/声光由宿主实现：
+ 
+ ```cpp
+-#include "evs/preprocess.h"
+-#include "evs/backend_factory.h"
+-#include "evs/detection_decoder.h"
+-
+-auto backend = evs::create_backend("rknn");           // mock / x86 / onnx / rknn
+-backend->load("/root/cameras/yolov5s-640-640_rk3576.rknn", 60);
+-backend->configure_input(640, 640);                  // 模型输入尺寸
+-
+-evs::Preprocessor pre;
+-evs::PreprocessConfig pc{};
+-pc.input_width = 640; pc.input_height = 640;
+-pc.letterbox = true; pc.target_format = evs::PixelFormat::RGB;
+-pre.configure(pc);
+-
+-auto dec = evs::create_decoder("yolov8", /*person_class_id=*/0, /*num_classes=*/80);
+-
+-std::vector<uint8_t> input;  evs::PreprocessMap map{};
+-std::vector<float>   tensor; std::vector<evs::Target> targets;
+-pre.run(frame, input, map);
+-backend->infer(input, tensor);
+-dec->decode(tensor, 0.25f, targets);
+-for (auto& t : targets) evs::map_target_to_original(map, t, 1280, 720);
++#include "evs/vision_task.h"
++#include <iostream>
++
++void process_person_frame(evs::VisionTask& task, const evs::Frame& frame,
++                          const evs::MachineContext& context) {
++    evs::Result result;
++    if (task.detect(frame, context, result) != 0)
++        return; // 此函数面向普通人员结果，冰雪使用专用结果结构
++    for (const auto& target : result.targets) {
++        const int left = int((target.x - target.w / 2) * frame.width);
++        const int top = int((target.y - target.h / 2) * frame.height);
++        const int right = int((target.x + target.w / 2) * frame.width);
++        const int bottom = int((target.y + target.h / 2) * frame.height);
++        std::cout << left << ',' << top << ',' << right << ',' << bottom << '\n';
++        // 绘制前按宿主画布裁剪边界。
++    }
++    if (result.alarm == evs::AlarmState::Alarm)
++        std::cout << "alarm\n"; // 宿主在这里接声光/联锁
++    else if (result.alarm == evs::AlarmState::LogOnly)
++        std::cout << "log only\n";
++}
+ ```
+ 
+-`tools/v4l2_detect/main.cpp` 就是这个模式的完整可运行样例，直接抄最快。
+-
+-### 4.4 接入 Qt/QML 宿主（qt5_qml_c001）
+-
+-- 算法库是**纯 C++ 静态库**（`libevs.a`），不依赖 Qt / GStreamer / mpp；
+-- 取帧用 `camera_shm_multi` 的 `start_camera` / `CameraManager`，把 NV12 缓冲填进 `Frame`；
+-- 帧分发按 `video_channel`：0x0004 人形、0x0005 load-under、0x0006 长焦×2、0x0007 高度限位、0x0008 卷扬×2；
+-- 录像/声光在宿主侧做，不要塞进算法库。
+-
+----
+-
+-## 5. 输入层、取图与配置（换摄像头 / 换模型）
++`Target.x/y`为归一化中心坐标，`w/h`为宽高。人员任务可配置多路相机，但地面距离需要对应相机标定；改变分辨率、机位或视场时，应核对mapper的标定尺寸与缩放策略。冰雪一个实例仅允许单相机，按模型框统计；更换相机后需重新初始化并核对模型定位效果。
+ 
+-### 5.1 输入层是怎么定义的
++`tools/task_cam`走通用任务规则；`tools/v4l2_detect`主要用于取景、预处理、推理和画框，不调用VisionTask人员告警。库不打开相机，也不链接Qt/GStreamer/RGA；顶层CMake会为宿主工具查找相应依赖。
+ 
+-算法库的**唯一输入契约**是 `evs::Frame`（`include/evs/frame.h`），库自己不碰任何设备：
+-
+-| 字段 | 含义 | 谁负责填 |
+-|---|---|---|
+-| `camera_id` | 相机编号，用来和 YAML 的 `video_channel` 对账 | 宿主 |
+-| `width` / `height` | **原始帧真实尺寸**（不是模型输入尺寸） | 宿主 |
+-| `stride` | 每行字节数；NV12 传 `width`，RGB/BGR 传 `width*3` | 宿主 |
+-| `format` | `NV12` / `RGB` / `BGR` | 宿主 |
+-| `data` | 像素缓冲，只保证在 `detect()` 返回前有效 | 宿主 |
+-| `dma_fd` | 可选，dma-buf fd（`-1` 表示没有） | 宿主 |
+-| `timestamp_us` | 采集时间戳，用于日志/取证 | 宿主 |
+-
+-`Preprocessor` 把 `Frame` 转成模型输入，行为由 YAML 推导（`src/vision_task.cpp`）：
+-
+-```
+-YAML input_width/input_height/letterbox/input_format
+-   → PreprocessConfig{ input_width, input_height, letterbox, target_format }
+-   → 输出 packed uint8 NHWC（input_w*input_h*3）
+-   → 同时产出 PreprocessMap（scale/pad），用于把框映射回原图坐标
+-```
++完整通用API、像素布局及工况约定见[host_api.md](docs/host_api.md)和[api.md](docs/api.md)。
+ 
+-要点：**原始分辨率可以任意**（例如 1280×720），预处理会 letterbox 到模型输入
+-（默认灰边 114），检测框再通过 `map_target_to_original()` 还原回原图 0..1 坐标。
+-所以换分辨率**不需要改 YAML**，只要 `Frame` 填对即可。
++## 6. 配置、换模型和热更新
+ 
+-### 5.2 怎么取图（库外，三种实测路径）
++YAML是仓库受限子集，不是通用YAML引擎。以下为主要分组，完整冰雪字段及合法值见[冰雪说明](docs/winch_ice.md)：
+ 
+-| 场景 | 做法 |
++| 分组 | 主要字段 |
+ |---|---|
+-| 板端快速验证 | `v4l2-ctl` 抓一帧 → `v4l2_detect --raw cap.nv12` |
+-| 板端直接取流 | `v4l2_detect --device /dev/video0`（需内核头与目标板一致，见 `docs/rknn_backend.md` §7） |
+-| 正式产品（Qt/QML） | `camera_shm_multi` 的 `start_camera`/`CameraManager` 取帧 → 填 `Frame` → `detect` |
++| 任务及相机 | `task`、`module_id`、`camera.video_channel`、`camera.image_width/image_height`；兼容`video_channel/camera_ids` |
++| 模型 | `backend`、平铺`Model_path`或字符串`model`；支持块式`model.path/input_width/input_height/warmup`，也兼容平铺尺寸/预热 |
++| 推理输入/解码 | `input_format`、`letterbox`、`output_format`、`person_class_id`、`decoder_classes` |
++| 阈值/区域 | `confidence_threshold`、`score_threshold`、`thresholds.score`、`nms_threshold`、`zone.*` |
++| 地面映射 | `ground.enabled/reference/distance_mode/cameras`、每路mapper/标定及`params` |
++| 工况/性能 | `on_missing_context`、`work_motion_epsilon`、`init_timeout_s`、`latency_budget_ms`、`min_fps`、`npu_core_mask` |
++| 高度 | `start_angle_deg`、`stop_angle_deg`、`min_frames`、`still_timeout_s`、`basic_boom_only` |
++| 冰雪 | `ice_saturation_max`、`ice_value_min`、`area_ratio`（模型定位始终启用） |
++| 其他 | `debug.*`、`canary.canary_enabled`；字段可加载不表示库实现全部宿主灰度发布业务 |
+ 
+-### 5.3 换摄像头
++客户配置仍有`model_config`与`detect_config`，适配层映射到通用TaskConfig当前的平铺模型字段。本次未进行两者公开布局统一；详见[配置结构分析](卷扬冰雪_API接口对照与倍率接口参考.md)。
+ 
+-**换物理摄像头 = 改宿主取图代码，YAML 基本不用动**。YAML 里唯一与相机相关的是 `camera.video_channel`：
++### 模型输出边界
+ 
+-```yaml
+-camera:
+-  video_channel: [2, 3]   # 这个任务处理哪几路；frame.camera_id 不在列表 → detect 返回
+-                       # InvalidCameraIndex 并打日志（该帧被丢弃）
+-```
+-
+-- 同一个任务实例可以处理多路：每路各调一次 `detect(frame, ...)` 即可
+-  （`video_channel: [2,3]` 就是长焦 ×2 这种用法）。
+-- 分辨率/位深变化（1080p→720p、RGB→NV12）只要 `Frame` 填对就自动适配。
+-- `/dev/videoN` 的设备名、曝光、白平衡**不在 YAML 里**，那是宿主/驱动的职责。
+-
+-### 5.4 换模型
+-
+-换模型 = **改 YAML 的这几个字段**（改完需要重新 `initialize()`，`updateConfig()` 会拒绝）：
+-
+-```yaml
+-backend: rknn                                  # mock | x86 | onnx | rknn
+-Model_path: "/root/cameras/yolov5s-640-640_rk3576.rknn"
+-input_width: 640            # 必须等于模型真实输入宽
+-input_height: 640
+-input_format: rgb           # 训练时的通道顺序：rgb / bgr
+-output_format: yolov8       # 原始检测头=yolov8；单类 6 浮点=flat6
+-decoder_classes: 80         # 必须等于模型真实类别数（COCO=80）
+-person_class_id: 0          # 只要这一类；-1 = 全要
+-confidence_threshold: 0.25
+-```
+-
+-**换模型的检查清单**
+-
+-1. `decoder_classes` = 模型类别数（写错 → 行宽对不上，解码器**静默返回 0 个框**，不报错）；
+-2. `output_format`：模型输出原始检测头 → `yolov8`；输出已解码好的 `[cls,conf,x,y,w,h]` → `flat6`；
+-3. `person_class_id` 超出类别范围 → 同样是 0 框（先确认这两个再怀疑模型）；
+-4. `input_width/height` 与模型一致（不一致会静默拉伸/letterbox，精度下降）；
+-5. `input_format` 与训练一致（`rgb`/`bgr` 反了 → 框还在但类别乱）；
+-6. RKNN 模型若把 Detect 后处理烧进了图里 → 用 `EVS_YOLO_HEAD_MODE=2` 或保持自动判别；
+-7. 换完后跑一次 `eval_offline` 对比 P/R，并用 `EVS_YOLO_DUMP=1` 人工核对几个框。
+-
+-**自训 2 类（人/安全帽）模型的 YAML 示例**
+-
+-```yaml
+-task: person_helmet
+-module_id: 0x0004
+-camera:
+-  video_channel: [0]
+-backend: rknn
+-Model_path: "/root/cameras/person_helmet_int8.rknn"
+-output_format: yolov8
+-person_class_id: 0            # 0=人；安全帽那一类要用另一个任务或 -1 全要
+-decoder_classes: 2            # ← 关键：2 类，不是 80
+-input_width: 640
+-input_height: 640
+-input_format: rgb
+-letterbox: true
+-thresholds:
+-  score: 0.4
+-```
+-
+-> 注意：自训模型换了输入尺寸/锚框/类别数，解码器的常量也要跟着改
+-> （`src/backend/yolo_decode.h` 里的 `kClasses`、`kInputSize`、`anchors_for_stride`），
+-> 这些是**编译期常量，不能靠 YAML 配置**。
+-
+-### 5.5 YAML 支持的全部键
++`output_format=yolov8/yolo11/yolox`选择上层行解码器。当前这些decoder接收`[N,4+C]`中心框及类别分数行矩阵。冰雪RKNN路径使用专用适配：`yolox`按stride=8/16/32解码`[N,5+C]`，置信度取obj×class；`yolov8`接收已解码框；`flat6`为`[class,confidence,center_x,center_y,width,height]`。其他任务的RKNN原始头仍由`src/backend/yolo_decode.h`处理，不能将任意原始头直接交给行decoder。
+ 
+-| 分组 | 键 |
+-|---|---|
+-| 标识 | `task` `module_id` `video_channel` |
+-| 后端/模型 | `backend` `model` `init_timeout_s` `npu_core_mask` `warmup` |
+-| 输入 | `input_width` `input_height` `input_format` `letterbox` |
+-| 解码 | `output_format` `person_class_id` `decoder_classes` |
+-| 阈值/规则 | `confidence_threshold` `nms_threshold` `zone.{type,radius_m,half_angle_deg,consecutive_frames,has_occlusion,occ_axis_deg,occ_half_deg}` |
+-| 工况联动 | `on_missing_context` `work_motion_epsilon` |
+-| 性能 | `latency_budget_ms` `min_fps` |
+-| 高度限位 0x0007 | `start_angle_deg` `stop_angle_deg` `min_frames` `still_timeout_s` `basic_boom_only` |
+-| 卷扬冰 0x0008 | `area_ratio` `exit_on_alarm` |
+-| 调试 | `debug.{enabled,dump_input,dump_meta,dump_on_alarm_only,dump_every_n,dump_dir,max_dumps}` |
+-
+-**不能用 YAML 配的**：摄像头设备名与曝光/白平衡、模型内部结构（类别数、锚框、输入尺寸
+-是编译期常量）、解码公式细节、letterbox 填充值（固定 114）、NPU 亲和以外的算子调度。
+-
+-### 5.6 运行时热更新（`updateConfig`）
+-
+-| 允许热改 | 必须重启（会被拒绝，返回 `NotSupported`） |
+-|---|---|
+-| `confidence_threshold` / `nms_threshold` | `backend`、`Model_path` |
+-| `zone.*` 区域规则 | `output_format`、`decoder_classes`、`person_class_id` |
+-| `on_missing_context`、`work_motion_epsilon` | `input_width/height`、`input_format`、`letterbox` |
+-| `latency_budget_ms` | `video_channel`、`module_id` |
+-| `debug.*`（现场排障开关） | |
+-
+----
+-
+-## 6. 环境变量速查
+-
+-| 变量 | 作用 |
+-|---|---|
+-| `EVS_LOG_LEVEL` | 0=off 1=error 2=warn 3=info 4=debug 5=trace |
+-| `EVS_LOG_FILE` | 日志落盘路径 |
+-| `EVS_YOLO_HEAD_MODE` | 0/1/2 强制解码模式（默认自动判别，见下） |
+-| `EVS_YOLO_DUMP=1` | 打印每个解码框（PC↔NPU 逐框比对用） |
+-| `EVS_RKNN_INPUT_SCALE` | 仅 float32 模型输入：1.0=0..255，0.00392157=0..1 |
+-| `EVS_RKNN_DEBUG=1` | 打印每个输出头的 dims 与前 6 个值 |
+-| `EVS_NPU_CORE_MASK` | NPU 亲和：0=自动 2=core1 4=core2 3=core0+1 7=三核 |
+-| `EVS_RGA_CSC` | RGA 预处理策略：`0`=纯 RGA（默认，最快）…`8`=CPU 转换+RGA 缩放（最严格）。见第 10 章 |
+-| `EVS_DUMP_BENCH=/tmp/pp` | `--bench` 时额外导出 `/tmp/pp_rga.ppm` 与 `/tmp/pp_cpu.ppm`，用于逐像素比对 |
+-| `EVS_RGA_NOPAD=1` | 诊断：强制 letterbox 偏移为 0，验证 `dst_off` 是否被遵守 |
+-
+-> **为什么需要 `EVS_YOLO_HEAD_MODE`**：部分 RKNN 模型转换时已把 Detect 后处理
+-> （sigmoid / 框解码）烧进图里，输出不再是原始 logits。解码器按取值分布自动判别
+-> （原始 logits 仅约 2% 落在 [0,1]，融合后约 100%），必要时可手动强制。
+-
+----
+-
+-## 7. 常见问题
+-
+-| 现象 | 原因与处理 |
+-|---|---|
+-| 配置里没打印 `ONNXRuntime enabled:` 却以为在跑真模型 | `find_library` 的结果变量被预先 `set()` 过 → 跳过搜索。删掉预置变量（**结果变量绝不能预先赋值**） |
+-| exe 双击闪退、无输出 | Windows 下缺 `onnxruntime.dll`，放到 exe 同目录 |
+-| 板端 `S_FMT_MPLANE ... Invalid argument` | 编译机 videodev2 头与运行内核 ioctl 号不匹配 → 用 `v4l2-ctl --stream-to` + `v4l2_detect --raw` |
+-| 检测框大得离谱 / 一堆误检 | 模型已融合后处理但解码器当 logits 算 → 查 `EVS_YOLO_HEAD_MODE`；先跑 `EVS_RKNN_DEBUG=1` 看输出头数值 |
+-| 摄像头链路 fps 低 | 预处理已优化到 51.7 ms（定点双线性 + 行裁剪 + BT.601 查表），整帧 81 ms ≈ 12.3 fps；再压需要 RGA（要求 dma-buf，见 docs/rknn_backend.md §7） |
+-| 交叉编译报 `stray '\24' in program` | 上传的源码还是 DRM 密文 → 上传前校验文件头可打印 |
++`decoder_classes`可改变上层行宽，但当前原始头辅助层仍有`kClasses=80`、`kInputSize=640`及锚框常量。自训2类原始头、其他尺寸/布局不能只改YAML就认定支持，需适配后端并验证。`nms_threshold`目前可加载和保存，但原始头NMS使用辅助层常量；冰雪模型模式单独使用配置的类别、置信度和NMS阈值筛选卷扬框，HSV负责像素分类。
+ 
+----
++### 配置生命周期
+ 
+-## 8. 已验证数据（2026-10-07）
++已初始化实例重复`initialize`返回成功并保留原配置。更换模型或安装参数应先`release`再`initialize`，或新建实例；修改磁盘YAML不会自动生效。
+ 
+-| 场景 | 结果 |
++| 入口 | 当前行为 |
+ |---|---|
+-| PC 单测（x86 / onnx 构建） | PASS=161 FAIL=0 |
+-| PC 真实模型 `yolov5s.onnx`（自检集，IoU 0.5 / score 0.25） | precision 1.000 / recall 1.000 / mAP 1.000 |
+-| RK3576 单测（rknn 构建） | PASS=137 FAIL=0 |
+-| RK3576 真实模型 `yolov5s-640-640_rk3576.rknn`（同一自检集） | precision 1.000 / recall 0.667 / mAP 0.667，单帧 ≈31 ms |
+-| PC↔NPU 逐框比对 | 6 框 IoU 0.77~1.00（均值 0.88），NPU 零误检 |
+-| 摄像头实时检测（1280×720 NV12） | 正确检出画面中的人；优化后 预处理 51.7 ms + NPU 29.4 ms ≈ 81 ms/帧（12.3 fps） |
+-| `yolo11.rknn`（YOLOv11 解耦头，9 输出） | bus 帧检出 4 人 + 1 巴士，与参考工程 `yolov5_object_detect` 同一份模型结果一致 |
+-| YOLOv11 实时检测（1280×720，`--rga`） | 预处理 **3.1 ms**（CPU 52.9 ms，**15~17×**）+ 推理 75.7 ms ≈ 78.8 ms/帧（**12.7 fps**） |
+-| RGA vs CPU 逐像素比对 | maxdiff=104 / meandiff=2.83（插值差异）；检测框差 ≈7 px，bus 帧目标数一致 |
+-
+-> 自检集 = 同一模型在 Python 侧的解码结果当基准，证明的是**移植一致性**，不是检测精度。
+-> 验收数字请换成现场人工标注集后用同一条命令重跑。
+-
+----
+-
+-## 9. YOLOv11 解耦头（`yolo11.rknn`）
+-
+-板端 `yolo11.rknn` 与参考工程 `X:\apps\yolov5_object_detect` 是同一份模型
+-（md5 `8df71b48a8888b364689d238c083ca40`）。它和 yolov5s 的关键差别是**头部结构**：
+-
+-| | yolov5s | yolo11 |
+-|---|---|---|
+-| 输出张量 | 3 个 `[1,255,S,S]` | **9 个**：每尺度 reg/cls/obj |
+-| 通道含义 | `3×(5+80)` 混合 | reg `[1,64,S,S]`（4 边 × 16 DFL bin）、cls `[1,80,S,S]`、obj `[1,1,S,S]` |
+-| 网格 | 80/40/20 | 80/40/20（stride 8/16/32） |
+-| 框解码 | anchor + exp() | **DFL-16**（16 个 bin 做 softmax 期望） |
+-| 分数 | `obj × cls` | `sigmoid(obj) × cls` |
+-
+-解码实现在 `src/backend/yolo_decode.h`（`collect_v11_scales` / `decode_v11_scale`），
+-`decode_heads()` 会**按张量形状自动识别**布局，在 YOLOv5 anchor 路径之前分派，
+-所以同一个二进制可以同时跑 yolov5s 和 yolo11，只由 YAML 的 `output_format` 决定：
+-
+-```yaml
+-output_format: yolo11      # yolov5s 用 yolov8（行矩阵语义）
+-person_class_id: 0         # 只检人；-1 = 全类
+-```
+-
+-### 移植时踩到的两个坑
+-
+-**① 解码层次放错了。** 后端 `rknn_backend` 在返回给上层之前**已经**调用过
+-`yolo::decode_heads()`，交给 decoder 的是 `[N, 4+80]` 的行矩阵，而不是 9 张原始
+-张量。在 `detection_decoder.cpp` 里按 `reg/cls/obj` 去切那段内存，只会得到
+-`targets=0`（连 `--score 0.01` 都是 0，因为每格算出来的分数都一样）。
+-YOLOv11 的解码必须放在 `yolo_decode.h` 里、和YOLOv5 的解码并列。
+-
+-**② 该模型的 sigmoid 已被烧进图里。** 实测 `cls` 全部落在 `[0.0018, 0.88]`、
+-`obj` 落在 `[0.146, 0.69]`，即到达时**已经是概率**。若照参考工程再套一层
+-sigmoid，所有分数会被压向 `sigmoid(x)≈0.5`，表现为**全图 conf 恒等于 0.2685**、
+-框满天飞。`v11_fused_activation()` 默认按"已含激活"处理，需要原始 logits 时设
+-`EVS_YOLO11_SIGMOID=1`。（参考工程读的是 fp16 原始张量，所以那边必须套 sigmoid；
+-而 `rknn_outputs_get(want_float=1)` 给的是 SDK 反量化后的值，两者不能照抄。）
+-
+-板端验收（`bus.nv12`，`--score 0.25`）：
+-
+-```
+-全类    targets=5 -> class=0 x4 (0.88/0.84/0.82/0.62) + class=5 bus (0.75)
+-只检人  targets=4 -> 0.882 / 0.836 / 0.816 / 0.622
+-阈值扫描 0.15→5  0.25→5  0.5→5  0.7→4     （单调不增 = 解码正确）
+-```
+-
+-> **快速自查**：若任意阈值下 `targets` 都不变，尤其是 conf 全是同一个数值，
+-> 基本就是上面第 ② 条（分数被压平），而不是坐标变换或 NPU 的问题。
+-
+----
+-
+-## 10. RGA 硬件预处理（已调通）
+-
+-`--rga` 把 letterbox + 缩放 + NV12→RGB 交给 RGA，预处理从 52.9 ms 降到 3.1 ms。
+-
+-```bash
+-# 实时相机 + RGA（板端 192.168.11.1，root 空密码）
+-cd /root/evs
+-./v4l2_detect_evs_rga --task eval_yolo11.yaml --config camera_config.json \
+-  --channel 0 --frames 20 --score 0.25 --rga
+-#   [gst] capturing /dev/video0 1280x720 @25fps
+-#   frame 0: 1280x720 -> model 640x640, targets=1, pre[rga]=3.69ms infer=84.68ms
+-#   avg over 20 frames: pre=3.06ms infer=75.72ms total=78.79ms (12.7 fps)
+-
+-# RGA 与 CPU 同帧逐像素比对
+-./v4l2_detect_evs_rga --task eval_yolo11.yaml --raw cap.nv12 \
+-  --raw-width 1280 --raw-height 720 --frames 1 --bench
+-#   [bench] rga=3.46ms cpu=53.33ms speedup=15.4x maxdiff=104 meandiff=2.833
+-```
+-
+-### 三个必须知道的坑
+-
+-**① CMake 默认会链到错的库。** `EVS_WITH_RGA=ON` 时若不显式指定，
+-`find_library` 会命中 `/home/xp/rknn_sdk/lib/librga.so`（**94 KB 精简版**）：
+-符号齐全，但 `imresize` 直接返回 `IM_STATUS_FAILED`（该 SDK 里 `0 = FAILED`、
+-`1 = SUCCESS`），日志表现为
+-
+-```
+-[rga] falling back to CPU: imresize failed status=0
+-```
+-
+-正确做法是指向 buildroot sysroot 里的真库（201 KB）与配套拆分头：
+-
+-```bash
+-cmake -S . -B build_rga -DEVS_BACKEND=rknn -DEVS_WITH_RGA=ON \
+-  -DRGA_LIB=/home/xp/evs_build_aarch64/third_party/rga/lib/librga.so \
+-  -DRGA_API_INCLUDE_DIR=<SDK>/ubuntu/sysroots/armv8a-linux/usr/include/rga
+-```
+-
+-> 头文件必须与库配套：混用 rknn_sdk 的新版单头会出现
+-> `dst handle=0x7f` + `Failed to call RockchipRga interface`。
+-
+-**② `rga_buffer_t::wstride` 的单位是像素，不是字节。** 给 RGB888 传
+-`out_w*3`（1920）会让库按 1920 像素/行推进 → 三倍行溢出 → 图像撕裂
+-**并且破坏源帧**（640×640 输入下直接 `munmap_chunk(): invalid pointer` 崩溃）。
+-正确：传 `out_w`（640）。
++| 冰雪`updateConfig(DetectConfig)` | 更新面积/HSV/置信度/NMS阈值，非法参数拒绝；下一次detect生效 |
++| 冰雪模型、输入布局与相机通道 | 释放后重新初始化 |
++| 通用`updateConfig`的backend/Model_path/module_id/decoder绑定参数变化 | 返回NotSupported，需释放重建 |
++| 普通推理路径的输入宽高、input_format、letterbox、video_channel变化 | 当前存在返回0但忽略这些变更的遗留行为；需释放重建，不能按返回0认定它们已生效 |
++| 通用区域、工况策略、ground、调试等允许字段 | 按通用API热更新；参数/mapper校验失败保留旧策略 |
+ 
+-**③ `dst_off` 是字节偏移，不能和 wstride 共用同一个变量。**
+-`dst_off = pady * stride`，若 stride 已是像素(640)，则
+-`140 × 640 = 89600` 字节 = **第 46 行**，整帧错位 94 行。症状非常有迷惑性：
+-`meandiff≈44`、颜色整体发暗发绿、检测框位置完全对不上——看起来像色域问题，
+-其实是几何错位（用 `EVS_RGA_NOPAD=1` 让偏移归零，内容立刻回到第 0 行即验证）。
+-现在代码里明确分成 `dst_stride_px`（给 librga）和 `dst_row_bytes`（自己寻址）。
++## 7. 日志、部署及已知限制
+ 
+-> 顺带结论：librga **会忽略** `imcvtcolor` 的 CSC mode 参数（单独传
+-> `IM_YUV_TO_RGB_BT601_LIMIT` 或只设 `color_space_mode` 都不生效），
+-> 所以色域差异无法通过 API 调整；修好 ② ③ 之后纯 RGA 就与 CPU 基准一致。
++日志可通过`Logger::set_sink`交给宿主，产品落盘由宿主负责；仓库原有文件/缓存调试能力仍保留。写记录的异常已隔离，设置/查询仍可能分配；实际客户日志SDK尚未接入，不承诺零动态分配。接口见[日志说明](docs/api.md#10-日志)。
+ 
+-### `EVS_RGA_CSC` 策略（1280×720 → 640×640 实测）
++常用诊断变量按路径使用：
+ 
+-| 值 | 策略 | 预处理 | meandiff | 说明 |
+-|---|---|---|---|---|
+-| **0（默认）** | 纯 RGA：imresize + imcvtcolor | **3.5 ms** | 2.83 | 生产默认 |
+-| 6 | RGA 缩放 NV12，CPU 转 RGB | 11 ms | 1.56 | |
+-| 7 | CPU 全分辨率 CSC → RGA 缩放 RGB | 8.8 ms | 2.77 | |
+-| 8 | CPU 全分辨率 CSC + RGA 缩放 RGB | 41 ms | **1.31** | 像素最严格时用 |
+-
+-### 排查手段
+-
+-| 手段 | 用途 |
++| 变量 | 用途 |
+ |---|---|
+-| `--bench` | 同帧跑 RGA + CPU，输出耗时 / maxdiff / meandiff / speedup |
+-| `EVS_DUMP_BENCH=/tmp/pp` | 导出两路预处理 PPM，PC 侧逐像素与位移分析 |
+-| `EVS_RGA_CSC=0..8` | 换预处理策略标定 |
+-| `EVS_RGA_NOPAD=1` | 验证 `dst_off` 是否被遵守 |
+-| `EVS_RKNN_DEBUG=1` | 打印每个 RKNN 输出的 dims / 类型 / 前 6 个值 |
+-
+-### 已知限制
++| `EVS_LOG_LEVEL`、`EVS_LOG_FILE` | 记录级别及可选调试文件 |
++| `EVS_YOLO_HEAD_MODE` | 原始头激活解释：0原始、1类别已激活、2全部已激活；默认自动判别 |
++| `EVS_YOLO11_SIGMOID`、`EVS_YOLOX_SIGMOID` | 对应模型头分数解释，需结合实际导出契约 |
++| `EVS_RKNN_DEBUG`、`EVS_RKNN_INPUT_SCALE`、`EVS_NPU_CORE_MASK` | RKNN输出、float输入量纲及NPU亲和 |
++| `EVS_RGA_CSC`、`EVS_RGA_NOPAD`、`EVS_DUMP_BENCH` | 宿主RGA诊断，不属于冰雪像素算法入口 |
+ 
+-- `--rga-fd`（dma-buf 零拷贝）依赖 rkcif 的 DMABUF 输出能力，该板卡为 0，暂不可用；
+-  且 `EVS_RGA_CSC=8` 需要 CPU 侧帧，fd 路径不支持。
+-- 当前主项是推理（75.7 ms），相机 25 fps、实际 12.7 fps，仍会丢帧。
++当前仍未处理或未验收：
+ 
+----
++- x86/onnx后端非文本源码阻塞，普通推理的部分热更新字段被忽略。
++- CMake的RGA自动查库被预定义空变量跳过；当前需显式`RGA_LIB`和匹配头文件。此说明不代表已修复自动分支或验收硬件。
++- 卷扬模型已到位，RK3588板端验收、灰度和影子候选输出未完成；本版只提供本帧编号；HSV对高光/阴影雪等有已知局限。
++- 目标Ubuntu板、相机真实stride/offset、PLC时钟、准确率、端到端时延及长期运行需现场记录。回放和主机测试不替代这些验收。
+ 
+-## 11. 板端验证速查
+-
+-```bash
+-cd /root/evs
+-# 0 前置
+-ls -l v4l2_detect_evs v4l2_detect_evs_rga /root/cameras/yolo11.rknn bus.nv12
+-
+-# 1 离线单帧  期望 targets=4（4 个人）
+-./v4l2_detect_evs --task eval_yolo11.yaml --raw bus.nv12 \
+-  --raw-width 640 --raw-height 640 --frames 1 --score 0.25
+-
+-# 2 全类      期望 targets=5（4 人 + 1 巴士）
+-./v4l2_detect_evs --task eval_yolo11_all.yaml --raw bus.nv12 \
+-  --raw-width 640 --raw-height 640 --frames 1 --score 0.25
+-
+-# 3 阈值单调性 期望 5 5 5 4（不变=分数被压平）
+-for s in 0.15 0.25 0.5 0.7; do
+-  printf 'score=%s -> ' $s
+-  ./v4l2_detect_evs --task eval_yolo11_all.yaml --raw bus.nv12 \
+-    --raw-width 640 --raw-height 640 --frames 1 --score $s 2>&1 | grep -o 'targets=[0-9]*' | head -1
+-done
+-
+-# 4 实时相机  期望 1280x720 -> model 640x640
+-timeout 60 ./v4l2_detect_evs_rga --task eval_yolo11.yaml \
+-  --config camera_config.json --channel 0 --frames 20 --score 0.25 --rga
+-
+-# 5 RGA/CPU 等价性  期望 maxdiff<120 meandiff<4
+-./v4l2_detect_evs_rga --task eval_yolo11.yaml --raw cap.nv12 \
+-  --raw-width 1280 --raw-height 720 --frames 1 --bench
+-
+-# 6 yolov5s 回归（注意 output_format 必须是 yolov8，yolov5_raw 是非法名）
+-./v4l2_detect_evs --task eval_rknn_v8.yaml --raw bus.nv12 \
+-  --raw-width 640 --raw-height 640 --frames 1 --score 0.25
+-```
++[交叉编译与ABI说明](docs/cross_compile.md)区分Ubuntu原生编译和目标sysroot交叉编译。旧工具别名、固定路径及2026-10-07性能/精度记录已保存在[历史联调资料](docs/history/README_20261007_inference_notes.md)，不作为当前版本的测试通过证明。
+ 
+----
++## 8. 后续工作与验证记录
+ 
+-## 12. 下一步
++优先在RK3588上核验卷扬模型的预处理与参考输出，完成板端独立像素真值验证；灰度及影子输出另行安排；按客户实际接口接日志SDK。公共构建和配置遗留问题需分别修源码并增加对应回归。
+ 
+-1. 现场人工标注集（替换自检集，出真实 P/R）；
+-2. 推理侧优化（当前 75.7 ms 是主项，RGA 已把预处理压到 3 ms）；
+-3. `--rga-fd` 零拷贝路径（需 rkcif 支持 DMABUF 输出）；
+-4. helmet 类模型（当前 yolov5s 是 COCO 80 类，不含安全帽）；
+-5. int8 模型召回损失评估（必要时换更高精度 rknn 模型或混合量化）。
+\ No newline at end of file
++冰雪功能、上板步骤和待验收范围见[完整说明](docs/winch_ice.md)。各轮实际运行的检查见[验收记录](docs/winch_ice_acceptance.md)，其中历史轮次与后续文档修订分开记录，不把未执行项目写为通过。
+diff --git a/configs/winch_ice.yaml b/configs/winch_ice.yaml
+index e4c7aab..69183a0 100644
+--- a/configs/winch_ice.yaml
++++ b/configs/winch_ice.yaml
+@@ -1,15 +1,23 @@
++# RK3588 winch model, run from the repository root. Board validation is pending.
+ task: winch_ice
+ module_id: 0x0008
+ camera:
+-  video_channel: [0, 1]
+-
+-backend: mock
+-Model_path: models/winch_ice.rknn
+-output_format: yolov8
+-person_class_id: -1
++  video_channel: [0]
++ground:
++  enabled: false
++backend: rknn
++Model_path: ice_model.rknn
+ input_width: 640
+ input_height: 640
++input_format: rgb
++letterbox: true
++# Packed raw YOLOX [1,8400,6]: tx,ty,tw,th,objectness,class probability.
++# Strides 8/16/32, grid + exp decode; confidence = objectness * class probability.
++output_format: yolox
++decoder_classes: 1
++winch_class_id: 0
+ confidence_threshold: 0.45
+-
+-area_ratio: 0.3
+-exit_on_alarm: true
++nms_threshold: 0.5
++area_ratio: 0.5
++ice_saturation_max: 80
++ice_value_min: 180
+diff --git a/docs/api.md b/docs/api.md
+index 217e02f..e8bea11 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -5,7 +5,7 @@
+ 现场更换摄像头、标定、距离算法或模型时，直接对照
+ [现场修改对照说明](site_customization.md)。
+ 
+-库是 C++17 静态库 `libevs.a`。它接收一帧图像和一份工况，返回检测框和告警。它不打开相机，不链接 GStreamer、Qt、RGA。
++库使用C++17，提供公共核心和独立业务插件的静态/动态构建。libevs.a仅为公共静态核心，所用功能还需对应插件；当前动态ABI为3。通用VisionTask接收图像和工况，返回检测框和告警；卷扬冰雪的客户Detector接口只接收图像，由宿主决定是否调用。它不打开相机，不链接GStreamer、Qt、RGA；冰雪面积算法依赖OpenCV core/imgproc。
+ 
+ ---
+ 
+@@ -14,13 +14,13 @@
+ | 入口 | 头文件 | 适合 |
+ |---|---|---|
+ | `VisionTask` | `evs/vision_task.h` | 产品功能。读 YAML，跑预处理、推理、解码，再交给功能插件 |
+-| `IFunctionPlugin` | `evs/function_plugin.h` | 人员 / 高度限位 / 卷扬冰雪。`VisionTask` 在解码后只调 `plugin->decide` |
++| `IFunctionPlugin` | `evs/function_plugin.h` | 人员 / 高度限位 / 卷扬冰雪。`VisionTask` 调 `plugin->decide`；冰雪在模型定位后使用原图计数 |
+ | `IGroundMapper` | `evs/ground_mapper.h` | 单路摄像头像素脚点到统一地面 X/Y 的可替换算法 |
+ | 三件套 | `preprocess.h`、`backend_factory.h`、`detection_decoder.h` | 现场看框、离线评测、自研后处理。不跑 `person_decide` |
+ 
+ `tools/v4l2_detect` 走的是三件套，再把框写到 `/detection_boxes`。它不调用 `VisionTask`，所以界面上没有吊钩圆或大臂扇形告警。
+ 
+-一次 `VisionTask::detect` 的顺序：
++默认推理模式下 `VisionTask::detect` 的顺序：
+ 
+ ```
+ camera_id 过滤
+@@ -37,6 +37,8 @@ camera_id 过滤
+ 
+ ---
+ 
++冰雪始终加载卷扬模型，模型框还原到原图后由 `WinchIcePlugin` 计算各框比例。`inference_enabled:false` 和旧ROI模式已拒绝。详见 [winch_ice.md](winch_ice.md)。
++
+ ## 2. 最小调用
+ 
+ ```cpp
+@@ -85,7 +87,7 @@ task.release();
+ | 载荷下方 | `0x0005` | 另一个实例 |
+ | 大臂下方 | `0x0006` | 另一个实例 |
+ | 高度限位 | `0x0007` | 另一个实例。检测仍是骨架 |
+-| 卷扬结冰 | `0x0008` | 另一个实例。检测仍是骨架 |
++| 卷扬结冰 | `0x0008` | 一个相机内1～2个对象共用一个实例；完整表面 + HSV 粗估，需要 OpenCV |
+ 
+ 库不打开相机，也不读中控。调用 `detect` 的宿主每帧做两件事：
+ 
+@@ -145,7 +147,7 @@ task.release();
+ | `alarm` | `None` / `LogOnly` / `Alarm` |
+ | `targets` | 本帧目标。坐标已经映回原图 |
+ | `limit_state` | 高度限位预留。当前人员任务恒为 0 |
+-| `ice_ratio` | 卷扬冰雪预留。当前恒为 0 |
++| `ice_ratio` | 仅单对象有效本帧结果为0..1，双对象/未知为-1；读取逐对象valid/status及测量时间戳 |
+ | `camera_blind` | 光学致盲预留。当前判断是占位，恒为 false |
+ | `camera_channel` | 32 位。每个字节一路摄像头，低字节是本帧 `camera_id`，其余字节为 `0xFF` |
+ 
+@@ -211,7 +213,7 @@ create_ground_mapper(const CameraGroundConfig& cfg);
+ | `0x4002` | `ConfigParse` | YAML 字段非法，例如未知的 `reference` / `distance_mode` |
+ | `0x6001` | `StorageRead` | 模型文件读不到 |
+ 
+-各功能自己的错误用 `make_module_error(module, code)`，低 16 位落在 `0xC000`–`0xFFFF`。目前五个功能还没有单独的业务错误，告警仍看 `Result.alarm`，不占用这段。
++各功能自己的错误用 `make_module_error(module, code)`，低 16 位落在 `0xC000`–`0xFFFF`。冰雪对象的不可观测/缺框使用0x0008C001/0x0008C002，保存在逐对象status；告警本身看alert_level或Result.alarm，不是错误码。
+ 
+ ---
+ 
+@@ -238,7 +240,7 @@ void release();
+ - `on_missing_context`、`work_motion_epsilon`
+ - `ground` 整块（mapper 类型、矩阵、安装参数、通用 `params`、参考点和距离模式）
+ - 高度限位：`start_angle_deg`、`stop_angle_deg`、`min_frames`、`still_timeout_s`、`basic_boom_only`
+-- 卷扬冰雪：`area_ratio`、`exit_on_alarm`
++- 卷扬冰雪：`area_ratio`、`ice_saturation_max`、`ice_value_min`；下一次调用生效；模型、输入尺寸及相机需释放重建。冰雪不保持报警。
+ 
+ 人员策略热更新后，下一帧的 `person_decide` 使用新阈值。连续帧计数不会因为 `configure` 清零，只有 `release` 会 `reset`。
+ 
+@@ -248,9 +250,9 @@ void release();
+ - `output_format`、`person_class_id`、`decoder_classes`
+ - `module_id`
+ 
+-输入尺寸、letterbox、`video_channel` 也不在热更新列表里。要改这些，重新建一个 `VisionTask`。
++输入尺寸、input_format、letterbox、video_channel也不在热更新列表里。普通推理路径当前会返回0但忽略这些变更，不能将成功返回当成这些字段已生效；应release后initialize或重新建一个VisionTask。冰雪模型参数与相机有额外拒绝检查，详见冰雪契约。本轮文档修正没有改变该既有源码行为。
+ 
+-`0x0007` 由 `HeightLimitPlugin` 写 `limit_state`：模型没有开关框时为 1，有框之后由 `judge_switch_mount()` 用 OpenCV 写成 2 或 3。几何规则还没写时这一步返回 0。`0x0008` 由 `WinchIcePlugin` 写 `ice_ratio`，仍是占位 0。
++`0x0007` 由 `HeightLimitPlugin` 写 `limit_state`：模型没有开关框时为 1，有框之后由 `judge_switch_mount()` 用 OpenCV 写成 2 或 3。几何规则还没写时这一步返回 0。`0x0008` 由 `WinchIcePlugin` 对模型检测框分别测量框内HSV候选覆盖率；兼容Result.ice_ratio仅单对象有效时有值，双对象用lastWinchSnowResult或Detector读取。极暗/均匀饱和白在对象status写0x0008C001，调用级可成功；报警只属于当前帧。详见 [卷扬冰雪接入](winch_ice.md)。
+ 
+ ### 调试
+ 
+@@ -269,16 +271,15 @@ bool saveLastInput(const std::string& path) const;  // 仅 debug.enabled 时缓
+ 
+ ## 6. 任务 YAML
+ 
+-解析器支持标量、一层嵌套 map、行内整数数组，以及专用的
+-`ground.cameras` 映射列表。示例见 `configs/load_near.yaml`、`configs/eval_rknn.yaml`。
++解析器是受限YAML子集，支持标量、一层嵌套map、行内数组，以及专用ground.cameras映射列表；支持块式model.path/input_width/input_height/warmup。示例见configs/load_near.yaml、configs/eval_rknn.yaml及configs/winch_ice.yaml，不是任意YAML结构都可使用。
+ 
+ | 键 | 作用 |
+ |---|---|
+ | `task` | 名字，仅标识 |
+-| `module_id` | `0x0004` 载荷附近，`0x0005` 载荷下方，`0x0006` 大臂下方 |
++| `module_id` | `0x0004`载荷附近、`0x0005`载荷下方、`0x0006`大臂下方、`0x0007`高度、`0x0008`冰雪 |
+ | `camera.video_channel` | 接受的相机号，如 `[0]`。旧键 `camera_ids` 仍可读 |
+ | `backend` | `mock`、`x86`、`onnx`、`rknn`。必须是本次编译编进去的那种 |
+-| `Model_path` | 模型文件。相对进程当前目录，例如 `yolox.rknn`。以 `/` 开头时按绝对路径打开。旧键 `model` 仍可读 |
++| `Model_path` | 模型文件。相对进程当前目录，例如yolox.rknn。也支持model字符串或model.path；冰雪同文件别名冲突时拒绝 |
+ | `output_format` | `flat6`、`yolov8`、`yolo11`（别名 `yolo11_raw`、`yolo11_decoup`）、`yolox` |
+ | `person_class_id` | `yolov8` / `yolo11` 只保留该类。`-1` 保留全部 |
+ | `decoder_classes` | 行宽 = 4 + 这个值。COCO 为 80 |
+@@ -287,7 +288,7 @@ bool saveLastInput(const std::string& path) const;  // 仅 debug.enabled 时缓
+ | `letterbox` | true：保持比例，灰边 114。false：拉伸 |
+ | `confidence_threshold` | 置信度下限。旧键 `thresholds.score`、`score_threshold` 仍可读 |
+ | `on_missing_context` | `alarm` 或 `log_only`。只对 `0x0004` 生效 |
+-| `work_motion_epsilon` | 角速度超过该值算作业，默认 0.1 |
++| `work_motion_epsilon` | 保留的兼容字段，默认0.1；当前人员作业判断未使用该数值 |
+ | `ground.enabled` | 是否执行地面映射 |
+ | `ground.reference` | `camera_origin` 保持旧参考原点；`task` 使用插件提供的 task 参考点 |
+ | `ground.distance_mode` | `legacy_forward_y` 保持旧 Y 距离；`radial` 计算二维距离 |
+@@ -434,7 +435,7 @@ RGA 预处理不在 `libevs` 里。它在 `tools/v4l2_detect/rga_preprocess.h`
+ 
+ ## 10. 日志
+ 
+-进程级单例 `evs::Logger`。
++进程级单例 `evs::Logger`。日志写入边界包含格式化、缓存和宿主sink异常隔离，异常时可丢弃该条日志，不改变已提交业务的成功结果。配置/查询接口不作无异常承诺。现有文件输出保留用于调试，产品接入由宿主sink接收并负责落盘，客户SDK的实际适配需按其真实接口完成。
+ 
+ ```cpp
+ evs::Logger::instance().set_level(evs::LogLevel::Info);
+@@ -478,7 +479,12 @@ evs::Logger::instance().set_sink([](evs::LogLevel, const std::string& line) {
+ ## 12. 现在不要依赖的行为
+ 
+ - 未配置 `ground:` 或使用 `reference: camera_origin` 时，兼容距离仍是单应矩阵的 `Wy`，不是吊钩投影。`crane_pose` mapper 公式尚未实现，选中后距离为 -1。`reference: task` 下吊钩目前仅按局部 +Y 放置，因为 `MachineContext` 还没有绝对回转角。
+-- `0x0007` 已分成模型检开关和 OpenCV 判断安装姿态。安装姿态的几何规则还没写。`0x0008` 的 `ice_ratio` 仍是占位 0。
++- `0x0007` 已分成模型检开关和 OpenCV 判断安装姿态。安装姿态的几何规则还没写。`0x0008` 使用RKNN卷扬框＋OpenCV整框面积粗估，专用模型及现场精度待验收。
+ - 光学致盲不触发。
+ - `Frame::dma_fd` 还没有接到库内预处理。
+ - `qnn` 后端不存在。
++
++冰雪正式路径始终使用RKNN定位卷扬，并以
++各框面积为分母计算覆盖率。`ground.enabled:false`，单相机，每次detect处理当前帧。
++`inference_enabled:false`仅用于模块0x0008的固定区域或人工框测试，不自动回退。
++公开结果去掉会话完成/次数字段并增加每对象框，详情见[winch_ice.md](winch_ice.md)。
+diff --git a/docs/capture_test.md b/docs/capture_test.md
+index 7b12737..fb74996 100644
+--- a/docs/capture_test.md
++++ b/docs/capture_test.md
+@@ -42,7 +42,7 @@ cd /tmp
+ 
+ 预期末行 `FAIL=0`。x86/ONNX 那段在这块板上会跳过，所以 `PASS` 会少于 203。单测走 mock 后端，不加载 `/root/cameras/yolo11.rknn`，也不占相机。
+ 
+-人员策略现在会随 `updateConfig` 在下一帧生效，连续帧计数不会被这次更新清掉。高度限位 `0x0007`、卷扬冰雪 `0x0008` 仍是骨架，`limit_state` 和 `ice_ratio` 为 0。
++人员策略现在会随 `updateConfig` 在下一帧生效，连续帧计数不会被这次更新清掉。高度限位 `0x0007` 的安装姿态仍是骨架；卷扬冰雪 `0x0008` 可使用 [固定 ROI 图像粗估](winch_ice.md)，需 OpenCV、单路相机和实际表面标定。
+ 
+ ### 0.2 取帧推理
+ 
+@@ -164,3 +164,5 @@ frame 0: 1200x1920 -> model 640x640, ...
+ | `[raw]` | 裸 NV12 文件 |
+ 
+ 四种入口最后都打印同一行结果：`frame N: WxH -> model 640x640, targets=K`。这一行只说明推理跑完，不代表走了 `VisionTask` 的人员告警。人员、高度限位、卷扬冰雪用第 0.1 节的 `evs_tests`。
++
++卷扬冰雪现有独立 `winch_ice_demo`（实时摄像头）与 `ice_replay`（图片/人工框序列），不再依赖v4l2_detect展示面积或会话结果。取图、工况模拟与真实工况接入、Ubuntu板编译步骤见 [冰雪完整说明](winch_ice.md)。
+diff --git a/docs/cross_compile.md b/docs/cross_compile.md
+index a93382c..b9e545c 100644
+--- a/docs/cross_compile.md
++++ b/docs/cross_compile.md
+@@ -1,100 +1,102 @@
+-# 交叉编译说明
++# Ubuntu板部署、交叉编译与ABI说明
+ 
+-在 x86_64 编译机上编出 RK3576 板子用的 aarch64 程序。算法库和宿主分开编。
++板端是Ubuntu，可以原生编译，也可以在PC上使用匹配目标Ubuntu的工具链和sysroot交叉编译。开发机修改源码不会自动更新板上程序；PC x86_64产物不能直接放到ARM板运行。
+ 
+-工具链是本机的 `g++-aarch64-linux-gnu`。没有时先安装：
++## 1. 冰雪测试路径：Ubuntu原生编译
++
++在目标Ubuntu板的仓库根目录执行。依赖安装、完整命令及摄像头/PLC验收见[冰雪说明](winch_ice.md)。已有OpenCV/GStreamer开发依赖时：
+ 
+ ```bash
+-sudo apt-get install -y g++-aarch64-linux-gnu
++cmake -S . -B build_ice_ubuntu -DCMAKE_BUILD_TYPE=Release \
++  -DEVS_BACKEND=mock -DEVS_WITH_OPENCV=ON -DEVS_WITH_GSTREAMER=ON
++cmake --build build_ice_ubuntu -j2
++ctest --test-dir build_ice_ubuntu --output-on-failure
++cmake --install build_ice_ubuntu --prefix "$PWD/package_ice"
++file package_ice/lib/libevs_core.so.3 package_ice/lib/libevs_ice.so.3
++ldd package_ice/bin/ice_replay
++ldd package_ice/bin/winch_ice_demo
+ ```
+ 
+-链接用的运行库在编译机上要有一份，板子上运行时用板子自己的同名库。
++这里mock构建只用于固定区域/人工框测试。正式卷扬模型模式需EVS_BACKEND=rknn和匹配RKNN SDK，完整命令见[冰雪说明](winch_ice.md)。摄像头demo另需GStreamer及设备插件；缺少开发依赖时CMake可能省略该工具，应核对构建目标和安装产物。若修改了CMAKE_INSTALL_LIBDIR，请相应调整上面的lib路径。
+ 
+-| 用途 | 编译机路径 |
+-|---|---|
+-| RKNN 运行库 | `/home/xp/rknn_sdk/lib/librknnrt.so` |
+-| RKNN 头文件 | `/home/xp/rknn_sdk/include/rknn_api.h` |
+-| GStreamer、glib、libdrm | `/home/xp/rk3576/rk3576_linux6.1_release/ubuntu/sysroots/armv8a-linux` |
+-| RGA 库（约 201 KB，2.1.0） | `/home/xp/evs_build_aarch64/third_party/rga/lib/librga.so` |
+-| RGA 头文件（同时有 `rga.h` 和 `im2d.h`） | 上面 sysroot 的 `usr/include/rga` |
++OpenCV关闭时，冰雪初始化明确返回NotSupported。当前安装规则收集核心库和冰雪库、匹配头文件、冰雪工具、配置及资料；其他插件不在该安装集合内，不能把冰雪包当成所有功能插件的完整产品包。
+ 
+-`librknnrt.so` 要从板子 `/usr/lib/librknnrt.so` 拉下来。SDK sysroot 里那份是 2.0.0b0，和板端 2.3.0 不一致。RGA 不要用 `/home/xp/rknn_sdk/lib/librga.so`，那是精简版，缩放会失败。
++## 2. 模型后端：交叉编译
+ 
+-## 1. 算法库
++工具链、RKNN头文件/运行库以及OpenCV、GStreamer等依赖必须匹配目标Ubuntu的架构和运行时。不能仅凭同为aarch64，就认定Buildroot与Ubuntu的库兼容。
+ 
+-在 `edgevision` 目录执行。只编库，不编 GStreamer 和 RGA。取流和 RGA 属于宿主。
++仓库提供cmake/aarch64-linux-gnu.toolchain.cmake，使用发行版的aarch64-linux-gnu工具链；实际SDK路径和查找根需要按现场环境配置。以下是**RKNN基础库、不启用OpenCV或摄像头工具**的示例，替换其中SDK路径后执行：
+ 
+ ```bash
+-cd /home/xp/rk3576/new_qt5_qml/edgevision
+-
+ cmake -S . -B build_board \
+   -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.toolchain.cmake \
+   -DEVS_BACKEND=rknn \
+-  -DRKNN_API_LIB=/home/xp/rknn_sdk/lib/librknnrt.so \
+-  -DRKNN_API_INCLUDE_DIR=/home/xp/rknn_sdk/include \
+-  -DEVS_WITH_GSTREAMER=OFF \
+-  -DEVS_WITH_RGA=OFF
+-
+-cmake --build build_board -j4 --target evs evs_shared evs_person_shared evs_height_limit_shared evs_ice_shared
++  -DRKNN_API_LIB=/path/to/ubuntu-target-sdk/lib/librknnrt.so \
++  -DRKNN_API_INCLUDE_DIR=/path/to/rknn/include \
++  -DEVS_WITH_OPENCV=OFF -DEVS_WITH_GSTREAMER=OFF -DEVS_WITH_RGA=OFF \
++  -DEVS_BUILD_TESTS=OFF -DEVS_BUILD_TOOLS=OFF
++cmake --build build_board -j4 --target \
++  evs evs_shared evs_person_shared evs_height_limit_shared evs_ice_shared
+ ```
+ 
+-`build_board` 已经配置过时，再传 `-DCMAKE_TOOLCHAIN_FILE` 不会生效。源码改完后直接：
++这条命令会生成冰雪插件文件，但OpenCV关闭时不具备冰雪面积检测能力。若需在同一RKNN构建中启用冰雪，应打开EVS_WITH_OPENCV，并提供目标OpenCV core/imgproc头文件与库；不能链接开发机OpenCV。目标SDK/sysroot尚未核对时，先使用第1节的Ubuntu原生构建验证冰雪。
+ 
+-```bash
+-cmake --build build_board -j4 --target evs evs_shared evs_person_shared evs_height_limit_shared evs_ice_shared
+-```
++RKNN运行库应取自目标板匹配版本，头文件与运行库也需配套。历史联调记录中的固定路径、文件体积或版本号不表示当前目标板状态。仅替换工具链路径不会自动补齐sysroot的全部依赖。
+ 
+-产物：
++首次配置后，修改源码可直接cmake --build。更换工具链、架构或sysroot时使用新的构建目录，避免沿用旧缓存和目标文件。其他功能的后端与模型验证见[rknn_backend.md](rknn_backend.md)。
+ 
+-| 文件 | 用途 |
+-|---|---|
+-| `build_board/libevs_core.so.1` | 公共库。`VisionTask`、推理、解码、地面映射。SONAME 是 `libevs_core.so.1` |
+-| `build_board/libevs_core.so` | 指向 `libevs_core.so.1`，宿主链接时用 |
+-| `build_board/libevs_person.so.1` | 人员检测，`0x0004` / `0x0005` / `0x0006` |
+-| `build_board/libevs_height_limit.so.1` | 高度限位 `0x0007` |
+-| `build_board/libevs_ice.so.1` | 卷扬冰雪 `0x0008` |
+-| `build_board/libevs.a` 及 `libevs_person.a`、`libevs_height_limit.a`、`libevs_ice.a` | 静态库。`evs_task_cam` 整库链接它们 |
++## 3. 为什么库文件从.so.1变为.so.3
+ 
+-每个动态库旁边还有同名的无版本号符号链接，链接宿主时用那个链接。插件库在加载时向 `libevs_core.so` 登记自己的 `module_id`。
++变化的是**ABI版本后缀**，不是功能模块号、算法准确率版本或目标CPU型号。当前CMake中核心库和三个插件的SOVERSION均为3。
+ 
+-确认是板子能跑的文件：
++| 名称 | 含义 | 本次情况 |
++|---|---|---|
++| libevs_core.so、libevs_ice.so等 | 无版本链接名，编译宿主时-levs_core、-levs_ice使用它 | 基础名称保留 |
++| libevs_core.so.3、libevs_ice.so.3等 | 当前动态库文件名及ELF SONAME，宿主运行时记录并查找它 | 与旧ABI1/2区分 |
++| libevs_person.so.3、libevs_height_limit.so.3 | 同一公共接口版本下重编的其他插件 | 与核心库使用匹配版本 |
++| libevs.a、libevs_ice.a等 | 静态归档 | 名称不加此版本后缀，但宿主同样需要匹配头文件重编 |
+ 
+-```bash
+-file build_board/libevs_core.so.1 build_board/libevs_person.so.1
+-```
++本次升级的依据是实际公开布局和调用接口改变：
+ 
+-应显示 `ARM aarch64`。这个目录在 `.gitignore` 里，不要提交。
++- TaskConfig增加冰雪配置、对象清单和运行模式等成员，其对象尺寸和字段偏移与旧版不同。
++- IFunctionPlugin增加虚函数，旧插件按旧虚表布局编译，不能假定与新核心库兼容。
++- 冰雪公开图像/结果/配置结构及detect接口在开发过程中调整，宿主需要使用当前两参接口和匹配结构。
+ 
+-板上把用到的 `libevs_core.so.1` 和插件库放到程序同目录，或者放到 `/usr/lib`。只跑人员检测时带 `libevs_person.so.1`，只跑高度限位时带 `libevs_height_limit.so.1`。`librknnrt.so` 板子上已经有，不用再带。
++旧二进制可能仍按旧字段偏移、对象尺寸或虚表位置访问。只把新实现命名为旧.so.1，或建立旧版本名到新库的软链接，不能让这些差异自动消失。因此当前使用新的SONAME，并要求相关宿主和插件成套重新构建。
+ 
+-## 2. 宿主参考程序
++数字3是本工程当前选择的ABI编号，不是编译器强制必须取3；关键是与不兼容的旧版本区分。后续仅修改内部实现、未破坏ABI时，无需每次递增该编号。这次文档原有“SONAME为2”的残留已统一为3，没有再次更改CMake版本。
+ 
+-`user_evs_demo` 链接上一节的 `libevs_core.so` 和三个插件库，并默认打开 RGA。先编完算法库，再在宿主目录执行：
++拆分名称也需区分历史：本仓库HEAD基准已经生成libevs_core.so和各插件库，本次不是把libevs.so重新命名成libevs_core.so。若其他旧交付说明写的是单库libevs.so.1，应按它对应的源码/宿主版本核对，不能直接套到当前分库构建。
+ 
+-```bash
+-cd /home/xp/rk3576/new_qt5_qml/user_evs_demo
++## 4. 宿主链接与部署
+ 
+-cmake -S . -B build \
+-  -DCMAKE_TOOLCHAIN_FILE=../edgevision/cmake/aarch64-linux-gnu.toolchain.cmake
++动态冰雪宿主的链接示例，假设头文件、库和程序按常见include/lib/bin布局安装：
+ 
+-cmake --build build -j4
++```bash
++c++ -std=c++17 your_app.cpp -Ipackage_ice/include -Lpackage_ice/lib \
++  -levs_ice -levs_core '-Wl,-rpath,$ORIGIN/../lib' -o package_ice/bin/your_app
++readelf -d package_ice/lib/libevs_core.so.3
++readelf -d package_ice/lib/libevs_ice.so.3
++ldd package_ice/bin/your_app
+ ```
+ 
+-`build` 已经配置过时，同样只执行第二条。只要 CPU 预处理时，第一次配置加上 `-DEVS_WITH_RGA=OFF`。1080p 下 CPU 缩放大约 75 ms，帧率会到 10 以下。
++直接引用Detector符号可保留冰雪动态库。仅调用VisionTask、依赖插件静态注册的宿主，应保留其原有--no-as-needed/加载策略；静态消费者则需保留归档登记对象并链接所用第三方库。
+ 
+-产物是 `build/user_evs_demo`。运行时在程序同目录找 `libevs_core.so.1` 和它链接的插件库。这个参考程序三个功能库都链了。日志里 `preprocess=rga` 表示硬件预处理已启用。
++部署时保留所需.so.3实际文件及无版本链接名；安装树或打包工具应保留符号链接。核心库、插件和宿主必须来自匹配版本，不能只换一个插件后继续使用旧核心或旧宿主。程序旁放库还需要对应RUNPATH或加载路径，单纯文件放在同目录不保证动态加载器会找到它。
+ 
+-板上同一个目录需要：
++核验至少包括：
+ 
+-- `user_evs_demo`
+-- `libevs_core.so.1`
+-- `libevs_person.so.1`、`libevs_height_limit.so.1`、`libevs_ice.so.1`
+-- 任务 YAML、`camera_config.json`、`yolox.rknn`
++- file显示目标架构；目标ARM板应为aarch64，主机验证包则可能为x86-64。
++- readelf中的SONAME/NEEDED与预期版本一致；冰雪插件的核心依赖为libevs_core.so.3。
++- ldd没有not found，且实际加载的是当前交付目录中的核心与插件，没有误载旧库。
++- OpenCV、C++运行库及按构建选择的RKNN依赖在目标板可用；摄像头demo另外具备GStreamer及设备插件。
+ 
+-`librga.so.2` 使用板子系统里已有的库。
++旧user_evs_demo属于外部宿主工程，不是本仓库本轮已编译的目标。其默认RGA选项、链接路径和PLC接入需要在该工程中同步核验，不能沿用历史路径就声称已验收。
+ 
+-```bash
+-./user_evs_demo --task eval_yolox.yaml --config camera_config.json --channel 0 --frames 5
+-```
++## 5. GStreamer、RGA与验证边界
++
++摄像头工具支持显式GSTREAMER_SYSROOT：指定后仅使用该目录内的GStreamer/glib头文件及库，不回退到开发机pkg-config；未指定时使用pkg-config。交叉编译必须确保它指向目标依赖。v4l2_detect所需zlib也从显式sysroot查找。
++
++RGA是宿主预处理依赖，冰雪像素算法本身不使用它。当前存在RGA自动库查找被预定义空变量跳过的遗留问题，需要显式RGA_LIB及匹配的RGA_API_INCLUDE_DIR；本轮文档更新没有修复该源码分支。libdrm支持DRM_LIB显式覆盖或自动查找。
+ 
+-只改了库的内部实现、头文件布局没变时，宿主不用重编，换掉旁边的 `libevs_core.so.1` 和对应插件库即可。`Target` 字段或 `VisionTask` 接口变了，宿主必须用新头文件重新编译。
++主机上的CMake桩库检查只验证依赖选择和生成的链接命令，不能证明真实ARM库链接、摄像头采集、NPU/RGA执行或端到端时延已经通过。实际目标板结果应另行记录。
+diff --git a/docs/host_api.md b/docs/host_api.md
+index fc6f7f3..0c37953 100644
+--- a/docs/host_api.md
++++ b/docs/host_api.md
+@@ -6,7 +6,11 @@
+ 
+ 现场修改文件位置和修改范围见 [现场修改对照说明](site_customization.md)。
+ 
+-头文件在 `include/`。宿主包含 `evs/vision_task.h` 即可，它会带上 `Frame`、`MachineContext`、`Result`。语言是 C++17。板上链接 `libevs_core.so`、用到的插件库和 `librknnrt.so`。取流用的 GStreamer、Qt、RGA 由宿主自己链接，不要链进算法库。
++冰雪原图模式可跳过模型推理，具体条件和输入约定见 [winch_ice.md](winch_ice.md)。
++
++卷扬冰雪优先使用 `evs/winch_ice.h` 的类型化 `Detector`，参见 [冰雪完整接入说明](winch_ice.md)。以下通用接口说明主要用于其他功能。
++
++头文件在 `include/`。宿主包含 `evs/vision_task.h` 即可，它会带上 `Frame`、`MachineContext`、`Result`。语言是 C++17。板上链接 `libevs_core.so`、用到的插件库；RKNN推理构建另需 `librknnrt.so`，无模型冰雪构建不需要它。取流用的 GStreamer、Qt、RGA 由宿主自己链接，不要链进算法库。
+ 
+ 程序、任务 YAML、`camera_config.json` 和模型都相对进程的当前目录。先进入放这些文件的目录再启动，不要在命令里写死安装路径。`Model_path: yolox.rknn` 就是当前目录下的 `yolox.rknn`。以 `/` 开头的路径仍按绝对路径打开。
+ 
+@@ -28,9 +32,9 @@ VisionTask::detect(frame, ctx, result)
+ 界面 / 声光 / 联锁
+ ```
+ 
+-库不打开摄像头，也不读取中控或 PLC 的通道。工况由别的进程送来之后，由调用 `detect` 的进程填进 `MachineContext`。
++库不打开摄像头，也不读取中控或 PLC 的通道。人员/高度功能的工况由别的进程送来之后，宿主填进 `MachineContext`；卷扬冰雪使用专用两参Detector接口，工况仅由宿主判断，不传入冰雪库。
+ 
+-图像用紧凑 NV12（`stride == width`，或 `stride == 0`）。中控若给出 RGB24，由宿主先转成 NV12 再传入。`Frame::data` 在 `detect` 返回前保持有效。`dma_fd` 当前预处理不读，没有 dma-buf 时填 `-1`。
++图像用紧凑 NV12（`stride == width`，或 `stride == 0`）。冰雪图像模式可直接使用 RGB/BGR 或带行填充的 NV12；其他模式仍按既有预处理约定传入。`Frame::data` 在 `detect` 返回前保持有效。`dma_fd` 当前预处理不读，没有 dma-buf 时填 `-1`。
+ 
+ 宿主也可以自己做成模型输入再调用 `detectPrepared`。板上用 RGA 做 letterbox 时走这条，库里的 CPU 预处理就不再跑。`preprocess_ms` 记进统计里的 pre。`Frame` 仍带原图宽高和 `camera_id`，框和距离按原图坐标算。`tensor` 是 `inputWidth() * inputHeight() * 3` 的紧密 RGB。
+ 
+@@ -46,11 +50,11 @@ VisionTask::detect(frame, ctx, result)
+ | 载荷下方 | `0x0005` | `configs/load_under.yaml` | 规则已写，地面 mapper 与参考点由 YAML 配置 |
+ | 大臂下方 | `0x0006` | `configs/boom_under.yaml` | 规则已写。半径用 `hoist_radius` |
+ | 高度限位 | `0x0007` | `configs/height_limit.yaml` | 模型没检出开关时 `limit_state=1`。检出后由 OpenCV 判断 2 或 3，规则还没写时为 0 |
+-| 卷扬结冰 | `0x0008` | `configs/winch_ice.yaml` | 实例能创建。`ice_ratio` 恒为 0。YOLOX 的 80 类里没有冰雪 |
++| 卷扬结冰 | `0x0008` | `configs/winch_ice.yaml` | 固定 ROI + HSV 粗估，图像模式无需模型，需 OpenCV；[完整接入说明](winch_ice.md) |
+ 
+ 同一份模型路径由库内注册表共用，人员三个功能可以指向同一个 `yolox.rknn`，各建各的实例。
+ 
+-同一功能的多路相机共用这一个实例。每张图调用一次 `detect`，`Frame.camera_id` 必须落在该 YAML 的 `camera.video_channel` 里。一次调用只处理一帧。载荷附近若要臂头、左长焦、右长焦一起出结论，由宿主对三次 `Result` 做汇总。
++人员功能的多路相机可共用一个实例；冰雪一个实例绑定一个摄像头，同画面可检测一个或两个卷扬，每次调用独立返回本帧结果。每张图调用一次 `detect`，`Frame.camera_id` 必须落在该 YAML 的 `camera.video_channel` 里。一次调用只处理一帧。载荷附近若要臂头、左长焦、右长焦一起出结论，由宿主对三次 `Result` 做汇总。
+ 
+ 同一个实例上的 `detect` 是同步的，不要并发调用。
+ 
+@@ -95,10 +99,12 @@ if (task.detect(frame, ctx, res) == 0u) {
+ task.release();   // 析构也会再调一次，重复调用是安全的
+ ```
+ 
+-`initialize` 成功后再调用，直接返回 0，不会重新加载模型。换模型时 `release()`，再对新实例 `initialize`。
++`initialize` 成功后再调用，直接返回0，不会重新加载模型。换模型时先release再initialize，或新建实例；不能只改YAML后重复initialize。
+ 
+ `updateConfig(path)` 下一帧起生效，用来改置信度、区域半径、连续帧数、无工况策略、调试开关以及完整 `ground` 配置。新的 mapper 会先在临时容器里全部创建，成功后一次性替换；任一 mapper 或插件配置失败时旧配置保留。改 `module_id`、`backend`、`Model_path`、`output_format`、`person_class_id` 会返回 `NotSupported`。连续帧计数不会因这次更新清零，只有 `release` 会清。
+ 
++普通推理路径的输入宽高、input_format、letterbox、video_channel目前存在返回0但忽略变更的遗留行为，应释放重建，不能按返回0判断这些字段已更新。nms_threshold可保存，但当前原始头NMS使用辅助层常量。冰雪安装参数与阈值的更新范围见专用说明，不能直接套普通人员规则。
++
+ ---
+ 
+ ## 4. 工况怎么填
+@@ -114,7 +120,7 @@ task.release();   // 析构也会再调一次，重复调用是安全的
+ | `hoist_radius` | 米 | `0x0006` 的扇形半径，库内夹到至少 50 m |
+ | `boom_angle` | 度 | 已传入。人员告警当前不用。高度限位公式写上之后用 |
+ | `boom_length` | 米 | 同上。结构体里还没有单独的「是否基本臂」字段 |
+-| `timestamp_us` | 微秒 | 宿主时钟，库只记下 |
++| `timestamp_us` | 微秒 | 人员流程按原行为；冰雪忽略MachineContext，图像只按自身时间戳去重 |
+ 
+ 作业判定：`context_valid` 为真，并且 `is_working == 1`，或者起升、伸缩表明在动。
+ 
+@@ -124,7 +130,7 @@ task.release();   // 析构也会再调一次，重复调用是安全的
+ 
+ ## 5. 怎么读结果
+ 
+-`detect` 返回 0 时读 `Result`。返回值非 0 时本帧没有可用告警。
++通用接口通常在 `detect` 返回0时读取本帧结果。冰雪使用逐帧结果，分别读取调用错误、对象有效性和本帧报警；错误不会携带旧帧结果，详见[冰雪说明](winch_ice.md)。
+ 
+ | `Result` 字段 | 含义 |
+ |---|---|
+@@ -132,7 +138,7 @@ task.release();   // 析构也会再调一次，重复调用是安全的
+ | `alarm` | `None=0` 无事，`LogOnly=1` 只记录，`Alarm=2` 报警 |
+ | `targets` | 本帧目标，坐标已映回原图 |
+ | `limit_state` | 高度限位：0 安装姿态还不能判断，1 模型未检出开关，2 错误安装，3 正确安装。2 和 3 只由 OpenCV 给出 |
+-| `ice_ratio` | 卷扬结冰面积占比。骨架阶段恒为 0 |
++| `ice_ratio` | 冰雪兼容字段：仅单对象有效结果为0..1，双对象为-1；使用lastWinchSnowResult或Detector逐对象结果 |
+ | `camera_blind` | 光学致盲。当前恒为 false |
+ | `camera_channel` | 32 位小端。字节 0 是本帧 `camera_id`，其余字节为 `0xFF`（通道 0 是真实相机，空位不能用 0） |
+ 
+@@ -201,3 +207,14 @@ y1 = (y - h/2) * 原图高
+ 跑通时 stderr 有 `task ready: module=0x0004`，stdout 每帧 `status=0x00000000`，末行 `done frames=5/5`。
+ 
+ `tools/v4l2_detect` 只做到解码并把框画进预览，不调用 `VisionTask`。界面上的框没有人员区域告警。产品宿主按本文第 3 节调用。
++
++### 卷扬冰雪接入补充
++
++公开接口采用 `evs::winch_ice::Detector::detect(const ImageData&, WinchSnowResult&)`，
++不接收工况；宿主决定是否调用。模型定位一个或两个卷扬，每框用OpenCV计算冰雪像素数
++除以整个框面积；任一有效对象达到默认50%阈值，本帧全局报警。
++每次调用重新处理，包括相同时间戳；不保留首次结果、不限重试次数、不保持历史报警。
++
++对象结果含原图框、面积、比例和valid/status；无框返回空对象，无效比例不能当0%。
++模型输出契约、测试入口、Ubuntu板端编译命令见[winch_ice.md](winch_ice.md)。
++库名不变，公开结果结构已调整，宿主与库须使用匹配头文件重新编译。
+diff --git a/docs/site_customization.md b/docs/site_customization.md
+index 6dd343f..5e879e0 100644
+--- a/docs/site_customization.md
++++ b/docs/site_customization.md
+@@ -20,6 +20,8 @@ VisionTask::updateConfig("configs/load_near.yaml");
+ - `configs/winch_ice.yaml`：`0x0008`，卷扬结冰。
+ - `configs/eval_*.yaml`：模型和板端测试配置，不是新的功能号。
+ 
++上述VisionTask是通用入口。冰雪产品接入优先使用evs::winch_ice::Detector的两参detect；YAML由load_config读取后传initialize，运行时用DetectConfig更新。宿主负责工况触发，详见[冰雪说明](winch_ice.md)。
++
+ 文件名和 YAML 中的 `task:` 目前只用于区分文件、日志和调试。真正决定功能的是：
+ 
+ ```yaml
+@@ -30,7 +32,7 @@ module_id: 0x0004
+ 
+ ### 更换摄像头节点、分辨率或帧率
+ 
+-修改运行目录下的 `camera_config.json`：
++宿主使用配置采集时，修改运行目录下的 `camera_config.json`，以下为采集项示意：
+ 
+ ```json
+ {
+@@ -42,6 +44,8 @@ module_id: 0x0004
+ }
+ ```
+ 
++这只改变采集参数。人员地面距离需核对对应相机标定及尺寸缩放策略；冰雪还需核对单相机ID、参考宽高及完整工作表面多边形。机位、视场、裁剪或变焦变化时应重新标定，不能只改采集JSON后认定面积区域仍有效。冰雪宽高比校验只发生于实际处理的新帧，无法发现所有同宽高比的视场变化。
++
+ ### 更换模型或检测阈值
+ 
+ 修改对应 task YAML：
+@@ -54,6 +58,8 @@ person_class_id: 0
+ confidence_threshold: 0.45
+ ```
+ 
++更换backend、模型或解码绑定参数须先release再initialize，或新建实例；对已初始化实例重复initialize会保留旧配置。阈值只在对应算法实际使用时生效，冰雪模型模式使用置信度/NMS筛选卷扬框，HSV阈值用于像素分类。原始头辅助层仍有模型常量，换自训模型不一定只改YAML即可。
++
+ ### 更换某路摄像头的距离算法
+ 
+ 修改对应 `id` 的 `mapper`：
+@@ -91,7 +97,7 @@ zone:
+   half_angle_deg: 40
+ ```
+ 
+-修改 YAML 后需要重启任务，或者由宿主显式调用 `updateConfig()`；程序不会自动监控文件变化。
++允许的热更新字段可由宿主显式调用updateConfig；程序不会自动监控文件变化。普通推理路径目前对输入尺寸、input_format、letterbox、video_channel存在返回0但忽略变更的遗留行为，这些字段应释放重建。冰雪对象清单、表面、参考尺寸、相机、模式和次数上限也需要释放重建；面积/HSV阈值更新只影响未结束对象。
+ 
+ ## 3. 需要修改局部代码的情况
+ 
+@@ -166,7 +172,7 @@ src/backend/rknn/rknn_backend.cpp
+ - `reference: task` 必须配 `distance_mode: radial`。
+ - `legacy_forward_y` 的角度范围是 `-180°..180°`。
+ - `radial` 的角度范围是 `0°..360°`。
+-- `camera.video_channel` 中每一路都应在 `ground.cameras` 配置对应 `id`。
++- 使用地面映射的任务，其 `camera.video_channel` 每一路应在 `ground.cameras` 配置对应 `id`；当前冰雪图像模式要求ground.enabled=false，不使用地面矩阵。
+ - `EVS_GROUND_MODEL` 只用于调试，会覆盖所有摄像头 mapper，正式运行应取消设置。
+ - `MachineContext` 暂无绝对回转角。吊钩参考点暂按局部 `+Y` 方向计算。
+ - `crane_pose` 尚未实现真实公式。
+diff --git a/include/evs/function_plugin.h b/include/evs/function_plugin.h
+index 4d22aa8..caf91e2 100644
+--- a/include/evs/function_plugin.h
++++ b/include/evs/function_plugin.h
+@@ -9,6 +9,12 @@
+ #include "evs/task_config.h"
+ 
+ namespace evs {
++namespace winch_ice {
++struct WinchSnowResult;
++}
++namespace testing {
++struct IceMaskSnapshot;
++}
+ 
+ // Function-rule plugin: person / height-limit / winch-ice.
+ // VisionTask calls decide() after decode and map-back to the original frame.
+@@ -21,6 +27,19 @@ struct IFunctionPlugin {
+     // (EvsStatus or a module error). Called from initialize and updateConfig.
+     virtual uint32_t configure(const TaskConfig& cfg) = 0;
+ 
++    // Runs before any model preprocessing/inference. Default leaves other tasks unchanged.
++    virtual uint32_t preflight(const Frame&, const MachineContext&, Result&, bool& run) {
++        run = true;
++        return 0;
++    }
++
++    virtual const winch_ice::WinchSnowResult* winch_result() const { return nullptr; }
++
++    // Record a rejected call. Ice clears the previous frame result.
++    virtual void reject_call(uint32_t status, Result& out) noexcept { out.status = status; }
++
++    virtual bool copy_ice_masks(std::vector<testing::IceMaskSnapshot>&) const { return false; }
++
+     // Task-relative ground frame. false means this function does not consume
+     // ground distance. Implementations only describe the reference; the shared
+     // geometry layer computes distance_m / angle_deg.
+diff --git a/include/evs/log.h b/include/evs/log.h
+index 836aad7..10ee8c3 100644
+--- a/include/evs/log.h
++++ b/include/evs/log.h
+@@ -30,7 +30,8 @@ LogLevel log_level_from_string(const std::string& s, LogLevel def = LogLevel::In
+ // invoking sinks, so logger queries are safe).
+ using LogSink = std::function<void(LogLevel level, const std::string& line)>;
+ 
+-// Process-wide logger. One instance, thread-safe, never throws.
++// Process-wide logger. Writing a record contains formatting/buffering/sink
++// exceptions. Configuration/query methods may allocate and are not no-throw.
+ class Logger {
+ public:
+     static Logger& instance();
+@@ -98,11 +99,15 @@ private:
+ #  endif
+ #endif
+ 
+-#define EVS_LOG_AT(level, ...)                                                   \
+-    do {                                                                         \
+-        if (static_cast<int>(level) <= (EVS_LOG_LEVEL)) {                        \
+-            ::evs::Logger::instance().write(level, __FILE__, __LINE__, __VA_ARGS__); \
+-        }                                                                        \
++#define EVS_LOG_AT(level, ...)                                                                     \
++    do {                                                                                           \
++        if (static_cast<int>(level) <= (EVS_LOG_LEVEL)) {                                          \
++            try {                                                                                  \
++                ::evs::Logger::instance().write(level, __FILE__, __LINE__, __VA_ARGS__);           \
++            } catch (...) {                                                                        \
++                /* Also isolate first-use logger construction/argument errors. */                  \
++            }                                                                                      \
++        }                                                                                          \
+     } while (0)
+ 
+ #define EVS_LOGE(...) EVS_LOG_AT(::evs::LogLevel::Error, __VA_ARGS__)
+diff --git a/include/evs/rknn_backend.h b/include/evs/rknn_backend.h
+index 72ee6ea..a60f576 100644
+--- a/include/evs/rknn_backend.h
++++ b/include/evs/rknn_backend.h
+@@ -32,9 +32,15 @@ public:
+     ~RknnBackend() override;
+ 
+     uint32_t load(const std::string& model_path, int init_timeout_s) override;
+-    uint32_t infer(const std::vector<uint8_t>& input,
+-                   std::vector<float>& output) override;
++    uint32_t infer(const std::vector<uint8_t>& input, std::vector<float>& output) override;
++    // Winch path: explicit single-tensor box contract, independent of COCO heads.
++    uint32_t validateDetectionModel(const std::string& format, int classes, int expected_width,
++                                    int expected_height) const;
++    uint32_t inferDetectionRows(const std::vector<uint8_t>& input, std::vector<float>& output,
++                                const std::string& format, int classes, int expected_width,
++                                int expected_height);
+     void release() override;
++
+     bool loaded() const override { return loaded_.load(); }
+ 
+     // Diagnostics: model input geometry queried at load time (false if not loaded).
+@@ -43,9 +49,10 @@ public:
+     uint64_t last_run_us() const;
+ 
+ private:
++    uint32_t inferImpl(const std::vector<uint8_t>&, std::vector<float>&, const std::string&, int);
+     struct Impl;
+     std::unique_ptr<Impl> impl_;
+     std::atomic<bool> loaded_{false};
+ };
+ 
+-} // namespace evs
+\ No newline at end of file
++} // namespace evs
+diff --git a/include/evs/status.h b/include/evs/status.h
+index 32b806a..1df67ec 100644
+--- a/include/evs/status.h
++++ b/include/evs/status.h
+@@ -10,6 +10,11 @@ enum class AlarmState : int { None = 0, LogOnly = 1, Alarm = 2 };
+ // A target exists but cannot be projected to a trustworthy ground position.
+ constexpr float kDistanceUnknown = -1.f;
+ 
++// Ice ratios belong to the current frame; use per-object valid/status.
++// Unobservable objects are unknown, never zero coverage.
++constexpr uint32_t kIceUnobservable = 0x0008C001u;
++constexpr float kIceRatioUnknown = -1.f;
++
+ // Error codes are 0xMMMMEEEE. High 16 bits are the function module
+ // (0x0004 load-near, 0x0005 load-under, 0x0006 boom-under, 0x0007 height,
+ // 0x0008 winch ice). Low 16 bits are the error. Values below keep the high
+@@ -104,7 +109,7 @@ struct Result {
+     AlarmState alarm = AlarmState::None;
+     std::vector<Target> targets;
+     int limit_state = 0;       // height limit: 0 unknown,1 not installed,2 wrong,3 correct
+-    float ice_ratio = 0.f;     // winch ice area ratio; 0 for other functions
++    float ice_ratio = 0.f;     // single valid ice object: 0..1; multiple/unknown: -1
+     bool camera_blind = false; // optical blind; frame not counted in person miss-rate
+     // Cameras that produced this result. See pack_camera_channel.
+     uint32_t camera_channel = 0xFFFFFFFFu;
+diff --git a/include/evs/task_config.h b/include/evs/task_config.h
+index e9d57e4..460484d 100644
+--- a/include/evs/task_config.h
++++ b/include/evs/task_config.h
+@@ -8,6 +8,12 @@
+ 
+ namespace evs {
+ 
++// Pixel thresholds for snow candidates inside model-detected rectangles.
++struct IceConfig {
++    int saturation_max = 80; // OpenCV uint8 HSV, S/V in 0..255
++    int value_min = 180;
++};
++
+ // Zone description shared by person functions.
+ struct ZoneConfig {
+     std::string type = "circle"; // circle | sector
+@@ -77,12 +83,15 @@ struct TaskConfig {
+     bool basic_boom_only = true;
+ 
+     // winch-ice extras (module 0x0008)
+-    float area_ratio = 0.3f;
++    float area_ratio = 0.5f;
+     bool exit_on_alarm = true;
++    bool inference_enabled = true; // false is rejected; ice always requires its model
++    IceConfig ice;
+ };
+ 
+ // Minimal YAML loader: scalars, one-level nested maps, inline int arrays.
+-// Returns false on parse error; err carries an EvsStatus code.
++// Overlays fields present in the file; publishes cfg only on success.
++// On failure cfg is unchanged and err is a bare EvsStatus (no module stamp).
+ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err);
+ 
+ } // namespace evs
+diff --git a/include/evs/vision_task.h b/include/evs/vision_task.h
+index 8e7a3f7..d7e4e77 100644
+--- a/include/evs/vision_task.h
++++ b/include/evs/vision_task.h
+@@ -7,8 +7,16 @@
+ #include "evs/frame.h"
+ #include "evs/preprocess.h"
+ #include "evs/status.h"
++#include "evs/task_config.h"
+ 
+ namespace evs {
++namespace winch_ice {
++class Detector;
++struct WinchSnowResult;
++}
++namespace testing {
++struct IceMaskSnapshot;
++} // namespace testing
+ 
+ class VisionTask {
+ public:
+@@ -18,13 +26,14 @@ public:
+     VisionTask(const VisionTask&) = delete;
+     VisionTask& operator=(const VisionTask&) = delete;
+ 
+-    // Read YAML, acquire model from the registry, optionally warm up.
++    // Read YAML and acquire the configured model.
+     // On any failure it rolls back and leaves no half-initialized state.
+     // Repeated calls must NOT reload the model.
+     uint32_t initialize(std::string_view config_path);
++    uint32_t initialize(const TaskConfig& config);
+ 
+     // Synchronous detection. One call at a time per instance.
+-    // The library preprocesses `frame` on the CPU.
++    // The library preprocesses `frame` on the CPU; ice ignores ctx.
+     uint32_t detect(const Frame& frame, const MachineContext& ctx, Result& out);
+ 
+     // Same pipeline as detect(), but the host already built the model input
+@@ -42,6 +51,9 @@ public:
+ 
+     // Update thresholds / zone / switch only. Reject backend / model change.
+     uint32_t updateConfig(std::string_view config_path);
++    uint32_t updateConfig(const TaskConfig& config);
++    bool lastWinchSnowResult(winch_ice::WinchSnowResult& result) const;
++    bool copyIceMasks(std::vector<testing::IceMaskSnapshot>& out) const;
+ 
+     // Return NPU context and caches. Safe to call again from the destructor.
+     void release();
+@@ -63,6 +75,9 @@ public:
+     bool saveLastInput(const std::string& path) const;
+ 
+ private:
++    friend class winch_ice::Detector;
++    const winch_ice::WinchSnowResult* winchSnowResultView() const noexcept;
++    uint32_t rejectWinchSnow(uint32_t status, Result& out) noexcept;
+     uint32_t acceptFrame(const Frame& frame) const;
+     uint32_t finishDetect(const Frame& frame, const MachineContext& ctx,
+                           std::vector<uint8_t>& input, const PreprocessMap& map,
+diff --git a/src/backend/rknn/rknn_backend.cpp b/src/backend/rknn/rknn_backend.cpp
+index 6059b89..725061f 100644
+--- a/src/backend/rknn/rknn_backend.cpp
++++ b/src/backend/rknn/rknn_backend.cpp
+@@ -18,6 +18,14 @@ uint32_t RknnBackend::load(const std::string&, int) {
+ uint32_t RknnBackend::infer(const std::vector<uint8_t>&, std::vector<float>&) {
+     return static_cast<uint32_t>(EvsStatus::NotSupported);
+ }
++uint32_t RknnBackend::validateDetectionModel(const std::string&, int, int, int) const {
++    return static_cast<uint32_t>(EvsStatus::NotSupported);
++}
++uint32_t RknnBackend::inferDetectionRows(const std::vector<uint8_t>&, std::vector<float>& out,
++                                         const std::string&, int, int, int) {
++    out.clear();
++    return static_cast<uint32_t>(EvsStatus::NotSupported);
++}
+ void RknnBackend::release() {}
+ } // namespace evs
+ 
+@@ -34,6 +42,7 @@ void RknnBackend::release() {}
+ #include <rknn_api.h>
+ 
+ #include "../yolo_decode.h"
++#include "detection_rows.h"
+ #include "evs/log.h"
+ 
+ namespace evs {
+@@ -155,10 +164,18 @@ uint32_t RknnBackend::load(const std::string& model_path, int /*init_timeout_s*/
+         release();
+         return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
+     }
+-    // RKNN reports logical dims in NCHW order regardless of the fmt below.
+-    impl_->in_c = attr.dims[1];
+-    impl_->in_h = attr.dims[2];
+-    impl_->in_w = attr.dims[3];
++    if (attr.n_dims != 4 || attr.dims[0] != 1) {
++        release();
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    }
++    if (attr.fmt == RKNN_TENSOR_NHWC) {
++        impl_->in_h = attr.dims[1]; impl_->in_w = attr.dims[2]; impl_->in_c = attr.dims[3];
++    } else if (attr.fmt == RKNN_TENSOR_NCHW) {
++        impl_->in_c = attr.dims[1]; impl_->in_h = attr.dims[2]; impl_->in_w = attr.dims[3];
++    } else {
++        release();
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    }
+     impl_->in_type = attr.type;
+     impl_->in_fmt = attr.fmt;
+     impl_->in_elems = attr.n_elems;
+@@ -199,6 +216,44 @@ uint32_t RknnBackend::load(const std::string& model_path, int /*init_timeout_s*/
+ 
+ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+                             std::vector<float>& output) {
++    return inferImpl(input, output, "", 80);
++}
++
++uint32_t RknnBackend::validateDetectionModel(const std::string& format, int classes,
++                                              int expected_width, int expected_height) const {
++    if (!loaded_.load()) return static_cast<uint32_t>(EvsStatus::NotInitialized);
++    if (impl_->in_w != uint32_t(expected_width) || impl_->in_h != uint32_t(expected_height) ||
++        impl_->in_c != 3 || impl_->n_output != 1 || classes < 1 || classes > 4096 ||
++        (format != "flat6" && format != "yolov8" && format != "yolox"))
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    rknn_tensor_attr attr{};
++    attr.index = 0;
++    if (rknn_query(impl_->ctx, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)) != 0)
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    if (attr.n_dims > RKNN_MAX_DIMS)
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    const std::vector<size_t> shape(attr.dims, attr.dims + attr.n_dims);
++    size_t rows = 0, columns = 0;
++    bool transposed = false;
++    if (!rknn_detection_shape(shape, format, classes, expected_width, expected_height,
++                              rows, columns, transposed) || rows * columns != attr.n_elems)
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    return 0;
++}
++
++uint32_t RknnBackend::inferDetectionRows(const std::vector<uint8_t>& input,
++                                         std::vector<float>& output, const std::string& format,
++                                         int classes, int expected_width, int expected_height) {
++    output.clear();
++    if (const auto rc = validateDetectionModel(format, classes, expected_width, expected_height))
++        return rc;
++    return inferImpl(input, output, format, classes);
++}
++
++uint32_t RknnBackend::inferImpl(const std::vector<uint8_t>& input,
++                                std::vector<float>& output, const std::string& format,
++                                int classes) {
++    output.clear();
+     if (!loaded_.load() || impl_->ctx == 0)
+         return static_cast<uint32_t>(EvsStatus::NotInitialized);
+     if (input.empty()) return static_cast<uint32_t>(EvsStatus::NullPointer);
+@@ -213,7 +268,7 @@ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+     std::memset(&ri, 0, sizeof(ri));
+     ri.index = 0;
+     ri.pass_through = 0; // let the driver convert layout/type to the tensor
+-    ri.fmt = impl_->in_fmt;
++    ri.fmt = format.empty() ? impl_->in_fmt : RKNN_TENSOR_NHWC;
+ 
+     if (impl_->in_type == RKNN_TENSOR_FLOAT32) {
+         // NHWC float in the model's value range; the graph carries mean/std.
+@@ -256,6 +311,31 @@ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+         return static_cast<uint32_t>(EvsStatus::InferFailed);
+     }
+ 
++    // Always return SDK buffers, including allocation failures in decoding.
++    struct OutputGuard {
++        rknn_context ctx;
++        std::vector<rknn_output>& values;
++        ~OutputGuard() { rknn_outputs_release(ctx, uint32_t(values.size()), values.data()); }
++    } guard{impl_->ctx, outs};
++    if (!format.empty()) {
++        rknn_tensor_attr attr{};
++        attr.index = 0;
++        if (impl_->n_output != 1 ||
++            rknn_query(impl_->ctx, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)) != 0 ||
++            attr.n_dims > RKNN_MAX_DIMS ||
++            uint64_t(outs[0].size) < uint64_t(attr.n_elems) * sizeof(float))
++            return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++        std::vector<size_t> shape;
++        for (uint32_t i = 0; i < attr.n_dims; ++i) shape.push_back(attr.dims[i]);
++        if (!rknn_detection_rows(static_cast<const float*>(outs[0].buf), attr.n_elems, shape,
++                                  format, classes, impl_->in_w, impl_->in_h, output))
++            return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++        impl_->last_run_us = static_cast<uint64_t>(
++            std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - t0).count());
++        return 0;
++    }
++
+     // Shapes come from the model, so ask once per output and keep a view.
+     for (uint32_t i = 0; i < impl_->n_output; ++i) {
+         rknn_tensor_attr oa;
+@@ -289,7 +369,6 @@ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+     }
+     yolo::decode_heads(impl_->heads, output);
+ 
+-    rknn_outputs_release(impl_->ctx, impl_->n_output, outs.data());
+     impl_->last_run_us = static_cast<uint64_t>(
+         std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - t0).count());
+@@ -327,4 +406,4 @@ bool RknnBackend::input_shape(int& w, int& h, int& c) const {
+ 
+ } // namespace evs
+ 
+-#endif // EVS_BACKEND_RKNN
+\ No newline at end of file
++#endif // EVS_BACKEND_RKNN
+diff --git a/src/core/config.cpp b/src/core/config.cpp
+index 0fa33a8..2a2e2a2 100644
+--- a/src/core/config.cpp
++++ b/src/core/config.cpp
+@@ -1,10 +1,16 @@
+-#include "evs/task_config.h"
++#include "config_internal.h"
+ #include "evs/status.h"
++#include "evs/task_config.h"
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <cerrno>
++#include <cmath>
+ #include <cstdlib>
+ #include <fstream>
++#include <limits>
++#include <map>
++#include <set>
+ #include <sstream>
+ 
+ namespace evs {
+@@ -65,6 +71,19 @@ std::vector<int> parse_int_array(const std::string& v) {
+     return out;
+ }
+ 
++bool parse_ice_integer(const std::string& value, int& out) {
++    if (value.empty())
++        return false;
++    char* end = nullptr;
++    errno = 0;
++    const long n = std::strtol(value.c_str(), &end, 10);
++    if (errno || end == value.c_str() || *end != '\0' || n < std::numeric_limits<int>::min() ||
++        n > std::numeric_limits<int>::max())
++        return false;
++    out = static_cast<int>(n);
++    return true;
++}
++
+ float to_float(const std::string& v, float def) {
+     if (v.empty()) return def;
+     return static_cast<float>(std::strtod(v.c_str(), nullptr));
+@@ -101,7 +120,7 @@ void add_legacy_ground_defaults(GroundConfig& ground) {
+ 
+ } // anonymous namespace
+ 
+-bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
++static bool parse_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+     err = 0;
+     const std::string cfg_path(path);
+     std::ifstream in(cfg_path);
+@@ -112,8 +131,10 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         std::string key;
+         std::string value;
+         bool list_start;
++        bool quoted;
+     };
+     std::vector<Node> nodes;
++    bool syntax_error = false;
+     std::string raw;
+     while (std::getline(in, raw)) {
+         std::string line = strip_comment(raw);
+@@ -124,8 +145,88 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+                                 std::isspace(static_cast<unsigned char>(text[1]));
+         if (list_start) text = trim(text.substr(1));
+         std::string k, v;
+-        if (!split_kv(text, k, v)) continue;
+-        nodes.push_back({ind, k, v, list_start});
++        if (!split_kv(text, k, v)) {
++            syntax_error = true;
++            continue;
++        }
++        const std::string raw_value = trim(text.substr(text.find(':') + 1));
++        const bool quoted =
++            !raw_value.empty() && (raw_value.front() == '\'' || raw_value.front() == '"');
++        nodes.push_back({ind, k, v, list_start, quoted});
++    }
++
++    // Treat a root model map as a section, never as an empty path. Keep the
++    // existing scalar model/Model_path spellings and flat model parameters.
++    std::vector<bool> model_node(nodes.size(), false);
++    std::vector<std::string> model_key(nodes.size());
++    bool model_parse_error = false;
++    for (size_t i = 0; i < nodes.size(); ++i) {
++        const auto& root = nodes[i];
++        if (root.indent != 0 || root.list_start || root.key != "model")
++            continue;
++        size_t end = i + 1;
++        while (end < nodes.size() && nodes[end].indent > root.indent)
++            ++end;
++        if (end == i + 1)
++            continue; // legacy scalar, including an explicitly empty path
++        model_node[i] = true;
++        if (!root.value.empty())
++            model_parse_error = true;
++        const int child_indent = nodes[i + 1].indent;
++        for (size_t j = i + 1; j < end; ++j) {
++            model_node[j] = true;
++            const auto& child = nodes[j];
++            if (child.list_start || child.indent != child_indent ||
++                (child.key != "path" && child.key != "input_width" && child.key != "input_height" &&
++                 child.key != "warmup")) {
++                model_parse_error = true;
++                continue;
++            }
++            model_key[j] = child.key;
++        }
++        i = end - 1;
++    }
++
++    // Compare definitions in this file, not values inherited from the caller.
++    // Ice rejects conflicting aliases; other modules keep legacy last-value
++    // behaviour. All modules can read the newly supported model map.
++    std::map<std::string, std::string> model_definitions;
++    auto read_model_value = [&](const std::string& key, const std::string& value, bool quoted) {
++        std::string canonical = value;
++        if (key == "path") {
++            if (!quoted && !value.empty() &&
++                (value.front() == '[' || value.front() == '{' || value == "null" || value == "~"))
++                model_parse_error = true;
++            cfg.Model_path = value;
++        } else if (key == "warmup") {
++            if (value != "true" && value != "True" && value != "1" && value != "false" &&
++                value != "False" && value != "0")
++                model_parse_error = true;
++            cfg.warmup = to_bool(value, false);
++            canonical = cfg.warmup ? "true" : "false";
++        } else {
++            int parsed = 0;
++            if (!parse_ice_integer(value, parsed) || parsed < 0)
++                model_parse_error = true;
++            const int legacy = to_int(value, 0);
++            if (key == "input_width")
++                cfg.input_width = legacy;
++            else
++                cfg.input_height = legacy;
++            canonical = std::to_string(legacy);
++        }
++        const auto existing = model_definitions.emplace(key, canonical);
++        if (!existing.second && existing.first->second != canonical)
++            model_parse_error = true;
++    };
++
++    // Ignore children of retired ice inventories rather than flattening them
++    // into unrelated task settings. Ice rejects the root key below.
++    std::vector<bool> retired_ice_child(nodes.size(), false);
++    for (size_t i = 0; i < nodes.size(); ++i) {
++        if (nodes[i].key != "ice_objects") continue;
++        for (size_t j = i + 1; j < nodes.size() && nodes[j].indent > nodes[i].indent; ++j)
++            retired_ice_child[j] = true;
+     }
+ 
+     // Parse the only supported list-of-maps section explicitly. The rest of
+@@ -140,6 +241,7 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+     bool in_mount = false;
+     bool in_params = false;
+     bool ground_parse_error = false;
++    bool ice_parse_error = false;
+     for (const Node& n : nodes) {
+         if (!saw_ground) {
+             if (!n.list_start && n.key == "ground") {
+@@ -234,14 +336,20 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+     int nested_indent = 0;
+     for (size_t i = 0; i < nodes.size(); ++i) {
+         const Node& n = nodes[i];
+-        if (n.list_start) continue;
++        if (n.list_start || retired_ice_child[i])
++            continue;
++        if (model_node[i]) {
++            if (!model_key[i].empty())
++                read_model_value(model_key[i], n.value, n.quoted);
++            continue;
++        }
+         // Leave the nested block only when we drop back to the parent indent.
+         // Comparing against a fixed 2 spaces wrongly evicted 2-space children.
+         if (cur_nested && n.indent <= nested_indent) cur_nested = nullptr;
+ 
+         if (n.key == "task") cfg.task = n.value;
+         else if (n.key == "module_id") {
+-            // accept "0x0004" or decimal
++            // Preserve legacy module parsing; ice validates the complete token below.
+             if (n.value.size() > 2 && n.value.substr(0, 2) == "0x")
+                 cfg.module_id = static_cast<uint16_t>(std::strtoul(n.value.c_str(), nullptr, 16));
+             else
+@@ -249,8 +357,22 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         }
+         else if (n.key == "camera_ids" || n.key == "video_channel")
+             cfg.video_channel = parse_int_array(n.value);
++        else if (n.key == "inference_enabled") {
++            if (n.value != "true" && n.value != "false")
++                ice_parse_error = true;
++            else
++                cfg.inference_enabled = n.value == "true";
++        } else if (n.key == "ice_mode") {
++            // Read-only compatibility with the previously shipped model YAML.
++            if (n.value != "model") ice_parse_error = true;
++        }
++        else if (n.key == "ice_saturation_max")
++            ice_parse_error |= !parse_ice_integer(n.value, cfg.ice.saturation_max);
++        else if (n.key == "ice_value_min")
++            ice_parse_error |= !parse_ice_integer(n.value, cfg.ice.value_min);
+         else if (n.key == "backend") cfg.backend = n.value;
+-        else if (n.key == "model" || n.key == "Model_path") cfg.Model_path = n.value;
++        else if (n.key == "model" || n.key == "Model_path")
++            read_model_value("path", n.value, n.quoted);
+         else if (n.key == "confidence_threshold")
+             cfg.confidence_threshold = to_float(n.value, 0.45f);
+         else if (n.key == "score_threshold")
+@@ -258,13 +380,16 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         else if (n.key == "nms_threshold") cfg.nms_threshold = to_float(n.value, 0.5f);
+         else if (n.key == "canary_enabled") cfg.canary_enabled = to_bool(n.value, false);
+         else if (n.key == "output_format") cfg.output_format = n.value;
+-        else if (n.key == "person_class_id") cfg.person_class_id = to_int(n.value, -1);
++        else if (n.key == "person_class_id" || n.key == "winch_class_id") cfg.person_class_id = to_int(n.value, -1);
+         else if (n.key == "decoder_classes") cfg.decoder_classes = to_int(n.value, 80);
+-        else if (n.key == "input_width") cfg.input_width = to_int(n.value, 0);
+-        else if (n.key == "input_height") cfg.input_height = to_int(n.value, 0);
++        else if (n.key == "input_width")
++            read_model_value("input_width", n.value, n.quoted);
++        else if (n.key == "input_height")
++            read_model_value("input_height", n.value, n.quoted);
+         else if (n.key == "input_format") cfg.input_format = n.value; // rgb | bgr
+         else if (n.key == "letterbox") cfg.letterbox = to_bool(n.value, true);
+-        else if (n.key == "warmup") cfg.warmup = to_bool(n.value, false);
++        else if (n.key == "warmup")
++            read_model_value("warmup", n.value, n.quoted);
+         else if (n.key == "init_timeout_s") cfg.init_timeout_s = to_int(n.value, 60);
+         else if (n.key == "npu_core_mask") cfg.npu_core_mask = to_int(n.value, 1);
+         else if (n.key == "latency_budget_ms") cfg.latency_budget_ms = to_int(n.value, 200);
+@@ -317,11 +442,93 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         else if (n.key == "area_ratio") cfg.area_ratio = to_float(n.value, 0.3f);
+         else if (n.key == "exit_on_alarm") cfg.exit_on_alarm = to_bool(n.value, true);
+     }
+-    if (ground_parse_error) {
++    // Keep legacy camera parsing for other modules. Ice tasks must never turn
++    // a misspelled channel into camera zero through strtol's permissive fallback.
++    if (cfg.module_id == 0x0008) {
++        for (const Node& n : nodes) {
++            if (n.key != "video_channel" && n.key != "camera_ids")
++                continue;
++            if (n.value.size() < 3 || n.value.front() != '[' || n.value.back() != ']') {
++                ice_parse_error = true;
++                continue;
++            }
++            const std::string body = trim(n.value.substr(1, n.value.size() - 2));
++            if (body.empty() || body.back() == ',')
++                ice_parse_error = true;
++            std::istringstream items(body);
++            std::string item;
++            while (std::getline(items, item, ',')) {
++                int channel = -1;
++                if (!parse_ice_integer(trim(item), channel))
++                    ice_parse_error = true;
++            }
++        }
++    }
++    if (cfg.module_id == 8) {
++        const std::set<std::string> allowed = {"ice_mode", "ice_saturation_max", "ice_value_min"};
++        std::set<std::string> seen;
++        for (size_t i = 0; i < nodes.size(); ++i) {
++            if (retired_ice_child[i])
++                continue;
++            const auto& key = nodes[i].key;
++            if (key.rfind("ice_", 0) == 0 && !allowed.count(key))
++                ice_parse_error = true;
++            if ((allowed.count(key) || key == "area_ratio" || key == "exit_on_alarm" ||
++                 key == "inference_enabled") &&
++                !seen.insert(key).second)
++                ice_parse_error = true;
++        }
++        for (const auto& node : nodes) {
++            if (node.key == "module_id") {
++                char* end = nullptr;
++                errno = 0;
++                const int base = node.value.rfind("0x", 0) == 0 ? 16 : 10;
++                const auto module = std::strtoul(node.value.c_str(), &end, base);
++                if (errno || end == node.value.c_str() || *end != '\0' ||
++                    node.value.front() == '-' || module > std::numeric_limits<uint16_t>::max())
++                    ice_parse_error = true;
++            }
++            if (node.key == "winch_class_id" || node.key == "decoder_classes") {
++                int value = 0;
++                if (!parse_ice_integer(node.value, value)) ice_parse_error = true;
++            }
++            if (node.key == "exit_on_alarm" && node.value != "true" && node.value != "false")
++                ice_parse_error = true;
++            if (node.key != "area_ratio" && node.key != "confidence_threshold" &&
++                node.key != "score_threshold" && node.key != "score" && node.key != "nms_threshold")
++                continue;
++            char* end = nullptr;
++            errno = 0;
++            const float value = std::strtof(node.value.c_str(), &end);
++            if (errno || end == node.value.c_str() || *end != '\0' || !std::isfinite(value))
++                ice_parse_error = true;
++        }
++        ice_parse_error |= syntax_error || model_parse_error || !cfg.inference_enabled;
++    }
++    if (ground_parse_error || (cfg.module_id == 8 && ice_parse_error)) {
+         err = static_cast<uint32_t>(EvsStatus::ConfigParse);
+         return false;
+     }
+     return true;
+ }
+ 
++namespace detail {
++bool load_task_config_with_module(std::string_view path, TaskConfig& cfg, uint32_t& err,
++                                  uint16_t& parsed_module) {
++    // Preserve overlay semantics, but publish only a fully parsed configuration.
++    TaskConfig next = cfg;
++    const bool ok = parse_task_config(path, next, err);
++    parsed_module = next.module_id;
++    if (!ok)
++        return false;
++    cfg = std::move(next);
++    return true;
++}
++} // namespace detail
++
++bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
++    uint16_t parsed_module = cfg.module_id;
++    return detail::load_task_config_with_module(path, cfg, err, parsed_module);
++}
++
+ } // namespace evs
+diff --git a/src/core/log.cpp b/src/core/log.cpp
+index 8ecf650..dd5c237 100644
+--- a/src/core/log.cpp
++++ b/src/core/log.cpp
+@@ -167,66 +167,76 @@ void Logger::write(LogLevel level, const char* file, int line, const char* fmt,
+     va_end(ap);
+ }
+ 
+-void Logger::writev(LogLevel level, const char* file, int line, const char* fmt,
+-                    std::va_list ap) {
+-    if (level == LogLevel::Off || !fmt) return;
+-
+-    LogLevel active{};
+-    LogSink sink;
+-    FILE* fp = nullptr;
+-    {
+-        std::lock_guard<std::mutex> lk(mtx_);
+-        active = level_;
+-        if (static_cast<int>(level) > static_cast<int>(active)) return;
+-        sink = sink_;
+-        fp = static_cast<FILE*>(file_);
+-    }
++void Logger::writev(LogLevel level, const char* file, int line, const char* fmt, std::va_list ap) {
++    try {
++        if (level == LogLevel::Off || !fmt)
++            return;
++
++        LogLevel active{};
++        LogSink sink;
++        FILE* fp = nullptr;
++        {
++            std::lock_guard<std::mutex> lk(mtx_);
++            active = level_;
++            if (static_cast<int>(level) > static_cast<int>(active))
++                return;
++            sink = sink_;
++            fp = static_cast<FILE*>(file_);
++        }
+ 
+-    char stamp[32]{};
+-    stamp_now(stamp, sizeof(stamp));
+-
+-    char body[1024];
+-    std::va_list ap2;
+-    va_copy(ap2, ap);
+-    const int n = std::vsnprintf(body, sizeof(body), fmt, ap2);
+-    va_end(ap2);
+-    if (n < 0) return;
+-
+-    const bool truncated = static_cast<std::size_t>(n) >= sizeof(body);
+-    char head[192];
+-    std::snprintf(head, sizeof(head), "%s [%s] %s:%d ", stamp,
+-                  log_level_name(level), base_name(file), line);
+-
+-    // Named `text` on purpose: `line` is the source-line parameter and would
+-    // otherwise be shadowed (GCC/Clang reject shadowing a parameter outright).
+-    std::string text;
+-    text.reserve(std::strlen(head) + sizeof(body) + 3);
+-    text += head;
+-    text += body;
+-    if (truncated) text += "...(truncated)";
+-    text += '\n';
+-
+-    // Ring buffer (bounded memory on a headless device).
+-    {
+-        std::lock_guard<std::mutex> lk(mtx_);
+-        if (ring_cap_ > 0) {
+-            ring_.push_back(text);
+-            if (ring_.size() > ring_cap_) ring_.erase(ring_.begin());
++        char stamp[32]{};
++        stamp_now(stamp, sizeof(stamp));
++
++        char body[1024];
++        std::va_list ap2;
++        va_copy(ap2, ap);
++        const int n = std::vsnprintf(body, sizeof(body), fmt, ap2);
++        va_end(ap2);
++        if (n < 0)
++            return;
++
++        const bool truncated = static_cast<std::size_t>(n) >= sizeof(body);
++        char head[192];
++        std::snprintf(head, sizeof(head), "%s [%s] %s:%d ", stamp, log_level_name(level),
++                      base_name(file), line);
++
++        // Named `text` on purpose: `line` is the source-line parameter and would
++        // otherwise be shadowed (GCC/Clang reject shadowing a parameter outright).
++        std::string text;
++        text.reserve(std::strlen(head) + sizeof(body) + 3);
++        text += head;
++        text += body;
++        if (truncated)
++            text += "...(truncated)";
++        text += '\n';
++
++        // Ring buffer (bounded memory on a headless device).
++        {
++            std::lock_guard<std::mutex> lk(mtx_);
++            if (ring_cap_ > 0) {
++                ring_.push_back(text);
++                if (ring_.size() > ring_cap_)
++                    ring_.erase(ring_.begin());
++            }
++            ++ring_pos_; // frames counter for future diagnostics
+         }
+-        ++ring_pos_; // frames counter for future diagnostics
+-    }
+ 
+-    if (fp) {
+-        std::fwrite(text.data(), 1, text.size(), fp);
+-        std::fflush(fp);
+-    }
+-    // Sinks run outside the lock so a host callback may query the logger
+-    // (e.g. tail()) without deadlocking.
+-    if (sink) {
+-        sink(level, text);
+-    } else if (!fp) {
+-        std::fwrite(text.data(), 1, text.size(), stderr);
+-        std::fflush(stderr);
++        if (fp) {
++            std::fwrite(text.data(), 1, text.size(), fp);
++            std::fflush(fp);
++        }
++        // Sinks run outside the lock so a host callback may query the logger
++        // (e.g. tail()) without deadlocking.
++        if (sink) {
++            sink(level, text);
++        } else if (!fp) {
++            std::fwrite(text.data(), 1, text.size(), stderr);
++            std::fflush(stderr);
++        }
++    } catch (...) {
++        // Logging is auxiliary: formatting, buffering or host callbacks must not
++        // turn an already committed algorithm operation into a reported failure.
++        // Do not log from this handler: that could allocate or recurse again.
+     }
+ }
+ 
+diff --git a/src/tasks/README.md b/src/tasks/README.md
+index 5e9fb20..8d79725 100644
+--- a/src/tasks/README.md
++++ b/src/tasks/README.md
+@@ -1,61 +1,53 @@
+ # 任务插件
+ 
+-五个功能插件分阶段落地。阶段 3 已完成**人员三插件**的核心策略引擎。
++公共执行链位于libevs_core，业务分别位于libevs_person、libevs_height_limit、libevs_ice。当前动态库ABI统一为3；无版本链接名保留，宿主与插件须使用匹配头文件重编。
+ 
+-## 实现方式
++## 当前功能范围
+ 
+-人员在 `libevs_person.so`，高度限位在 `libevs_height_limit.so`，卷扬冰雪在 `libevs_ice.so`。公共库 `libevs_core.so` 不含这三份业务代码。
+-三个人员插件（0x0004 / 0x0005 / 0x0006）共用同一份检测权重（经 `ModelRegistry` 引用计数只加载一份），
+-也共用同一套决策引擎（`src/tasks/person/person_plugin.cpp` + `include/evs/person_plugin.h`）。
+-`VisionTask` 在解码后只调用 `IFunctionPlugin::decide`。`0x0007` / `0x0008` 已有可编译骨架
+-（`src/tasks/height_limit/`、`src/tasks/winch_ice/`），`limit_state` 与 `ice_ratio` 仍是占位 0。
+-三者差异只体现在
+-`PersonPolicyConfig` 上，由 `make_person_config(module_id, cfg, out)` 按模块号构造：
++| 模块 | 入口及实现 | 尚未完成的范围 |
++|---|---|---|
++| 0x0004/0x0005/0x0006 人员 | VisionTask推理、地面映射、PersonPlugin策略 | 真实PLC及现场标定/模型效果按产品验收；绝对回转角尚未接入 |
++| 0x0007 高度限位 | 模型检开关，OpenCV安装姿态接口及状态骨架 | 完整安装姿态几何规则 |
++| 0x0008 卷扬冰雪 | 客户两参Detector、RKNN定位＋OpenCV整框面积粗估、单相机逐帧1～2对象 | 专用模型交付、灰度、snow_detections及板端现场验收 |
+ 
+-| 模块 | 参考点 | 区域 | 无工况策略 | 关键字段 |
+-|---|---|---|---|---|
+-| `load_near` 0x0004 | 吊钩地面投影 | 圆 r=10m | 检测到人立即报警 | `missing_context=alarm` |
+-| `load_under` 0x0005 | 吊钩地面投影 | 圆 r=10m − 载荷遮挡扇区 | 只记录 | `has_occlusion`, `occ_axis_deg=90`, `occ_half_deg=25` |
+-| `boom_under` 0x0006 | 大臂根部 | 扇形 半径=`hoist_radius`(≥50) / 半角 40° | 只记录 | `dynamic_radius`, `sector_axis_deg=0` |
++冰雪不是恒为0的占位实现。有效单对象可取得0..1比例；未知或多对象的通用Result.ice_ratio为-1，完整结果通过Detector或lastWinchSnowResult读取。宿主决定角度为0且工作时是否调用；冰雪不使用MachineContext作触发判断。
+ 
+-策略规则（见 `person_decide`）：
+-1. `context_valid == false`：0x0004 检测到人→立即 `Alarm`（不计数）；0x0005/0x0006→`LogOnly`，不报警。
+-2. 工况有效但**静止**（回转/变幅/起落钩/伸缩均不动）：有人→`LogOnly`，不报警。
+-3. **作业**中：区内有人则连续帧计数，达到 `consecutive_frames` 转 `Alarm`；未稳前为 `LogOnly`。
++## 人员策略
+ 
+-## 检测 / 解码（已与模型输出解耦）
++三个模块共用PersonPlugin和person_decide；相同backend/Model_path可通过ModelRegistry共享模型资源。make_person_config按功能号生成策略：
+ 
+-模型输出张量的解析**不再硬编码**，改为可插拔解码器，由 `configs/*.yaml` 的 `output_format` 选择：
++| 模块 | 当前参考及区域 | 工况无效时 |
++|---|---|---|
++| load_near 0x0004 | 配置的吊钩参考/旧原点；默认10m圆 | 映射后区内有人且on_missing_context=alarm时立即Alarm，否则按策略记录 |
++| load_under 0x0005 | 默认10m圆，可排除遮挡扇区 | LogOnly |
++| boom_under 0x0006 | 大臂参考扇形，半径取hoist_radius且至少50m | LogOnly |
+ 
+-- `flat6`（默认）：每检测 6 个 float = `[class_id, conf, x, y, w, h]`（0..1 图像坐标），
+-  单类 person 检测器约定，由 `Flat6Decoder` 包装原 `decode_person`。
+-- `yolov8`：行布局 `[N, 4 + num_classes]` = `[x_c, y_c, w, h, s0, s1, ...]`，
+-  取 argmax 类作为 `class_id`/置信度；`person_class_id >= 0` 时只保留该类（默认 COCO 80 类，
+-  非 COCO 用 `decoder_classes` 指定行宽）。
+-- `yolox`：一份 `[8400, 85]`（stride 8/16/32，尺度内 y 在外、x 在内），或按尺度拆开的
+-  `[1, 85, S, S]` / `[1, S, S, 85]`。后端按 `(raw+grid)*stride`、`exp(raw)*stride` 解码，
+-  NMS 不分类别、IoU 0.5。解码器看到的行与 `yolov8` 相同。
++工况有效时，is_working非零、hoist_moving或telescope_moving任一成立视为作业；work_motion_epsilon当前未参与判定。静止时区内有人只记录；作业时区内有效地面目标按连续帧累积，达到阈值才Alarm。无法得到地面位置的目标不能当作区内有效目标。宿主不得把LogOnly当成声光报警。
+ 
+-接口：`evs/detection_decoder.h` 的 `IDetectionDecoder` + `create_decoder(format, person_class_id, num_classes)`。
+-未知格式在 `VisionTask::initialize` 时直接返回 `NotSupported`（fail-fast）；运行时 `updateConfig` 也禁止改
+-`output_format` / `person_class_id` / `decoder_classes`（与 backend/model 同属模型契约，需重新初始化）。
++地面位置由公共mapper与ground_metrics适配，不再是旧阶段固定0。无可信映射时distance_m为-1、ground_ok为false；绝对回转角缺口及crane_pose占位需按[通用API](../../docs/api.md)处理。
+ 
+-`distance_m` / `angle_deg` 由 **Phase 4 工况适配**根据参考点（吊钩投影 / 大臂根部）换算为地面极坐标，
+-本阶段留 0；`boom_under` 的半径在决策时取 `MachineContext.hoist_radius` 并夹到 ≥50m。
++## 推理与解码边界
+ 
+-## 配置
++推理路径在配置后端、模型及decoder后调用功能插件；插件可以提供preflight。冰雪model路径推理后用原图计算面积，固定区域/人工框测试跳过推理链。
+ 
+-- `configs/load_near.yaml`、`configs/load_under.yaml`、`configs/boom_under.yaml`
++- flat6：每目标为[class_id, confidence, center_x, center_y, width, height]。
++- yolov8/yolo11/yolox上层decoder：接收[N,4+C]的中心框及类别分数行矩阵；person_class_id控制保留类别，decoder_classes控制行宽。
++- RKNN原始YOLO头先由backend/yolo_decode.h按张量形状解码，再交上层decoder。当前辅助层有80类、640输入及锚框常量，不能只改decoder_classes就认定任意自训原始头可用。
+ 
+-## 待办（后续）
++未知output_format在VisionTask初始化时返回模块化ModelInvalidFormat；热更新禁止更改绑定模型的backend、Model_path、module_id及decoder参数。换模型需release后initialize，重复initialize保留旧配置。普通推理部分其他结构字段存在成功返回但忽略的遗留行为，见[顶层README](../../README.md)。
+ 
+-- 0x0007 高度限位（重锤三分类状态机）、0x0008 卷扬冰雪（面积占比 + 报警后退出）。
+-- Phase 4：工况适配把 `Target` 的 `distance_m`/`angle_deg` 算准；多相机按 `camera_id` 分别给出再合并。
+-- 真机后端（rknn/qnn）接入后对接真实检测张量。
++## 冰雪开发与验证
+ 
+-## 开发者新增一个算法的标准动作
++面积算法和公开适配位于本目录。正式入口加载卷扬模型，每个框独立统计冰雪像素
++除以该框面积，默认>=0.5则本帧报警。没有首次结果锁定、重试上限和报警保持。
++人工框仅为测试入口，不是客户detect新增参数，也不是模型失败时的回退。
++真实雪识别精度不能由合成测试证明。
+ 
+-写 `xxx_plugin.cpp`：`class Xxx : public IFunctionPlugin` + `make_xxx()` 返回 `unique_ptr`。
+-文件尾部加 `const FunctionPluginRegistration kXxx(0x0009, make_xxx);`
+-在 `CMakeLists.txt` 里用 `evs_add_plugin` 把该 `.cpp` 编成单独的动态库，不要放进 `EVS_SRC`。
+-宿主链接 `libevs_core.so` 和这个新库。链静态库时走 `evs_link_whole`，并把新的静态库加进那个函数。
++详见[冰雪说明](../../docs/winch_ice.md)、[当前后续工作](winch_ice/待办.md)和[验收记录](../../docs/winch_ice_acceptance.md)。
++
++## 新增功能插件
++
++1. 在src/tasks新增IFunctionPlugin实现及构造函数，用FunctionPluginRegistration登记功能号。
++2. 在CMakeLists.txt通过evs_add_plugin生成独立插件，不把业务实现直接放入公共EVS_SRC。
++3. 动态宿主链接公共库与新插件，并确保登记对象被加载；静态宿主保留归档登记对象。
++4. 涉及公共结构/虚表变化时评估ABI，保持头文件、核心、相关插件和宿主一致；不能仅替换一个旧版插件。
+diff --git a/src/tasks/winch_ice/winch_ice_plugin.cpp b/src/tasks/winch_ice/winch_ice_plugin.cpp
+index befdf22..7f1445d 100644
+--- a/src/tasks/winch_ice/winch_ice_plugin.cpp
++++ b/src/tasks/winch_ice/winch_ice_plugin.cpp
+@@ -1,48 +1,261 @@
+ #include "winch_ice_plugin.h"
+-
+ #include "evs/status.h"
++#include "evs/testing/ice_replay.h"
+ #include "evs_register.h"
++#include <algorithm>
++#include <chrono>
++#include <cmath>
+ 
+ namespace evs {
++using namespace winch_ice;
++
++namespace {
++uint32_t ice_status(EvsStatus s) {
++    return with_module(8, static_cast<uint32_t>(s));
++}
++
++#if defined(EVS_WITH_OPENCV)
++float overlap(const Target& a, const Target& b) {
++    const float w = std::max(0.f, std::min(a.x + a.w / 2, b.x + b.w / 2) -
++                                      std::max(a.x - a.w / 2, b.x - b.w / 2));
++    const float h = std::max(0.f, std::min(a.y + a.h / 2, b.y + b.h / 2) -
++                                      std::max(a.y - a.h / 2, b.y - b.h / 2));
++    const float intersection = w * h;
++    return intersection / (a.w * a.h + b.w * b.h - intersection);
++}
++
++Detection pixel_box(const Target& t, int w, int h) {
++    // Same rounded half-open endpoints define both the denominator and the overlay.
++    const int left = std::clamp(int(std::lround((t.x - t.w / 2) * w)), 0, w);
++    const int top = std::clamp(int(std::lround((t.y - t.h / 2) * h)), 0, h);
++    const int right = std::clamp(int(std::lround((t.x + t.w / 2) * w)), 0, w);
++    const int bottom = std::clamp(int(std::lround((t.y + t.h / 2) * h)), 0, h);
++    return {uint32_t(std::max(0, t.class_id)),
++            t.confidence,
++            uint32_t(left),
++            uint32_t(top),
++            uint32_t(std::max(0, right - left)),
++            uint32_t(std::max(0, bottom - top))};
++}
++
++bool intersects(const Detection& a, const Detection& b) {
++    return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height &&
++           b.y < a.y + a.height;
++}
++#endif
++} // namespace
+ 
+ uint32_t WinchIcePlugin::configure(const TaskConfig& cfg) {
+-    if (cfg.area_ratio < 0.f || cfg.area_ratio > 1.f)
++    if (!std::isfinite(cfg.confidence_threshold) || cfg.confidence_threshold < 0 ||
++        cfg.confidence_threshold > 1 || !std::isfinite(cfg.nms_threshold) ||
++        cfg.nms_threshold < 0 || cfg.nms_threshold > 1 || !std::isfinite(cfg.area_ratio) ||
++        cfg.area_ratio < 0 || cfg.area_ratio > 1 || cfg.ice.saturation_max < 0 ||
++        cfg.ice.saturation_max > 255 || cfg.ice.value_min < 0 || cfg.ice.value_min > 255)
+         return static_cast<uint32_t>(EvsStatus::OutOfRange);
+-    area_ratio_ = cfg.area_ratio;
+-    exit_on_alarm_ = cfg.exit_on_alarm;
+-    return 0u;
++#if !defined(EVS_WITH_OPENCV)
++    return static_cast<uint32_t>(EvsStatus::NotSupported);
++#else
++    if (cfg.video_channel.size() != 1 || cfg.video_channel[0] < 0 ||
++        cfg.video_channel[0] >= kCameraChannelUnused || cfg.ground.enabled ||
++        !cfg.inference_enabled)
++        return static_cast<uint32_t>(EvsStatus::ConfigInvalid);
++    if (configured_ && cfg.video_channel != cfg_.video_channel)
++        return static_cast<uint32_t>(EvsStatus::NotSupported);
++    auto next = cfg; // Allocate before committing an update.
++    using std::swap;
++    swap(cfg_, next);
++    configured_ = true;
++    return 0;
++#endif
++}
++
++void WinchIcePlugin::summarize() noexcept {
++    bool alarm = false, valid = false;
++    for (const auto& r : report_.objects) {
++        valid |= r.valid;
++        alarm |= r.valid && r.state == ObjectState::Alarm;
++    }
++    report_.alert_level = alarm ? AlertLevel::ALERT_WARN : AlertLevel::ALERT_NONE;
++    report_.result_code = valid ? ResultCode::RESULT_MATCH : ResultCode::RESULT_NO_RESULT;
++}
++
++void WinchIcePlugin::publish(Result& out, uint32_t status) noexcept {
++    summarize();
++    report_.status = status;
++    out.status = status;
++    out.ice_ratio = report_.objects.size() == 1 && report_.objects[0].valid
++                        ? report_.objects[0].ice_ratio
++                        : kIceRatioUnknown;
++    out.alarm =
++        report_.alert_level == AlertLevel::ALERT_WARN ? AlarmState::Alarm : AlarmState::None;
++    out.targets.clear();
++    out.camera_channel = pack_camera_channel(static_cast<uint8_t>(report_.camera_channel));
++}
++
++void WinchIcePlugin::reject_call(uint32_t status, Result& out) noexcept {
++    report_ = WinchSnowResult{};
++    report_.camera_channel = configured_ ? uint32_t(cfg_.video_channel[0]) : 0xFFFFFFFFu;
++#if defined(EVS_WITH_OPENCV)
++    measurements_.clear();
++#endif
++    publish(out, status);
++}
++
++uint32_t WinchIcePlugin::preflight(const Frame& frame, const MachineContext&, Result& out,
++                                   bool& run) {
++    reject_call(0, out); // No cached result, even for repeated timestamps or rejected calls.
++    run = false;
++    if (!configured_) {
++        publish(out, ice_status(EvsStatus::NotInitialized));
++        return out.status;
++    }
++    if (frame.camera_id != cfg_.video_channel[0]) {
++        publish(out, ice_status(EvsStatus::InvalidCameraIndex));
++        return out.status;
++    }
++    run = true;
++    return 0;
+ }
+ 
+ uint32_t WinchIcePlugin::decide(const Frame& frame, const MachineContext& ctx,
+                                 const std::vector<Target>& targets, Result& out) {
+-    (void)frame;
+-    (void)ctx;
++    bool run = false;
++    if (const auto rc = preflight(frame, ctx, out, run))
++        return rc;
++#if !defined(EVS_WITH_OPENCV)
+     (void)targets;
+-    (void)area_ratio_;
+-    (void)exit_on_alarm_;
+-    (void)ice_exited_;
+-    // TODO: measure ice area / frame area into out.ice_ratio. When the ratio
+-    // crosses area_ratio_ and exit_on_alarm_ is set, raise alarm once and
+-    // latch ice_exited_ so later frames stay quiet until reset().
++    publish(out, ice_status(EvsStatus::NotSupported));
++    return out.status;
++#else
++    const auto start = std::chrono::steady_clock::now();
++    auto fail = [&](EvsStatus status) {
++        reject_call(ice_status(status), out);
++        return out.status;
++    };
++    std::vector<Target> selected;
++    for (const auto& t : targets) {
++        if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.w) ||
++            !std::isfinite(t.h) || t.w <= 0 || t.h <= 0 || t.x - t.w / 2 < -1e-6f ||
++            t.y - t.h / 2 < -1e-6f || t.x + t.w / 2 > 1.000001f || t.y + t.h / 2 > 1.000001f)
++            return fail(EvsStatus::InvalidParameter);
++        if (!std::isfinite(t.confidence) || t.confidence < 0 || t.confidence > 1)
++            return fail(EvsStatus::ModelInvalidFormat);
++        if (t.class_id == cfg_.person_class_id && t.confidence >= cfg_.confidence_threshold)
++            selected.push_back(t);
++    }
++    std::sort(selected.begin(), selected.end(),
++              [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
++    std::vector<Target> kept;
++    for (const auto& t : selected) {
++        if (std::none_of(kept.begin(), kept.end(),
++                         [&](const auto& other) { return overlap(t, other) > cfg_.nms_threshold; }))
++            kept.push_back(t);
++        if (kept.size() > 2) {
++            fail(EvsStatus::OutOfRange);
++            report_.reason = Reason::UnexpectedObjectCount;
++            return out.status;
++        }
++    }
++    selected.swap(kept);
++    std::sort(selected.begin(), selected.end(),
++              [](const auto& a, const auto& b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
++    IceFramePixels pixels;
++    if (const auto rc = prepare_ice_pixels(frame, cfg_.ice, pixels)) {
++        reject_call(with_module(8, rc), out);
++        return out.status;
++    }
++    report_.processed = true;
++    if (selected.empty()) {
++        report_.reason = Reason::ObjectNotFound;
++        publish(out);
++        return 0;
++    }
++    const auto count = selected.size();
++    report_.objects.resize(count);
++    measurements_.resize(count);
++    for (size_t i = 0; i < count; ++i) {
++        auto& r = report_.objects[i];
++        r.measurement_timestamp_ms = static_cast<uint32_t>(frame.timestamp_us / 1000);
++        r.winch_id = uint32_t(i);
++        r.box = pixel_box(selected[i], frame.width, frame.height);
++        if (r.box.width < 3 || r.box.height < 3) {
++            r.state = ObjectState::Failed;
++            r.reason = Reason::InvalidSurface;
++            r.status = ice_status(EvsStatus::InvalidImageSize);
++            continue;
++        }
++        bool ambiguous = false;
++        for (size_t j = 0; j < selected.size(); ++j)
++            if (i != j && intersects(r.box, pixel_box(selected[j], frame.width, frame.height)))
++                ambiguous = true;
++        if (ambiguous) {
++            r.state = ObjectState::Failed;
++            r.reason = Reason::OverlappingBoxes;
++            r.status = ice_status(EvsStatus::InvalidParameter);
++            continue;
++        }
++        const cv::Rect rect(int(r.box.x), int(r.box.y), int(r.box.width), int(r.box.height));
++        const auto rc = measure_ice_pixels(pixels, rect, measurements_[i]);
++        if (rc == uint32_t(EvsStatus::MemoryAllocation) ||
++            rc == uint32_t(EvsStatus::PostprocessFailed)) {
++            reject_call(with_module(8, rc), out);
++            return out.status;
++        }
++        r.surface_pixels = measurements_[i].surface_pixels;
++        r.snow_pixels = measurements_[i].snow_pixels;
++        r.status = with_module(8, rc);
++        if (rc) {
++            r.state = ObjectState::Failed;
++            r.reason = rc == kIceUnobservable ? Reason::Unobservable : Reason::InvalidSurface;
++        } else {
++            r.valid = true;
++            r.ice_ratio = measurements_[i].ratio;
++            r.state = r.ice_ratio >= cfg_.area_ratio ? ObjectState::Alarm : ObjectState::Normal;
++        }
++    }
++    report_.processing_time_ms =
++        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++    publish(out);
++    return 0;
++#endif
++}
++
++bool WinchIcePlugin::copy_ice_masks(std::vector<testing::IceMaskSnapshot>& out) const {
++    out.clear();
+ #if defined(EVS_WITH_OPENCV)
+-    // Optional OpenCV area measurement belongs in this directory only.
++    for (size_t i = 0; i < measurements_.size(); ++i) {
++        const auto& m = measurements_[i];
++        if (m.surface.empty())
++            continue;
++        testing::IceMaskSnapshot s;
++        s.winch_id = report_.objects[i].winch_id;
++        s.timestamp_ms = report_.objects[i].measurement_timestamp_ms;
++        s.width = m.surface.cols;
++        s.height = m.surface.rows;
++        s.surface.assign(m.surface.datastart, m.surface.dataend);
++        if (!m.snow.empty())
++            s.snow.assign(m.snow.datastart, m.snow.dataend);
++        out.push_back(std::move(s));
++    }
++    return true;
++#else
++    return false;
+ #endif
+-    out.ice_ratio = 0.f;
+-    out.alarm = AlarmState::None;
+-    out.targets.clear();
+-    return 0u;
+ }
+ 
+-void WinchIcePlugin::reset() { ice_exited_ = false; }
++void WinchIcePlugin::reset() {
++    configured_ = false;
++    report_ = WinchSnowResult{};
++#if defined(EVS_WITH_OPENCV)
++    measurements_.clear();
++#endif
++}
+ 
+ namespace {
+-
+ std::unique_ptr<IFunctionPlugin> make_winch_ice_plugin() {
+     return std::make_unique<WinchIcePlugin>();
+ }
+ 
+ const FunctionPluginRegistration kWinchIce(0x0008, make_winch_ice_plugin);
+-
+ } // namespace
+-
+ } // namespace evs
+diff --git a/src/tasks/winch_ice/winch_ice_plugin.h b/src/tasks/winch_ice/winch_ice_plugin.h
+index 54d30ce..f4c778c 100644
+--- a/src/tasks/winch_ice/winch_ice_plugin.h
++++ b/src/tasks/winch_ice/winch_ice_plugin.h
+@@ -1,23 +1,32 @@
+ #pragma once
+ #include "evs/function_plugin.h"
++#include "evs/winch_ice.h"
++#include "ice_measurement.h"
+ 
+ namespace evs {
+-
+-// 0x0008 winch-ice skeleton. Area measurement is not filled in.
+-// exit_on_alarm: once an alarm has been raised, later frames stay silent
+-// until reset(). The skeleton never raises that alarm.
+ class WinchIcePlugin : public IFunctionPlugin {
+ public:
+     uint16_t module_id() const override { return 0x0008; }
+-    uint32_t configure(const TaskConfig& cfg) override;
+-    uint32_t decide(const Frame& frame, const MachineContext& ctx,
+-                    const std::vector<Target>& targets, Result& out) override;
++
++    uint32_t configure(const TaskConfig&) override;
++    uint32_t preflight(const Frame&, const MachineContext&, Result&, bool& run) override;
++    void reject_call(uint32_t status, Result& out) noexcept override;
++    uint32_t decide(const Frame&, const MachineContext&, const std::vector<Target>&,
++                    Result&) override;
++
++    const winch_ice::WinchSnowResult* winch_result() const override { return &report_; }
++
++    bool copy_ice_masks(std::vector<testing::IceMaskSnapshot>&) const override;
+     void reset() override;
+ 
+ private:
+-    float area_ratio_ = 0.3f;
+-    bool exit_on_alarm_ = true;
+-    bool ice_exited_ = false; // TODO: set when exit_on_alarm trips
++    void summarize() noexcept;
++    void publish(Result&, uint32_t status = 0) noexcept;
++    TaskConfig cfg_;
++    winch_ice::WinchSnowResult report_;
++    bool configured_ = false;
++#if defined(EVS_WITH_OPENCV)
++    std::vector<IceMeasurement> measurements_;
++#endif
+ };
+-
+ } // namespace evs
+diff --git "a/src/tasks/winch_ice/\345\276\205\345\212\236.md" "b/src/tasks/winch_ice/\345\276\205\345\212\236.md"
+index 2657ffd..ab1ed1f 100644
+--- "a/src/tasks/winch_ice/\345\276\205\345\212\236.md"
++++ "b/src/tasks/winch_ice/\345\276\205\345\212\236.md"
+@@ -1,42 +1,8 @@
+-# 卷扬冰雪待办
+-
+-模块 `0x0008`，插件 `WinchIcePlugin`。判断逻辑只改本目录。模型文件和库的编译开关不在这里。
+-
+-现在 `decide()` 不看图像，也不看检测框，每帧 `ice_ratio=0`、`alarm=None`。`area_ratio` 和 `exit_on_alarm` 已经从 YAML 读进 `configure()`，判断时还没有使用。
+-
+-目标流程：
+-
+-1. 输入是卷扬区域的帧，加上 YAML 里的阈值。
+-2. 检测或分割，得到冰雪区域。
+-3. `ice_ratio = 冰雪面积 / 观测区域`，写入 `Result.ice_ratio`。
+-4. `ice_ratio >= area_ratio` 才告警。不到阈值就继续监测，`alarm` 保持 `None`。
+-5. 到阈值写 `Alarm`。`exit_on_alarm` 为 true 时置上 `ice_exited_`，后面的帧不再告警，直到 `reset()`。面积比仍然每帧写出。
+-
+-`configs/winch_ice.yaml` 里 `area_ratio: 0.3`，`exit_on_alarm: true`，相机通道是 0 和 1。这份样例的 `backend` 仍是 `mock`，只给本机测试。还没有单独的宿主程序。
+-
+-## 冰雪区域：等训练好的模型
+-
+-把训练好的模型放到宿主当前目录，并把样例里的 `Model_path: models/winch_ice.rknn` 改成板上的相对路径，`backend` 改成 `rknn`。推理结果会进 `decide()`，现在被丢掉了。
+-
+-模型和现在的约定不一样时，改任务 YAML，不改本目录：
+-
+-| 变了什么 | 改哪个字段 |
+-|---|---|
+-| 不是 yolov8 | `output_format` |
+-| 输入不是 640×640 | `input_width`、`input_height` |
+-| 只保留某一类 | `person_class_id`（`-1` 表示全部保留） |
+-
+-改 `Model_path`、`backend`、`output_format`、`person_class_id` 要重新 `initialize`，`updateConfig` 不接受这几项。
+-
+-现有解码器只出检测框，没有分割掩码。模型是检测框时，冰雪面积用框面积。模型是分割时，掩码面积的计算写在本目录。
+-
+-观测区域现在没有单独字段。观测区域就是整帧时，分母用帧面积。若只要画面里的一块卷扬区域，再往 YAML 加这块区域的配置。
+-
+-## 面积和告警：等本目录补上
+-
+-在 `winch_ice_plugin.cpp` 的 `decide()` 里接上上面的第 3 到第 5 步。用图像量面积时，OpenCV 只写在本目录，并包在 `EVS_WITH_OPENCV` 里。这个宏默认是关的，CMake 也还没有查找和链接 OpenCV。
+-
+-写完后：
+-
+-1. 交叉编译 `libevs_ice.so` 时加上 `-DEVS_WITH_OPENCV=ON`，并链上 OpenCV。
+-2. 用新的 `libevs_ice.so.1` 换掉宿主旁边那一份。`libevs_core.so.1` 不用换。
++# 卷扬冰雪后续事项
++
++- 接收算法方卷扬RKNN模型、目标芯片和实际输入输出契约，按需适配原始多头解码。
++- 重锤模型不用于卷扬。当前支持已解码单张量框输出，形状不符明确报错。
++- 在目标Ubuntu板验证真实NPU、相机取帧、单/双卷扬及独立冰雪像素真值。
++- HSV对反光、背景、阴影和透明冰的识别限制需现场评估。
++- 当前逐帧返回；工况、重试、报警保持归宿主。不做跨帧主副身份跟踪。
++- 其他模块和公共构建历史问题继续按原记录处理，不纳入本轮修复。
+diff --git a/src/vision_task.cpp b/src/vision_task.cpp
+index 4dd62ee..7db2410 100644
+--- a/src/vision_task.cpp
++++ b/src/vision_task.cpp
+@@ -1,23 +1,30 @@
+ #include "evs/vision_task.h"
++#include "core/config_internal.h"
++#include "evs/testing/ice_replay.h"
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <limits>
+ #include <map>
+ #include <sstream>
+ #include <utility>
+ #include <vector>
+ 
+-#include "evs/geom.h"
+ #include "evs/backend_factory.h"
+-#include "evs/model_registry.h"
+-#include "evs/task_config.h"
++#if defined(EVS_BACKEND_RKNN)
++#include "evs/rknn_backend.h"
++#endif
++#include <cmath>
++#include "evs/debug.h"
++#include "evs/detection_decoder.h"
+ #include "evs/function_plugin.h"
++#include "evs/geom.h"
+ #include "evs/ground_mapper.h"
+ #include "evs/ground_metrics.h"
+-#include "evs/detection_decoder.h"
+-#include "evs/preprocess.h"
+ #include "evs/log.h"
+-#include "evs/debug.h"
++#include "evs/model_registry.h"
++#include "evs/preprocess.h"
++#include "evs/task_config.h"
+ 
+ namespace evs {
+ 
+@@ -99,53 +106,85 @@ uint32_t VisionTask::initialize(std::string_view config_path) {
+     TaskConfig cfg;
+     uint32_t err = 0;
+     EVS_LOGI("initializing from %s", cfp.c_str());
+-    if (!load_task_config(config_path, cfg, err)) {
++    uint16_t parsed_module = cfg.module_id;
++    if (!detail::load_task_config_with_module(config_path, cfg, err, parsed_module)) {
+         EVS_LOGE("config parse failed: %s", cfp.c_str());
+         // rollback: nothing allocated yet
+         const uint32_t code = err ? err : static_cast<uint32_t>(EvsStatus::ConfigParse);
+-        return with_module(cfg.module_id, code);
++        return with_module(parsed_module, code);
+     }
+ 
++    return initialize(cfg);
++}
++
++uint32_t VisionTask::initialize(const TaskConfig& config) {
++    if (impl_->initialized)
++        return 0u;
++    TaskConfig cfg = config;
++    if (!cfg.inference_enabled)
++        return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::NotSupported));
++
++    if (cfg.module_id == 8) {
++        if (cfg.ground.enabled ||
++            cfg.Model_path.empty() || cfg.input_width <= 0 || cfg.input_height <= 0 ||
++            cfg.input_width > 8192 || cfg.input_height > 8192 ||
++            cfg.decoder_classes < 1 || cfg.decoder_classes > 4096 ||
++            cfg.person_class_id < 0 || cfg.person_class_id >= cfg.decoder_classes ||
++            (cfg.input_format != "rgb" && cfg.input_format != "bgr"))
++            return with_module(8, static_cast<uint32_t>(EvsStatus::ConfigInvalid));
++        if (cfg.backend != "rknn" ||
++            (cfg.output_format != "flat6" && cfg.output_format != "yolov8" &&
++             cfg.output_format != "yolox"))
++            return with_module(8, static_cast<uint32_t>(EvsStatus::NotSupported));
++    }
++
++    auto& reg = global_registry();
++    std::shared_ptr<IInferBackend> be;
++    std::unique_ptr<IDetectionDecoder> dec;
+     if (!create_backend(cfg.backend)) {
+         EVS_LOGE("backend '%s' is not compiled into this build", cfg.backend.c_str());
+         return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::NotSupported));
+     }
+-    auto& reg = global_registry();
+-    auto be = reg.acquire(cfg.backend, cfg.Model_path, cfg.init_timeout_s);
++    be = reg.acquire(cfg.backend, cfg.Model_path, cfg.init_timeout_s);
+     if (!be) {
+-        EVS_LOGE("model load failed: backend=%s model=%s",
+-                 cfg.backend.c_str(), cfg.Model_path.c_str());
++        EVS_LOGE("model load failed: %s", cfg.Model_path.c_str());
+         return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::ModelLoadFailed));
+     }
+-
+-    // Tell the backend the input tensor shape so backends that need it
+-    // spatially (e.g. the x86 reference detector) can interpret the buffer.
++#if defined(EVS_BACKEND_RKNN)
++    if (cfg.module_id == 8) {
++        const auto rc = static_cast<RknnBackend*>(be.get())->validateDetectionModel(
++            cfg.output_format, cfg.decoder_classes, cfg.input_width, cfg.input_height);
++        if (rc) {
++            reg.release(cfg.backend, cfg.Model_path);
++            return with_module(8, rc);
++        }
++    }
++#endif
+     be->configure_input(cfg.input_width, cfg.input_height);
+-
+-    // Model-output decoder: unknown format must fail fast rather than produce
+-    // silent garbage in the policy below.
+-    auto dec = create_decoder(cfg.output_format, cfg.person_class_id, cfg.decoder_classes, cfg.input_width, cfg.input_height);
++    dec = create_decoder(cfg.output_format, cfg.person_class_id, cfg.decoder_classes,
++                         cfg.input_width, cfg.input_height);
+     if (!dec) {
+-        EVS_LOGE("unknown output_format=%s", cfg.output_format.c_str());
++        EVS_LOGE("unknown output_format: %s", cfg.output_format.c_str());
+         reg.release(cfg.backend, cfg.Model_path);
+-        return with_module(cfg.module_id,
+-                           static_cast<uint32_t>(EvsStatus::ModelInvalidFormat));
++        return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::ModelInvalidFormat));
+     }
+-
+     auto plugin = create_function_plugin(cfg.module_id);
+     if (!plugin) {
+-        EVS_LOGE("no function plugin for module 0x%04X", cfg.module_id);
+-        reg.release(cfg.backend, cfg.Model_path);
++        EVS_LOGE("no function plugin for module_id=0x%04X", cfg.module_id);
++        if (be)
++            reg.release(cfg.backend, cfg.Model_path);
+         return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::NotSupported));
+     }
+     if (const uint32_t pc = plugin->configure(cfg)) {
+-        EVS_LOGE("function plugin configure failed (status=0x%08X)", pc);
+-        reg.release(cfg.backend, cfg.Model_path);
++        EVS_LOGE("plugin configure failed: module_id=0x%04X status=0x%08X", cfg.module_id, pc);
++        if (be)
++            reg.release(cfg.backend, cfg.Model_path);
+         return with_module(cfg.module_id, pc);
+     }
+     GroundMapperMap ground_mappers;
+     if (const uint32_t ge = build_ground_mappers(cfg.ground, ground_mappers)) {
+-        reg.release(cfg.backend, cfg.Model_path);
++        if (be)
++            reg.release(cfg.backend, cfg.Model_path);
+         return with_module(cfg.module_id, ge);
+     }
+     warn_missing_ground_mappers(cfg, ground_mappers);
+@@ -176,7 +215,15 @@ uint32_t VisionTask::initialize(std::string_view config_path) {
+                 impl_->cfg.input_height * 3,
+             0);
+         std::vector<float> warm_out;
+-        const uint32_t wr = impl_->backend->infer(dummy, warm_out);
++        uint32_t wr;
++#if defined(EVS_BACKEND_RKNN)
++        if (impl_->cfg.module_id == 8)
++            wr = static_cast<RknnBackend*>(impl_->backend.get())->inferDetectionRows(
++                dummy, warm_out, impl_->cfg.output_format, impl_->cfg.decoder_classes,
++                impl_->cfg.input_width, impl_->cfg.input_height);
++        else
++#endif
++            wr = impl_->backend->infer(dummy, warm_out);
+         if (wr != 0u) {
+             EVS_LOGW("warmup inference failed (status=0x%08X)", wr);
+         } else {
+@@ -211,7 +258,23 @@ uint32_t VisionTask::acceptFrame(const Frame& frame) const {
+ }
+ 
+ uint32_t VisionTask::detect(const Frame& frame, const MachineContext& ctx, Result& out) {
+-    if (const uint32_t ck = acceptFrame(frame)) return ck;
++    if (impl_->cfg.module_id == 0x0008) {
++        out = Result{};
++        out.ice_ratio = kIceRatioUnknown;
++        if (frame.camera_id >= 0 && frame.camera_id < kCameraChannelUnused)
++            out.camera_channel = pack_camera_channel(static_cast<uint8_t>(frame.camera_id));
++    }
++    if (const uint32_t ck = acceptFrame(frame)) {
++        if (impl_->cfg.module_id == 0x0008)
++            return rejectWinchSnow(with_module(8, ck), out);
++        return ck;
++    }
++
++    bool run = true;
++    if (const auto rc = impl_->plugin->preflight(frame, ctx, out, run))
++        return rc;
++    if (!run)
++        return 0u;
+ 
+     // Optical blind is judged after preprocessing, before inference.
+     // (placeholder: never blind in the scaffold build)
+@@ -235,6 +298,7 @@ uint32_t VisionTask::detect(const Frame& frame, const MachineContext& ctx, Resul
+             EVS_LOGE("preprocess failed (status=0x%08X)", pr);
+             impl_->dbg.note(0.0, 0.0, 0.0, ms_since(t0), pr, AlarmState::None,
+                             0, frame.timestamp_us);
++            if (impl_->cfg.module_id == 0x0008) return rejectWinchSnow(pr, out);
+             return pr;
+         }
+     } else {
+@@ -250,7 +314,22 @@ uint32_t VisionTask::detect(const Frame& frame, const MachineContext& ctx, Resul
+ uint32_t VisionTask::detectPrepared(const Frame& frame, const MachineContext& ctx,
+                                     std::vector<uint8_t> tensor, const PreprocessMap& map,
+                                     double preprocess_ms, Result& out) {
+-    if (const uint32_t ck = acceptFrame(frame)) return ck;
++    if (impl_->cfg.module_id == 0x0008) {
++        out = Result{};
++        out.ice_ratio = kIceRatioUnknown;
++        if (frame.camera_id >= 0 && frame.camera_id < kCameraChannelUnused)
++            out.camera_channel = pack_camera_channel(static_cast<uint8_t>(frame.camera_id));
++    }
++    if (const uint32_t ck = acceptFrame(frame)) {
++        if (impl_->cfg.module_id == 0x0008)
++            return rejectWinchSnow(with_module(8, ck), out);
++        return ck;
++    }
++    bool run = true;
++    if (const auto rc = impl_->plugin->preflight(frame, ctx, out, run))
++        return rc;
++    if (!run)
++        return 0u;
+     const std::size_t need = static_cast<std::size_t>(impl_->cfg.input_width) *
+                              static_cast<std::size_t>(impl_->cfg.input_height) * 3u;
+     if (tensor.size() != need || map.in_w != impl_->cfg.input_width ||
+@@ -258,12 +337,41 @@ uint32_t VisionTask::detectPrepared(const Frame& frame, const MachineContext& ct
+         EVS_LOGW("detectPrepared: tensor %zu bytes, map %dx%d, model %dx%d",
+                  tensor.size(), map.in_w, map.in_h, impl_->cfg.input_width,
+                  impl_->cfg.input_height);
+-        return with_module(impl_->cfg.module_id,
+-                           static_cast<uint32_t>(EvsStatus::InvalidImageSize));
++        const uint32_t rc =
++            with_module(impl_->cfg.module_id, static_cast<uint32_t>(EvsStatus::InvalidImageSize));
++        if (impl_->cfg.module_id == 0x0008) return rejectWinchSnow(rc, out);
++        return rc;
+     }
+     return finishDetect(frame, ctx, tensor, map, preprocess_ms, out);
+ }
+ 
++bool VisionTask::lastWinchSnowResult(winch_ice::WinchSnowResult& out) const {
++    const auto* result = winchSnowResultView();
++    if (!result)
++        return false;
++    out = *result;
++    return true;
++}
++
++const winch_ice::WinchSnowResult* VisionTask::winchSnowResultView() const noexcept {
++    return impl_->initialized && impl_->plugin ? impl_->plugin->winch_result() : nullptr;
++}
++
++uint32_t VisionTask::rejectWinchSnow(uint32_t status, Result& out) noexcept {
++    if (impl_->initialized && impl_->plugin && impl_->cfg.module_id == 0x0008)
++        impl_->plugin->reject_call(status, out);
++    else {
++        out = Result{};
++        out.ice_ratio = kIceRatioUnknown;
++        out.status = status;
++    }
++    return status;
++}
++
++bool VisionTask::copyIceMasks(std::vector<testing::IceMaskSnapshot>& out) const {
++    return impl_->initialized && impl_->plugin && impl_->plugin->copy_ice_masks(out);
++}
++
+ int VisionTask::inputWidth() const {
+     return impl_->initialized ? impl_->cfg.input_width : 0;
+ }
+@@ -289,13 +397,22 @@ uint32_t VisionTask::finishDetect(const Frame& frame, const MachineContext& ctx,
+ 
+     const Clock::time_point t1 = Clock::now();
+     std::vector<float> output;
+-    uint32_t r = impl_->backend->infer(input, output);
++    uint32_t r;
++#if defined(EVS_BACKEND_RKNN)
++    if (impl_->cfg.module_id == 8)
++        r = static_cast<RknnBackend*>(impl_->backend.get())->inferDetectionRows(
++            input, output, impl_->cfg.output_format, impl_->cfg.decoder_classes,
++            impl_->cfg.input_width, impl_->cfg.input_height);
++    else
++#endif
++        r = impl_->backend->infer(input, output);
+     const double infer_ms = ms_since(t1);
+     if (r != 0u) {
+         r = with_module(impl_->cfg.module_id, r);
+         EVS_LOGE("inference failed (status=0x%08X, input=%zu B)", r, input.size());
+         impl_->dbg.note(pre_ms, infer_ms, 0.0, pre_ms + ms_since(t_start), r,
+                         AlarmState::None, 0, frame.timestamp_us);
++        if (impl_->cfg.module_id == 0x0008) return rejectWinchSnow(r, out);
+         return r;
+     }
+ 
+@@ -306,6 +423,23 @@ uint32_t VisionTask::finishDetect(const Frame& frame, const MachineContext& ctx,
+     // so the policy works in original-frame coordinates.
+     for (auto& t : targets)
+         map_target_to_original(pre_map, t, frame.width, frame.height);
++    if (impl_->cfg.module_id == 8) {
++        // Clip boxes after undoing letterbox. Padding itself is not image area.
++        for (auto& t : targets) {
++            if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.w) ||
++                !std::isfinite(t.h) || t.w < 0 || t.h < 0)
++                return rejectWinchSnow(with_module(8, uint32_t(EvsStatus::ModelInvalidFormat)), out);
++            const float left = std::clamp(t.x - t.w / 2, 0.f, 1.f);
++            const float top = std::clamp(t.y - t.h / 2, 0.f, 1.f);
++            const float right = std::clamp(t.x + t.w / 2, 0.f, 1.f);
++            const float bottom = std::clamp(t.y + t.h / 2, 0.f, 1.f);
++            t.x = (left + right) / 2; t.y = (top + bottom) / 2;
++            t.w = right - left; t.h = bottom - top;
++        }
++        targets.erase(std::remove_if(targets.begin(), targets.end(), [](const auto& t) {
++            return t.w <= 0 || t.h <= 0;
++        }), targets.end());
++    }
+     for (auto& target : targets) {
+         target.ground_ok = false;
+         target.ground_x_m = 0.f;
+@@ -329,6 +463,8 @@ uint32_t VisionTask::finishDetect(const Frame& frame, const MachineContext& ctx,
+     }
+     const double decode_ms = ms_since(t2);
+     out = Result{};
++    if (impl_->cfg.module_id == 0x0008)
++        out.ice_ratio = kIceRatioUnknown;
+     out.status = 0u;
+     out.camera_blind = false;
+     if (!impl_->plugin)
+@@ -376,6 +512,20 @@ uint32_t VisionTask::updateConfig(std::string_view config_path) {
+         const uint32_t code = err ? err : static_cast<uint32_t>(EvsStatus::ConfigParse);
+         return with_module(module, code);
+     }
++    return updateConfig(newcfg);
++}
++
++uint32_t VisionTask::updateConfig(const TaskConfig& config) {
++    if (!impl_->initialized)
++        return static_cast<uint32_t>(EvsStatus::NotInitialized);
++    const uint16_t module = impl_->cfg.module_id;
++    TaskConfig newcfg = config;
++    if (module == 8 && (newcfg.input_width != impl_->cfg.input_width ||
++        newcfg.input_height != impl_->cfg.input_height ||
++        newcfg.input_format != impl_->cfg.input_format || newcfg.letterbox != impl_->cfg.letterbox))
++        return with_module(8, static_cast<uint32_t>(EvsStatus::NotSupported));
++    if (newcfg.inference_enabled != impl_->cfg.inference_enabled)
++        return with_module(module, static_cast<uint32_t>(EvsStatus::NotSupported));
+     // Backend / model are immutable at runtime.
+     if (newcfg.backend != impl_->cfg.backend || newcfg.Model_path != impl_->cfg.Model_path) {
+         EVS_LOGW("updateConfig rejected: backend/model change %s -> %s",
+@@ -426,6 +576,7 @@ uint32_t VisionTask::updateConfig(std::string_view config_path) {
+     impl_->cfg.basic_boom_only = newcfg.basic_boom_only;
+     impl_->cfg.area_ratio = newcfg.area_ratio;
+     impl_->cfg.exit_on_alarm = newcfg.exit_on_alarm;
++    impl_->cfg.ice = newcfg.ice;
+ 
+     // Debug settings stay hot even when everything else is frozen: a field
+     // technician must be able to turn dumping on without a restart.
+@@ -444,7 +595,7 @@ uint32_t VisionTask::updateConfig(std::string_view config_path) {
+ 
+ void VisionTask::release() {
+     if (!impl_) return;
+-    if (impl_->initialized && !impl_->cfg.Model_path.empty()) {
++    if (impl_->initialized && impl_->backend) {
+         EVS_LOGI("releasing %s:%s (%llu frames processed)",
+                  impl_->cfg.backend.c_str(), impl_->cfg.Model_path.c_str(),
+                  static_cast<unsigned long long>(impl_->dbg.stats().frames));
+@@ -465,16 +616,14 @@ std::string VisionTask::debugSnapshot() const {
+     const DebugStats& s = impl_->dbg.stats();
+     std::ostringstream js;
+     js << "{\"initialized\":" << (impl_->initialized ? "true" : "false")
+-       << ",\"task\":" << jstr(c.task)
+-       << ",\"backend\":" << jstr(c.backend)
+-       << ",\"Model_path\":" << jstr(c.Model_path)
+-       << ",\"output_format\":" << jstr(c.output_format)
++       << ",\"inference_enabled\":" << (c.inference_enabled ? "true" : "false")
++       << ",\"task\":" << jstr(c.task) << ",\"backend\":" << jstr(c.backend)
++       << ",\"Model_path\":" << jstr(c.Model_path) << ",\"output_format\":" << jstr(c.output_format)
+        << ",\"input\":{\"w\":" << c.input_width << ",\"h\":" << c.input_height
+        << ",\"format\":" << jstr(c.input_format)
+        << ",\"letterbox\":" << (c.letterbox ? "true" : "false") << "}"
+        << ",\"confidence_threshold\":" << c.confidence_threshold
+-       << ",\"latency_budget_ms\":" << c.latency_budget_ms
+-       << ",\"frames\":" << s.frames
++       << ",\"latency_budget_ms\":" << c.latency_budget_ms << ",\"frames\":" << s.frames
+        << ",\"stats\":" << impl_->dbg.snapshot_json();
+     // Append the last few log lines so a remote snapshot carries context.
+     js << ",\"log\":[";
+diff --git a/tests/test_core.cpp b/tests/test_core.cpp
+index 3b22644..8f2308c 100644
+--- a/tests/test_core.cpp
++++ b/tests/test_core.cpp
+@@ -168,6 +168,40 @@ int main() {
+           "task reference with legacy forward distance is rejected");
+     std::remove(invalid_ground_path.c_str());
+ 
++    // Shared loader compatibility: overlay on success, no partial state on failure.
++    const std::string compatibility_path = "tmp_config_compatibility.yaml";
++    TaskConfig overlay;
++    overlay.module_id = 4;
++    overlay.confidence_threshold = .91f;
++    CHECK(write_sample(compatibility_path, "module_id: 0x0004\n"), "write overlay config");
++    CHECK(load_task_config(compatibility_path, overlay, err) &&
++              overlay.confidence_threshold == .91f,
++          "missing scalar preserves caller value");
++    CHECK(write_sample(compatibility_path, "module_id: 0x0004\nconfidence_threshold: 0.1\n"
++                                           "ground:\n  reference: typo\n"),
++          "write rejected overlay config");
++    CHECK(!load_task_config(compatibility_path, overlay, err) && err == 0x4002u &&
++              overlay.module_id == 4 && overlay.confidence_threshold == .91f,
++          "parser returns bare code and preserves the full previous config");
++    VisionTask parse_rejected;
++    CHECK(parse_rejected.initialize(compatibility_path) == 0x00044002u,
++          "task stamps module identity without publishing a partial config");
++    CHECK(write_sample(compatibility_path,
++                       "module_id: 0x0004oops\narea_ratio: invalid\nexit_on_alarm: unknown\n"),
++          "write legacy permissive config");
++    CHECK(load_task_config(compatibility_path, overlay, err) && overlay.module_id == 4 &&
++              overlay.area_ratio == 0.f && overlay.exit_on_alarm,
++          "strict ice numbers do not alter other modules' legacy parsing");
++    std::remove(compatibility_path.c_str());
++    TaskConfig conflicting_height;
++    conflicting_height.module_id = 7;
++    conflicting_height.backend = "unavailable_for_compatibility_test";
++    conflicting_height.start_angle_deg = 75.f;
++    conflicting_height.stop_angle_deg = 5.f;
++    VisionTask height_rejected;
++    CHECK(height_rejected.initialize(conflicting_height) == 0x00071009u,
++          "inference initialization retains backend-before-policy error precedence");
++
+     // 5. VisionTask lifecycle & failure paths
+     VisionTask vt;
+     Result out{};
+@@ -1025,16 +1059,24 @@ int main() {
+         auto ice = create_function_plugin(0x0008);
+         TaskConfig ic;
+         ic.module_id = 0x0008;
++        ic.inference_enabled = false;
+         ic.area_ratio = 0.3f;
+         ic.exit_on_alarm = true;
+-        CHECK(ice && ice->configure(ic) == 0u, "ice configure");
++#if defined(EVS_WITH_OPENCV)
++        CHECK(ice && ice->configure(ic) == static_cast<uint32_t>(EvsStatus::ConfigInvalid),
++              "ice requires measured ROI");
++#else
++        CHECK(ice && ice->configure(ic) == static_cast<uint32_t>(EvsStatus::NotSupported),
++              "ice requires OpenCV");
++#endif
+         ic.area_ratio = 1.5f;
+         CHECK(ice->configure(ic) == static_cast<uint32_t>(EvsStatus::OutOfRange),
+               "ice rejects area_ratio > 1");
+         Result ir{};
+         ir.limit_state = 3;
+-        CHECK(ice->decide(Frame{}, MachineContext{}, {}, ir) == 0u, "ice decide");
+-        CHECK(ir.ice_ratio == 0.f, "ice ratio placeholder 0");
++        CHECK(ice->decide(Frame{}, MachineContext{}, {}, ir) != 0u && ir.status != 0u,
++              "unconfigured ice returns failure");
++        CHECK(ir.ice_ratio == kIceRatioUnknown, "failed ice is unknown");
+         CHECK(ir.limit_state == 3, "ice does not change limit_state");
+ 
+         const std::string hy =
+diff --git a/tools/linux_source/README.md b/tools/linux_source/README.md
+index c1b4caf..320f9e3 100755
+--- a/tools/linux_source/README.md
++++ b/tools/linux_source/README.md
+@@ -1,12 +1,18 @@
+-# tools/linux_source —— Linux 联调取帧宿主（不链进算法库）
++# Linux宿主取帧接入说明
+ 
+-本目录是**库外宿主**示例：负责打开相机、把像素喂给 `evs::Frame`、调用 `evs::VisionTask::detect`、执行声光/主控联锁。它**不属于算法库**，CMake 默认不编译进 `evs` 目标。
++本目录说明库外宿主的职责，不是当前已实现的完整采集程序。实际摄像头工具位于tools/task_cam、tools/v4l2_detect和tools/winch_ice_demo。
+ 
+-阶段 4 落地时，复用 `qt5_qml_c001` 的取帧能力：
++宿主负责打开相机、持有图像内存、读取真实PLC工况、录像、界面及声光/联锁。算法库不访问/dev/video节点。
+ 
+-- `camera_shm_multi` 的 `start_camera` / `CameraConfig` / `CameraManager`：产出 raw 帧（v4l2src / AHD 解码 / rtspsrc）。
+-- 把 `Frame.data`（或导出 dma_fd）指向取到的 1080p NV12/RGB 缓冲，调用 `detect`。
+-- 会话对象按 `camera_id` 把臂头帧分发给 0x0004/0x0005/0x0007，长焦×2→0x0006，卷扬×2→0x0008。
+-- 可选录像：按 `h264_enc_worker` 模式挂 H.264 编码进程，同环消费 raw 帧，不进算法库。
++| 功能 | 宿主交给库的内容 |
++|---|---|
++| 人员/高度 | 原图Frame及当前MachineContext，调用VisionTask |
++| 卷扬冰雪 | 宿主先判断功能开启、工况有效/新鲜、零角度且工作，再调用两参Detector::detect(ImageData,WinchSnowResult) |
+ 
+-算法库 CMake **不查找 GStreamer / Qt / mpp**，宿主程序单独链接这些。
++冰雪一个实例只绑定一个相机，同一画面可有1或2个安装卷扬；不能把旧“卷扬×2”说明理解为当前实例支持两路相机。表面标定、分辨率、颜色格式和stride需要匹配现场，详情见[冰雪接入说明](../../docs/winch_ice.md)。
++
++图像缓冲须在同步detect返回前有效；原图timestamp与实际帧对应。库当前不消费Frame.dma_fd进行零拷贝，不能只提供fd而省略可读像素。
++
++核心算法库不链接GStreamer、Qt、RGA或mpp；顶层CMake会为相应宿主工具查找GStreamer/RGA等依赖。这与“CMake完全不查找采集库”不同。OpenCV用于当前冰雪面积算法，是真实库依赖。
++
++通用结果的LogOnly与Alarm须分别处理；冰雪逐帧返回，历史报警是否保持由宿主决定。完整示例与部署见[顶层README](../../README.md)和[通用宿主说明](../../docs/host_api.md)。

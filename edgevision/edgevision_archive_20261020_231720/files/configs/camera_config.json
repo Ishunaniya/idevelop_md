@@ -1,0 +1,51 @@
+[
+    {
+        "device": "/dev/video0",
+        "channel": 0,
+        "enable": true,
+        "pos_x": 1150,
+        "pos_y": 100,
+        "width": 1920,
+        "height": 1080,
+        "framerate": 25,
+        "display_width": 800,
+        "display_height": 300,
+        "previewEnabled": true	
+    },
+    {
+        "device": "/dev/video3",
+        "channel": 1,
+        "enable": true,
+        "pos_x": 1650,
+        "pos_y": 300,
+        "width": 1920,
+        "height": 1080,
+        "framerate": 25,
+        "display_width": 300,
+        "display_height": 600		
+    },
+    {
+        "device": "/dev/video13",
+        "channel": 2,
+        "enable": true,
+        "pos_x": 1150,
+        "pos_y": 890,
+        "width": 1920,
+        "height": 1080,
+        "framerate": 25,
+        "display_width": 750,
+        "display_height": 300		
+    },
+    {
+        "device": "/dev/video14",
+        "channel": 3,
+        "enable": true,
+        "pos_x": 1130,
+        "pos_y": 300,
+        "width": 1920,
+        "height": 1080,
+        "framerate": 25,
+        "display_width": 250,
+        "display_height": 600		
+    }
+]

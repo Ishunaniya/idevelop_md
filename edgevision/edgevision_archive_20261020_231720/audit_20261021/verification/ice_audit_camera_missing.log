@@ -1,0 +1,9 @@
+2026-10-21 00:14:57.967 [INFO] rknn_backend.cpp:193 rknn:model ready: in 640x640x3 type=int8 fmt=NHWC elems=1228800, outputs=1, in_scale=1.0000
+2026-10-21 00:14:57.967 [INFO] rknn_backend.cpp:206 rknn:  out[0] name= dims=[1 8400 6 0] type=fp32 elems=50400
+2026-10-21 00:14:57.967 [INFO] model_registry.cpp:32 loaded rknn:/tmp/ice_slim_sdk/Y.rknn (timeout=60s)
+2026-10-21 00:14:57.968 [INFO] vision_task.cpp:239 task ready: module=0x0008 backend=rknn model=/tmp/ice_slim_sdk/Y.rknn input=640x640 letterbox=1 debug=0
+[gst] pipeline: v4l2src device=/no/such/camera io-mode=mmap ! videoconvert ! video/x-raw,format=I420 ! videoconvert ! video/x-raw,format=NV12 ! appsink name=cap drop=true sync=false max-buffers=1
+[gst] failed to set pipeline PLAYING
+2026-10-21 00:14:58.072 [INFO] vision_task.cpp:569 releasing rknn:/tmp/ice_slim_sdk/Y.rknn (0 frames processed)
+2026-10-21 00:14:58.072 [INFO] model_registry.cpp:54 destroying rknn:/tmp/ice_slim_sdk/Y.rknn (ref=0)
+camera open failed

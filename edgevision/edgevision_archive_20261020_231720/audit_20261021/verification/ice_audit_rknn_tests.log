@@ -1,0 +1,16 @@
+Internal ctest changing into directory: /tmp/ice_slim_rknn
+Test project /tmp/ice_slim_rknn
+    Start 1: evs_tests
+1/5 Test #1: evs_tests ........................   Passed    0.61 sec
+    Start 2: evs_ice_tests
+2/5 Test #2: evs_ice_tests ....................   Passed    0.23 sec
+    Start 3: evs_ice_allocation_tests
+3/5 Test #3: evs_ice_allocation_tests .........   Passed    0.02 sec
+    Start 4: evs_ice_dynamic_tests
+4/5 Test #4: evs_ice_dynamic_tests ............   Passed    0.05 sec
+    Start 5: evs_ice_cli
+5/5 Test #5: evs_ice_cli ......................   Passed    0.17 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =   1.08 sec

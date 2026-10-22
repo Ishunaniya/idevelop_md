@@ -1,0 +1,18 @@
+task: height_limit
+module_id: 0x0007
+camera:
+  video_channel: [0]
+
+backend: mock
+Model_path: models/height_switch.rknn
+output_format: yolov8
+person_class_id: -1
+input_width: 640
+input_height: 640
+confidence_threshold: 0.45
+
+start_angle_deg: 5
+stop_angle_deg: 75
+min_frames: 10
+still_timeout_s: 15
+basic_boom_only: true

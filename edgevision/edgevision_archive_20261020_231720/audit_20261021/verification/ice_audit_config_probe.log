@@ -1,0 +1,5 @@
+person_class_id: 0.9 => rc=540674 class=0 letterbox=1 warmup=0 width=0
+letterbox: falsse => rc=540674 class=0 letterbox=1 warmup=0 width=0
+warmup: truue => rc=540674 class=0 letterbox=1 warmup=0 width=0
+input_width: 640
+input_width: 320 => rc=540674 class=0 letterbox=1 warmup=0 width=0

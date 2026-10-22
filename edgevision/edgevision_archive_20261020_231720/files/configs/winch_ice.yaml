@@ -1,0 +1,23 @@
+# RK3588 winch model, run from the repository root. Board validation is pending.
+task: winch_ice
+module_id: 0x0008
+camera:
+  video_channel: [0]
+ground:
+  enabled: false
+backend: rknn
+Model_path: ice_model.rknn
+input_width: 640
+input_height: 640
+input_format: rgb
+letterbox: true
+# Packed raw YOLOX [1,8400,6]: tx,ty,tw,th,objectness,class probability.
+# Strides 8/16/32, grid + exp decode; confidence = objectness * class probability.
+output_format: yolox
+decoder_classes: 1
+winch_class_id: 0
+confidence_threshold: 0.45
+nms_threshold: 0.5
+area_ratio: 0.5
+ice_saturation_max: 80
+ice_value_min: 180

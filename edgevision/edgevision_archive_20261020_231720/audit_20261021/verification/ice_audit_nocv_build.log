@@ -1,0 +1,29 @@
+[  2%] Built target evs_person_objs
+[  5%] Building CXX object CMakeFiles/evs_objs.dir/src/vision_task.cpp.o
+[ 11%] Built target evs_height_limit_objs
+[ 13%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_api.cpp.o
+[ 19%] Built target evs_ice_objs
+[ 22%] Built target evs_person
+[ 25%] Built target evs_height_limit
+[ 27%] Linking CXX static library libevs_ice.a
+[ 27%] Built target evs_ice
+[ 69%] Built target evs_objs
+[ 72%] Linking CXX shared library libevs_core.so
+[ 75%] Linking CXX static library libevs.a
+[ 75%] Built target evs
+[ 77%] Building CXX object CMakeFiles/evs_tests.dir/tests/test_core.cpp.o
+[ 77%] Built target evs_shared
+[ 80%] Building CXX object CMakeFiles/evs_ice_tests.dir/tests/test_ice.cpp.o
+[ 83%] Linking CXX executable evs_ice_tests
+[ 83%] Built target evs_ice_tests
+[ 86%] Linking CXX shared library libevs_person.so
+[ 86%] Built target evs_person_shared
+[ 88%] Linking CXX shared library libevs_height_limit.so
+[ 88%] Built target evs_height_limit_shared
+[ 91%] Linking CXX shared library libevs_ice.so
+[ 91%] Built target evs_ice_shared
+[ 94%] Linking CXX executable evs_tests
+[ 97%] Building CXX object CMakeFiles/evs_ice_dynamic_tests.dir/tests/test_ice.cpp.o
+[ 97%] Built target evs_tests
+[100%] Linking CXX executable evs_ice_dynamic_tests
+[100%] Built target evs_ice_dynamic_tests

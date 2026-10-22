@@ -1,3 +1,4 @@
 {
-  "markdown-preview-enhanced.hideDefaultVSCodeMarkdownPreviewButtons": false
+  "markdown-preview-enhanced.hideDefaultVSCodeMarkdownPreviewButtons": false,
+  "cmake.sourceDirectory": "/home/tronlong/lyp/perCode/idevelop_md/edgevision/edgevision_archive_20261020_231720/files"
 }

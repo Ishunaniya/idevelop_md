@@ -1,0 +1,21 @@
+# SYNTHETIC EXAMPLE ONLY: replace both polygons with installation calibration.
+task: winch_ice
+module_id: 0x0008
+camera:
+  video_channel: [0]
+inference_enabled: false
+ground:
+  enabled: false
+ice_mode: fixed_surface
+ice_reference_width: 200
+ice_reference_height: 100
+ice_saturation_max: 80
+ice_value_min: 180
+area_ratio: 0.5
+ice_objects:
+  - id: 0
+    name: main
+    surface_polygon: [0,0,0.49748744,0,0.49748744,1,0,1]
+  - id: 1
+    name: auxiliary
+    surface_polygon: [0.50251256,0,1,0,1,1,0.50251256,1]

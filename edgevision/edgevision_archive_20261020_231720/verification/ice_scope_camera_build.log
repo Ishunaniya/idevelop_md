@@ -1,0 +1,37 @@
+[  4%] Building CXX object CMakeFiles/evs_objs.dir/src/core/model_registry.cpp.o
+[  8%] Building CXX object CMakeFiles/evs_objs.dir/src/core/config.cpp.o
+[ 12%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_plugin.cpp.o
+[ 16%] Building CXX object CMakeFiles/evs_objs.dir/src/core/backend_factory.cpp.o
+[ 20%] Building CXX object CMakeFiles/evs_objs.dir/src/core/detection_decoder.cpp.o
+[ 24%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/ice_measurement.cpp.o
+[ 28%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_api.cpp.o
+[ 32%] Building CXX object CMakeFiles/evs_objs.dir/src/core/preprocess.cpp.o
+[ 36%] Building CXX object CMakeFiles/evs_objs.dir/src/core/log.cpp.o
+[ 40%] Building CXX object CMakeFiles/evs_objs.dir/src/core/debug.cpp.o
+[ 44%] Building CXX object CMakeFiles/evs_objs.dir/src/core/offline_eval.cpp.o
+[ 44%] Built target evs_ice_objs
+[ 48%] Building CXX object CMakeFiles/evs_objs.dir/src/vision_task.cpp.o
+[ 52%] Building CXX object CMakeFiles/evs_objs.dir/src/tasks/function_plugin_factory.cpp.o
+[ 56%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/homography_mapper.cpp.o
+[ 60%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/crane_pose_mapper.cpp.o
+[ 64%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/ground_mapper_factory.cpp.o
+[ 72%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/ground_metrics.cpp.o
+[ 72%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/ground_params.cpp.o
+[ 76%] Building CXX object CMakeFiles/evs_objs.dir/src/backend/mock/mock_backend.cpp.o
+[ 80%] Building CXX object CMakeFiles/evs_objs.dir/src/backend/rknn/rknn_backend.cpp.o
+[ 80%] Built target evs_objs
+[ 84%] Linking CXX shared library libevs_core.so
+[ 84%] Built target evs_shared
+[ 88%] Linking CXX shared library libevs_ice.so
+[ 88%] Built target evs_ice_shared
+[ 92%] Building CXX object CMakeFiles/winch_ice_demo.dir/tools/v4l2_detect/capture.cpp.o
+[ 96%] Building CXX object CMakeFiles/winch_ice_demo.dir/tools/winch_ice_demo/main.cpp.o
+[100%] Linking CXX executable winch_ice_demo
+[100%] Built target winch_ice_demo
+[ 12%] Built target evs_ice_objs
+[ 83%] Built target evs_objs
+[ 87%] Built target evs_shared
+[ 91%] Built target evs_ice_shared
+[ 95%] Building CXX object CMakeFiles/ice_replay.dir/tools/ice_replay/main.cpp.o
+[100%] Linking CXX executable ice_replay
+[100%] Built target ice_replay

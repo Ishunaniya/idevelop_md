@@ -1,0 +1,14 @@
+[ 47%] Built target evs_objs
+[ 50%] Built target evs_person_objs
+[ 55%] Built target evs_height_limit_objs
+[ 64%] Built target evs_ice_objs
+[ 67%] Built target evs
+[ 70%] Built target evs_person
+[ 73%] Built target evs_height_limit
+[ 76%] Built target evs_ice
+[ 82%] Built target evs_tests
+[ 85%] Building CXX object CMakeFiles/evs_ice_tests.dir/tests/test_ice.cpp.o
+[ 91%] Built target evs_ice_allocation_tests
+[ 97%] Built target ice_replay
+[100%] Linking CXX executable evs_ice_tests
+[100%] Built target evs_ice_tests

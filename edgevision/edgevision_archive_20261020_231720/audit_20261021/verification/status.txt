@@ -1,0 +1,34 @@
+ M CMakeLists.txt
+ M README.md
+ M configs/winch_ice.yaml
+ M include/evs/function_plugin.h
+ M include/evs/rknn_backend.h
+ M include/evs/status.h
+ M include/evs/task_config.h
+ M include/evs/vision_task.h
+ M src/backend/rknn/rknn_backend.cpp
+ M src/core/config.cpp
+ M src/core/log.cpp
+ M src/core/model_registry.cpp
+ M src/tasks/winch_ice/winch_ice_plugin.cpp
+ M src/tasks/winch_ice/winch_ice_plugin.h
+ M src/vision_task.cpp
+ M tests/test_core.cpp
+?? docs/winch_ice.md
+?? heyan/核验结论.md
+?? ice_model.rknn
+?? include/evs/testing/ice_replay.h
+?? include/evs/winch_ice.h
+?? src/backend/rknn/detection_rows.h
+?? src/core/config_internal.h
+?? src/tasks/winch_ice/ice_measurement.cpp
+?? src/tasks/winch_ice/ice_measurement.h
+?? src/tasks/winch_ice/winch_ice_api.cpp
+?? tests/ice_test_support.h
+?? tests/test_ice.cpp
+?? tests/test_ice_allocation.cpp
+?? tests/test_ice_cli.py
+?? tools/ice_replay/host_gate.h
+?? tools/ice_replay/main.cpp
+?? tools/ice_replay/replay_io.h
+?? tools/winch_ice_demo/main.cpp

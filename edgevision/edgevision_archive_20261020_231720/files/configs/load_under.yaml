@@ -1,0 +1,43 @@
+task: load_under
+module_id: 0x0005
+camera:
+  video_channel: [0]         # 臂头变焦 IPC ×1
+
+ground:
+  enabled: true
+  reference: camera_origin
+  distance_mode: legacy_forward_y
+  cameras:
+    - id: 0
+      mapper: homography
+      params:
+        matrix: /userdata/matrix_0_1280x720.txt
+        calibration_width: 1280
+        calibration_height: 720
+        strict_matrix: true
+
+backend: mock
+Model_path: models/person.rknn
+output_format: flat6        # 解码器格式：flat6=单类6float；yolov8=[N,4+C] argmax
+person_class_id: -1         # yolov8 时指定 person 类序号；-1=不过滤（单类模型）
+input_width: 640
+input_height: 640
+warmup: true
+init_timeout_s: 60
+npu_core_mask: 1
+
+latency_budget_ms: 200
+min_fps: 5
+
+on_missing_context: log_only   # 无工况只记录，不套用载荷附近的「立即报警」
+work_motion_epsilon: 0.1
+
+zone:
+  type: circle
+  radius_m: 10
+  consecutive_frames: 3
+  has_occlusion: true          # 排除被载荷遮挡的区域（圆内竖直向下扇区）
+  occ_axis_deg: 90             # 屏幕顺时针：90 = 竖直向下
+  occ_half_deg: 25
+
+confidence_threshold: 0.45

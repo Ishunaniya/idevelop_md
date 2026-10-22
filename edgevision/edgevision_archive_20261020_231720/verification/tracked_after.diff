@@ -1,0 +1,1446 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 18b6f30..80b9261 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -116,7 +116,7 @@ if(EVS_BUILD_SHARED)
+     add_library(evs_shared SHARED $<TARGET_OBJECTS:evs_objs>)
+     set_target_properties(evs_shared PROPERTIES
+         OUTPUT_NAME evs_core
+-        SOVERSION 1
++        SOVERSION 3
+         # Do not bake the build machine's SDK directory into the library.
+         # On the board, librknnrt.so is already on the default linker path.
+         SKIP_BUILD_RPATH TRUE
+@@ -145,8 +145,8 @@ function(evs_add_plugin name)
+         add_library(${name}_shared SHARED $<TARGET_OBJECTS:${name}_objs>)
+         set_target_properties(${name}_shared PROPERTIES
+             OUTPUT_NAME ${name}
+-            SOVERSION 1
+-            # Look for libevs_core.so.1 beside this plugin, not on the build machine.
++            SOVERSION 3
++            # Look for libevs_core.so.3 beside this plugin, not on the build machine.
+             BUILD_RPATH "\$ORIGIN"
+             INSTALL_RPATH "\$ORIGIN"
+             BUILD_WITH_INSTALL_RPATH TRUE
+@@ -162,7 +162,35 @@ evs_add_plugin(evs_person src/tasks/person/person_plugin.cpp)
+ evs_add_plugin(evs_height_limit
+     src/tasks/height_limit/height_limit_plugin.cpp
+     src/tasks/height_limit/height_limit_mount.cpp)
+-evs_add_plugin(evs_ice src/tasks/winch_ice/winch_ice_plugin.cpp)
++evs_add_plugin(evs_ice
++    src/tasks/winch_ice/winch_ice_plugin.cpp
++    src/tasks/winch_ice/ice_measurement.cpp
++    src/tasks/winch_ice/winch_ice_api.cpp)
++
++if(EVS_WITH_OPENCV)
++    find_package(OpenCV QUIET COMPONENTS core imgproc)
++    if(OpenCV_FOUND)
++        set(EVS_CV_INCLUDE ${OpenCV_INCLUDE_DIRS})
++        set(EVS_CV_LIBS ${OpenCV_LIBS})
++    else()
++        find_path(EVS_CV_INCLUDE opencv2/core.hpp PATH_SUFFIXES opencv4)
++        find_library(EVS_CV_CORE NAMES opencv_core)
++        find_library(EVS_CV_IMGPROC NAMES opencv_imgproc)
++        if(NOT EVS_CV_INCLUDE OR NOT EVS_CV_CORE OR NOT EVS_CV_IMGPROC)
++            message(FATAL_ERROR "EVS_WITH_OPENCV needs target OpenCV core/imgproc headers and libraries")
++        endif()
++        set(EVS_CV_LIBS ${EVS_CV_IMGPROC} ${EVS_CV_CORE})
++    endif()
++    foreach(_name evs_ice evs_height_limit)
++        target_include_directories(${_name}_objs PRIVATE ${EVS_CV_INCLUDE})
++        target_include_directories(${_name} PUBLIC ${EVS_CV_INCLUDE})
++        target_link_libraries(${_name} PUBLIC ${EVS_CV_LIBS})
++        if(EVS_BUILD_SHARED)
++            target_include_directories(${_name}_shared PUBLIC ${EVS_CV_INCLUDE})
++            target_link_libraries(${_name}_shared PRIVATE ${EVS_CV_LIBS})
++        endif()
++    endforeach()
++endif()
+ 
+ # Decoder and ground-mapper objects still register from static initializers
+ # inside libevs. Plugin objects do the same from their own archives. A normal
+@@ -264,13 +292,84 @@ if(EVS_WITH_RGA AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+     endif()
+ endif()
+ 
+-# Build tests only when this is the top-level project.
++# Ice uses the existing core/plugin targets. Legacy tools are opt-in because
++# their historical SDK paths and dependencies are not part of the ice demo.
++option(EVS_BUILD_TESTS "Build regression tests" ON)
++option(EVS_BUILD_TOOLS "Build ice demos" ON)
++option(EVS_BUILD_LEGACY_TOOLS "Build legacy offline and camera tools" OFF)
+ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+-    enable_testing()
+-    add_executable(evs_tests tests/test_core.cpp)
+-    evs_link_whole(evs_tests)
+-    add_test(NAME evs_tests COMMAND evs_tests)
+-
++    if(EVS_BUILD_TESTS)
++        enable_testing()
++        add_executable(evs_tests tests/test_core.cpp)
++        evs_link_whole(evs_tests)
++        add_test(NAME evs_tests COMMAND evs_tests)
++        add_executable(evs_ice_tests tests/test_ice.cpp)
++        target_include_directories(evs_ice_tests PRIVATE src)
++        evs_link_whole(evs_ice_tests)
++        target_compile_definitions(evs_ice_tests PRIVATE EVS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
++        add_test(NAME evs_ice_tests COMMAND evs_ice_tests)
++        if(EVS_WITH_OPENCV)
++            add_executable(evs_ice_allocation_tests tests/test_ice_allocation.cpp)
++            target_include_directories(evs_ice_allocation_tests PRIVATE src ${EVS_CV_INCLUDE})
++            if(EVS_BUILD_SHARED)
++                target_link_libraries(evs_ice_allocation_tests PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++                set_target_properties(evs_ice_allocation_tests PROPERTIES BUILD_RPATH "\$ORIGIN")
++            else()
++                evs_link_whole(evs_ice_allocation_tests)
++            endif()
++            add_test(NAME evs_ice_allocation_tests COMMAND evs_ice_allocation_tests)
++        endif()
++        if(EVS_BUILD_SHARED)
++            add_executable(evs_ice_dynamic_tests tests/test_ice.cpp)
++            target_include_directories(evs_ice_dynamic_tests PRIVATE include src ${EVS_CV_INCLUDE})
++            target_compile_definitions(evs_ice_dynamic_tests PRIVATE EVS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
++            target_link_libraries(evs_ice_dynamic_tests PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++            set_target_properties(evs_ice_dynamic_tests PROPERTIES BUILD_RPATH "\$ORIGIN")
++            add_test(NAME evs_ice_dynamic_tests COMMAND evs_ice_dynamic_tests)
++        endif()
++    endif()
++    if(EVS_BUILD_TOOLS AND EVS_WITH_OPENCV)
++        add_executable(ice_replay tools/ice_replay/main.cpp)
++        target_include_directories(ice_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
++        if(EVS_BUILD_SHARED)
++            # Direct Detector symbols ensure libevs_ice cannot be pruned by --as-needed.
++            target_link_libraries(ice_replay PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++            target_include_directories(ice_replay PRIVATE ${EVS_CV_INCLUDE})
++            set_target_properties(ice_replay PROPERTIES BUILD_RPATH "\$ORIGIN;\$ORIGIN/../lib")
++        else()
++            evs_link_whole(ice_replay)
++        endif()
++        if(EVS_BUILD_TESTS)
++            find_package(Python3 COMPONENTS Interpreter QUIET)
++            if(Python3_Interpreter_FOUND)
++                add_test(NAME evs_ice_cli COMMAND ${Python3_EXECUTABLE}
++                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ice_cli.py
++                    $<TARGET_FILE:ice_replay> ${CMAKE_CURRENT_SOURCE_DIR})
++            endif()
++        endif()
++    endif()
++    if(EVS_BUILD_TOOLS AND EVS_WITH_OPENCV AND EVS_WITH_GSTREAMER AND UNIX AND NOT APPLE)
++        find_package(PkgConfig QUIET)
++        if(PkgConfig_FOUND)
++            pkg_check_modules(EVS_ICE_GST QUIET IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0)
++        endif()
++        if(EVS_ICE_GST_FOUND)
++            find_package(Threads REQUIRED)
++            add_executable(winch_ice_demo tools/winch_ice_demo/main.cpp tools/v4l2_detect/capture.cpp)
++            target_include_directories(winch_ice_demo PRIVATE tools/v4l2_detect tools/ice_replay)
++            if(EVS_BUILD_SHARED)
++                target_link_libraries(winch_ice_demo PRIVATE evs_ice_shared evs_shared ${EVS_CV_LIBS})
++                target_include_directories(winch_ice_demo PRIVATE ${EVS_CV_INCLUDE})
++                set_target_properties(winch_ice_demo PROPERTIES BUILD_RPATH "\$ORIGIN;\$ORIGIN/../lib")
++            else()
++                evs_link_whole(winch_ice_demo)
++            endif()
++            target_link_libraries(winch_ice_demo PRIVATE PkgConfig::EVS_ICE_GST Threads::Threads)
++        else()
++            message(WARNING "GStreamer development files missing: camera demo omitted")
++        endif()
++    endif()
++    if(EVS_BUILD_TOOLS AND EVS_BUILD_LEGACY_TOOLS)
+     # Offline evaluation tool: meaningful for every backend that produces real
+     # detections -- x86 / onnx (host) and rknn (on the board itself, so the NPU
+     # numbers come from the same harness as the PC numbers).
+@@ -407,4 +506,26 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+         endif()
+         endif() # NOT WIN32
+     endif()
++    endif()
+ endif()
++
++include(GNUInstallDirs)
++# Follow GNUInstallDirs for relocatable lib, lib64 and multiarch layouts.
++file(RELATIVE_PATH EVS_INSTALL_LIB_FROM_BIN
++    "${CMAKE_INSTALL_FULL_BINDIR}"
++    "${CMAKE_INSTALL_FULL_LIBDIR}")
++install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
++install(TARGETS evs evs_ice ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++if(EVS_BUILD_SHARED)
++    install(TARGETS evs_shared evs_ice_shared LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
++endif()
++foreach(_tool ice_replay winch_ice_demo)
++    if(TARGET ${_tool})
++        install(TARGETS ${_tool} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++        set_target_properties(${_tool} PROPERTIES INSTALL_RPATH "\$ORIGIN/${EVS_INSTALL_LIB_FROM_BIN}")
++    endif()
++endforeach()
++install(FILES configs/winch_ice.yaml
++    DESTINATION share/edgevision/configs)
++install(FILES docs/winch_ice.md
++    DESTINATION share/edgevision/docs)
+diff --git a/README.md b/README.md
+index 500ab2f..603f11b 100755
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,7 @@
+ # EdgeVision 边缘视觉框架 —— 使用说明
+ 
++> 卷扬冰雪以 [winch_ice.md](docs/winch_ice.md) 为当前说明，下文旧冰雪占位内容不作为接入依据：RK3588卷扬模型、逐帧detect和每框比例。当前库版本为.so.3，宿主与插件需使用配套头文件重新编译。
++
+ 起重机 AI 安全检测算法库（C++17，无第三方依赖）。同一份代码可以构建在
+ **x86 PC** 上做离线评测，也可以交叉编译后部署到 **RK3576 板子**上跑 NPU 实时检测。
+ 
+diff --git a/configs/winch_ice.yaml b/configs/winch_ice.yaml
+index e4c7aab..69183a0 100644
+--- a/configs/winch_ice.yaml
++++ b/configs/winch_ice.yaml
+@@ -1,15 +1,23 @@
++# RK3588 winch model, run from the repository root. Board validation is pending.
+ task: winch_ice
+ module_id: 0x0008
+ camera:
+-  video_channel: [0, 1]
+-
+-backend: mock
+-Model_path: models/winch_ice.rknn
+-output_format: yolov8
+-person_class_id: -1
++  video_channel: [0]
++ground:
++  enabled: false
++backend: rknn
++Model_path: ice_model.rknn
+ input_width: 640
+ input_height: 640
++input_format: rgb
++letterbox: true
++# Packed raw YOLOX [1,8400,6]: tx,ty,tw,th,objectness,class probability.
++# Strides 8/16/32, grid + exp decode; confidence = objectness * class probability.
++output_format: yolox
++decoder_classes: 1
++winch_class_id: 0
+ confidence_threshold: 0.45
+-
+-area_ratio: 0.3
+-exit_on_alarm: true
++nms_threshold: 0.5
++area_ratio: 0.5
++ice_saturation_max: 80
++ice_value_min: 180
+diff --git a/include/evs/function_plugin.h b/include/evs/function_plugin.h
+index 4d22aa8..aa60e45 100644
+--- a/include/evs/function_plugin.h
++++ b/include/evs/function_plugin.h
+@@ -9,6 +9,12 @@
+ #include "evs/task_config.h"
+ 
+ namespace evs {
++namespace winch_ice {
++struct WinchSnowResult;
++}
++namespace testing {
++struct IceMaskSnapshot;
++}
+ 
+ // Function-rule plugin: person / height-limit / winch-ice.
+ // VisionTask calls decide() after decode and map-back to the original frame.
+@@ -21,6 +27,13 @@ struct IFunctionPlugin {
+     // (EvsStatus or a module error). Called from initialize and updateConfig.
+     virtual uint32_t configure(const TaskConfig& cfg) = 0;
+ 
++    virtual const winch_ice::WinchSnowResult* winch_result() const { return nullptr; }
++
++    // Record a rejected call. Ice clears the previous frame result.
++    virtual void reject_call(uint32_t status, Result& out) noexcept { out.status = status; }
++
++    virtual bool copy_ice_masks(std::vector<testing::IceMaskSnapshot>&) const { return false; }
++
+     // Task-relative ground frame. false means this function does not consume
+     // ground distance. Implementations only describe the reference; the shared
+     // geometry layer computes distance_m / angle_deg.
+diff --git a/include/evs/rknn_backend.h b/include/evs/rknn_backend.h
+index 72ee6ea..a60f576 100644
+--- a/include/evs/rknn_backend.h
++++ b/include/evs/rknn_backend.h
+@@ -32,9 +32,15 @@ public:
+     ~RknnBackend() override;
+ 
+     uint32_t load(const std::string& model_path, int init_timeout_s) override;
+-    uint32_t infer(const std::vector<uint8_t>& input,
+-                   std::vector<float>& output) override;
++    uint32_t infer(const std::vector<uint8_t>& input, std::vector<float>& output) override;
++    // Winch path: explicit single-tensor box contract, independent of COCO heads.
++    uint32_t validateDetectionModel(const std::string& format, int classes, int expected_width,
++                                    int expected_height) const;
++    uint32_t inferDetectionRows(const std::vector<uint8_t>& input, std::vector<float>& output,
++                                const std::string& format, int classes, int expected_width,
++                                int expected_height);
+     void release() override;
++
+     bool loaded() const override { return loaded_.load(); }
+ 
+     // Diagnostics: model input geometry queried at load time (false if not loaded).
+@@ -43,9 +49,10 @@ public:
+     uint64_t last_run_us() const;
+ 
+ private:
++    uint32_t inferImpl(const std::vector<uint8_t>&, std::vector<float>&, const std::string&, int);
+     struct Impl;
+     std::unique_ptr<Impl> impl_;
+     std::atomic<bool> loaded_{false};
+ };
+ 
+-} // namespace evs
+\ No newline at end of file
++} // namespace evs
+diff --git a/include/evs/status.h b/include/evs/status.h
+index 32b806a..1df67ec 100644
+--- a/include/evs/status.h
++++ b/include/evs/status.h
+@@ -10,6 +10,11 @@ enum class AlarmState : int { None = 0, LogOnly = 1, Alarm = 2 };
+ // A target exists but cannot be projected to a trustworthy ground position.
+ constexpr float kDistanceUnknown = -1.f;
+ 
++// Ice ratios belong to the current frame; use per-object valid/status.
++// Unobservable objects are unknown, never zero coverage.
++constexpr uint32_t kIceUnobservable = 0x0008C001u;
++constexpr float kIceRatioUnknown = -1.f;
++
+ // Error codes are 0xMMMMEEEE. High 16 bits are the function module
+ // (0x0004 load-near, 0x0005 load-under, 0x0006 boom-under, 0x0007 height,
+ // 0x0008 winch ice). Low 16 bits are the error. Values below keep the high
+@@ -104,7 +109,7 @@ struct Result {
+     AlarmState alarm = AlarmState::None;
+     std::vector<Target> targets;
+     int limit_state = 0;       // height limit: 0 unknown,1 not installed,2 wrong,3 correct
+-    float ice_ratio = 0.f;     // winch ice area ratio; 0 for other functions
++    float ice_ratio = 0.f;     // single valid ice object: 0..1; multiple/unknown: -1
+     bool camera_blind = false; // optical blind; frame not counted in person miss-rate
+     // Cameras that produced this result. See pack_camera_channel.
+     uint32_t camera_channel = 0xFFFFFFFFu;
+diff --git a/include/evs/task_config.h b/include/evs/task_config.h
+index e9d57e4..c78580c 100644
+--- a/include/evs/task_config.h
++++ b/include/evs/task_config.h
+@@ -8,6 +8,12 @@
+ 
+ namespace evs {
+ 
++// Pixel thresholds for snow candidates inside model-detected rectangles.
++struct IceConfig {
++    int saturation_max = 80; // OpenCV uint8 HSV, S/V in 0..255
++    int value_min = 180;
++};
++
+ // Zone description shared by person functions.
+ struct ZoneConfig {
+     std::string type = "circle"; // circle | sector
+@@ -77,12 +83,15 @@ struct TaskConfig {
+     bool basic_boom_only = true;
+ 
+     // winch-ice extras (module 0x0008)
+-    float area_ratio = 0.3f;
++    float area_ratio = 0.5f;
+     bool exit_on_alarm = true;
++    IceConfig ice;
+ };
+ 
+ // Minimal YAML loader: scalars, one-level nested maps, inline int arrays.
+-// Returns false on parse error; err carries an EvsStatus code.
++// Overlays fields present in the file.
++// Ice publishes only on success. Other modules retain the original overlay semantics.
++// err is a bare EvsStatus (no module stamp).
+ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err);
+ 
+ } // namespace evs
+diff --git a/include/evs/vision_task.h b/include/evs/vision_task.h
+index 8e7a3f7..d7e4e77 100644
+--- a/include/evs/vision_task.h
++++ b/include/evs/vision_task.h
+@@ -7,8 +7,16 @@
+ #include "evs/frame.h"
+ #include "evs/preprocess.h"
+ #include "evs/status.h"
++#include "evs/task_config.h"
+ 
+ namespace evs {
++namespace winch_ice {
++class Detector;
++struct WinchSnowResult;
++}
++namespace testing {
++struct IceMaskSnapshot;
++} // namespace testing
+ 
+ class VisionTask {
+ public:
+@@ -18,13 +26,14 @@ public:
+     VisionTask(const VisionTask&) = delete;
+     VisionTask& operator=(const VisionTask&) = delete;
+ 
+-    // Read YAML, acquire model from the registry, optionally warm up.
++    // Read YAML and acquire the configured model.
+     // On any failure it rolls back and leaves no half-initialized state.
+     // Repeated calls must NOT reload the model.
+     uint32_t initialize(std::string_view config_path);
++    uint32_t initialize(const TaskConfig& config);
+ 
+     // Synchronous detection. One call at a time per instance.
+-    // The library preprocesses `frame` on the CPU.
++    // The library preprocesses `frame` on the CPU; ice ignores ctx.
+     uint32_t detect(const Frame& frame, const MachineContext& ctx, Result& out);
+ 
+     // Same pipeline as detect(), but the host already built the model input
+@@ -42,6 +51,9 @@ public:
+ 
+     // Update thresholds / zone / switch only. Reject backend / model change.
+     uint32_t updateConfig(std::string_view config_path);
++    uint32_t updateConfig(const TaskConfig& config);
++    bool lastWinchSnowResult(winch_ice::WinchSnowResult& result) const;
++    bool copyIceMasks(std::vector<testing::IceMaskSnapshot>& out) const;
+ 
+     // Return NPU context and caches. Safe to call again from the destructor.
+     void release();
+@@ -63,6 +75,9 @@ public:
+     bool saveLastInput(const std::string& path) const;
+ 
+ private:
++    friend class winch_ice::Detector;
++    const winch_ice::WinchSnowResult* winchSnowResultView() const noexcept;
++    uint32_t rejectWinchSnow(uint32_t status, Result& out) noexcept;
+     uint32_t acceptFrame(const Frame& frame) const;
+     uint32_t finishDetect(const Frame& frame, const MachineContext& ctx,
+                           std::vector<uint8_t>& input, const PreprocessMap& map,
+diff --git a/src/backend/rknn/rknn_backend.cpp b/src/backend/rknn/rknn_backend.cpp
+index 6059b89..725061f 100644
+--- a/src/backend/rknn/rknn_backend.cpp
++++ b/src/backend/rknn/rknn_backend.cpp
+@@ -18,6 +18,14 @@ uint32_t RknnBackend::load(const std::string&, int) {
+ uint32_t RknnBackend::infer(const std::vector<uint8_t>&, std::vector<float>&) {
+     return static_cast<uint32_t>(EvsStatus::NotSupported);
+ }
++uint32_t RknnBackend::validateDetectionModel(const std::string&, int, int, int) const {
++    return static_cast<uint32_t>(EvsStatus::NotSupported);
++}
++uint32_t RknnBackend::inferDetectionRows(const std::vector<uint8_t>&, std::vector<float>& out,
++                                         const std::string&, int, int, int) {
++    out.clear();
++    return static_cast<uint32_t>(EvsStatus::NotSupported);
++}
+ void RknnBackend::release() {}
+ } // namespace evs
+ 
+@@ -34,6 +42,7 @@ void RknnBackend::release() {}
+ #include <rknn_api.h>
+ 
+ #include "../yolo_decode.h"
++#include "detection_rows.h"
+ #include "evs/log.h"
+ 
+ namespace evs {
+@@ -155,10 +164,18 @@ uint32_t RknnBackend::load(const std::string& model_path, int /*init_timeout_s*/
+         release();
+         return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
+     }
+-    // RKNN reports logical dims in NCHW order regardless of the fmt below.
+-    impl_->in_c = attr.dims[1];
+-    impl_->in_h = attr.dims[2];
+-    impl_->in_w = attr.dims[3];
++    if (attr.n_dims != 4 || attr.dims[0] != 1) {
++        release();
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    }
++    if (attr.fmt == RKNN_TENSOR_NHWC) {
++        impl_->in_h = attr.dims[1]; impl_->in_w = attr.dims[2]; impl_->in_c = attr.dims[3];
++    } else if (attr.fmt == RKNN_TENSOR_NCHW) {
++        impl_->in_c = attr.dims[1]; impl_->in_h = attr.dims[2]; impl_->in_w = attr.dims[3];
++    } else {
++        release();
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    }
+     impl_->in_type = attr.type;
+     impl_->in_fmt = attr.fmt;
+     impl_->in_elems = attr.n_elems;
+@@ -199,6 +216,44 @@ uint32_t RknnBackend::load(const std::string& model_path, int /*init_timeout_s*/
+ 
+ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+                             std::vector<float>& output) {
++    return inferImpl(input, output, "", 80);
++}
++
++uint32_t RknnBackend::validateDetectionModel(const std::string& format, int classes,
++                                              int expected_width, int expected_height) const {
++    if (!loaded_.load()) return static_cast<uint32_t>(EvsStatus::NotInitialized);
++    if (impl_->in_w != uint32_t(expected_width) || impl_->in_h != uint32_t(expected_height) ||
++        impl_->in_c != 3 || impl_->n_output != 1 || classes < 1 || classes > 4096 ||
++        (format != "flat6" && format != "yolov8" && format != "yolox"))
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    rknn_tensor_attr attr{};
++    attr.index = 0;
++    if (rknn_query(impl_->ctx, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)) != 0)
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    if (attr.n_dims > RKNN_MAX_DIMS)
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    const std::vector<size_t> shape(attr.dims, attr.dims + attr.n_dims);
++    size_t rows = 0, columns = 0;
++    bool transposed = false;
++    if (!rknn_detection_shape(shape, format, classes, expected_width, expected_height,
++                              rows, columns, transposed) || rows * columns != attr.n_elems)
++        return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++    return 0;
++}
++
++uint32_t RknnBackend::inferDetectionRows(const std::vector<uint8_t>& input,
++                                         std::vector<float>& output, const std::string& format,
++                                         int classes, int expected_width, int expected_height) {
++    output.clear();
++    if (const auto rc = validateDetectionModel(format, classes, expected_width, expected_height))
++        return rc;
++    return inferImpl(input, output, format, classes);
++}
++
++uint32_t RknnBackend::inferImpl(const std::vector<uint8_t>& input,
++                                std::vector<float>& output, const std::string& format,
++                                int classes) {
++    output.clear();
+     if (!loaded_.load() || impl_->ctx == 0)
+         return static_cast<uint32_t>(EvsStatus::NotInitialized);
+     if (input.empty()) return static_cast<uint32_t>(EvsStatus::NullPointer);
+@@ -213,7 +268,7 @@ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+     std::memset(&ri, 0, sizeof(ri));
+     ri.index = 0;
+     ri.pass_through = 0; // let the driver convert layout/type to the tensor
+-    ri.fmt = impl_->in_fmt;
++    ri.fmt = format.empty() ? impl_->in_fmt : RKNN_TENSOR_NHWC;
+ 
+     if (impl_->in_type == RKNN_TENSOR_FLOAT32) {
+         // NHWC float in the model's value range; the graph carries mean/std.
+@@ -256,6 +311,31 @@ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+         return static_cast<uint32_t>(EvsStatus::InferFailed);
+     }
+ 
++    // Always return SDK buffers, including allocation failures in decoding.
++    struct OutputGuard {
++        rknn_context ctx;
++        std::vector<rknn_output>& values;
++        ~OutputGuard() { rknn_outputs_release(ctx, uint32_t(values.size()), values.data()); }
++    } guard{impl_->ctx, outs};
++    if (!format.empty()) {
++        rknn_tensor_attr attr{};
++        attr.index = 0;
++        if (impl_->n_output != 1 ||
++            rknn_query(impl_->ctx, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)) != 0 ||
++            attr.n_dims > RKNN_MAX_DIMS ||
++            uint64_t(outs[0].size) < uint64_t(attr.n_elems) * sizeof(float))
++            return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++        std::vector<size_t> shape;
++        for (uint32_t i = 0; i < attr.n_dims; ++i) shape.push_back(attr.dims[i]);
++        if (!rknn_detection_rows(static_cast<const float*>(outs[0].buf), attr.n_elems, shape,
++                                  format, classes, impl_->in_w, impl_->in_h, output))
++            return static_cast<uint32_t>(EvsStatus::ModelInvalidFormat);
++        impl_->last_run_us = static_cast<uint64_t>(
++            std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - t0).count());
++        return 0;
++    }
++
+     // Shapes come from the model, so ask once per output and keep a view.
+     for (uint32_t i = 0; i < impl_->n_output; ++i) {
+         rknn_tensor_attr oa;
+@@ -289,7 +369,6 @@ uint32_t RknnBackend::infer(const std::vector<uint8_t>& input,
+     }
+     yolo::decode_heads(impl_->heads, output);
+ 
+-    rknn_outputs_release(impl_->ctx, impl_->n_output, outs.data());
+     impl_->last_run_us = static_cast<uint64_t>(
+         std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - t0).count());
+@@ -327,4 +406,4 @@ bool RknnBackend::input_shape(int& w, int& h, int& c) const {
+ 
+ } // namespace evs
+ 
+-#endif // EVS_BACKEND_RKNN
+\ No newline at end of file
++#endif // EVS_BACKEND_RKNN
+diff --git a/src/core/config.cpp b/src/core/config.cpp
+index 0fa33a8..9e8754d 100644
+--- a/src/core/config.cpp
++++ b/src/core/config.cpp
+@@ -1,8 +1,14 @@
++#include "config_internal.h"
+ #include "evs/task_config.h"
+ #include "evs/status.h"
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <cerrno>
++#include <cmath>
++#include <limits>
++#include <map>
++#include <set>
+ #include <cstdlib>
+ #include <fstream>
+ #include <sstream>
+@@ -101,7 +107,7 @@ void add_legacy_ground_defaults(GroundConfig& ground) {
+ 
+ } // anonymous namespace
+ 
+-bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
++static bool parse_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+     err = 0;
+     const std::string cfg_path(path);
+     std::ifstream in(cfg_path);
+@@ -114,6 +120,7 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         bool list_start;
+     };
+     std::vector<Node> nodes;
++    bool syntax_error = false;
+     std::string raw;
+     while (std::getline(in, raw)) {
+         std::string line = strip_comment(raw);
+@@ -124,7 +131,7 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+                                 std::isspace(static_cast<unsigned char>(text[1]));
+         if (list_start) text = trim(text.substr(1));
+         std::string k, v;
+-        if (!split_kv(text, k, v)) continue;
++        if (!split_kv(text, k, v)) { syntax_error = true; continue; }
+         nodes.push_back({ind, k, v, list_start});
+     }
+ 
+@@ -258,7 +265,7 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         else if (n.key == "nms_threshold") cfg.nms_threshold = to_float(n.value, 0.5f);
+         else if (n.key == "canary_enabled") cfg.canary_enabled = to_bool(n.value, false);
+         else if (n.key == "output_format") cfg.output_format = n.value;
+-        else if (n.key == "person_class_id") cfg.person_class_id = to_int(n.value, -1);
++        else if (n.key == "person_class_id" || n.key == "winch_class_id") cfg.person_class_id = to_int(n.value, -1);
+         else if (n.key == "decoder_classes") cfg.decoder_classes = to_int(n.value, 80);
+         else if (n.key == "input_width") cfg.input_width = to_int(n.value, 0);
+         else if (n.key == "input_height") cfg.input_height = to_int(n.value, 0);
+@@ -314,14 +321,86 @@ bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
+         else if (n.key == "min_frames") cfg.min_frames = to_int(n.value, 10);
+         else if (n.key == "still_timeout_s") cfg.still_timeout_s = to_int(n.value, 15);
+         else if (n.key == "basic_boom_only") cfg.basic_boom_only = to_bool(n.value, true);
++        else if (n.key == "ice_saturation_max") cfg.ice.saturation_max = to_int(n.value, 80);
++        else if (n.key == "ice_value_min") cfg.ice.value_min = to_int(n.value, 180);
+         else if (n.key == "area_ratio") cfg.area_ratio = to_float(n.value, 0.3f);
+         else if (n.key == "exit_on_alarm") cfg.exit_on_alarm = to_bool(n.value, true);
+     }
+-    if (ground_parse_error) {
++    // Scope strict checks to ice. Other modules keep their original parser.
++    bool ice_error = false;
++    if (cfg.module_id == 8) {
++        ice_error = syntax_error;
++        std::set<std::string> seen;
++        std::map<std::string, std::string> aliases;
++        const std::set<std::string> ice_keys{"ice_mode", "ice_saturation_max", "ice_value_min"};
++        auto integer = [](const std::string& value, int base = 10) {
++            char* end = nullptr;
++            errno = 0;
++            const long n = std::strtol(value.c_str(), &end, base);
++            return !errno && end != value.c_str() && *end == '\0' &&
++                   n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max();
++        };
++        for (const auto& n : nodes) {
++            if (n.key.rfind("ice_", 0) == 0 && !ice_keys.count(n.key)) ice_error = true;
++            if ((ice_keys.count(n.key) || n.key == "inference_enabled" ||
++                 n.key == "area_ratio" || n.key == "exit_on_alarm") && !seen.insert(n.key).second)
++                ice_error = true;
++            if (n.key == "ice_mode" && n.value != "model") ice_error = true;
++            if (n.key == "inference_enabled" && n.value != "true") ice_error = true;
++            if (n.key == "exit_on_alarm" && n.value != "true" && n.value != "false") ice_error = true;
++            if (n.key == "module_id" && (!integer(n.value, 0) || n.value.front() == '-' ||
++                std::strtoul(n.value.c_str(), nullptr, 0) > 65535)) ice_error = true;
++            if ((n.key == "ice_saturation_max" || n.key == "ice_value_min" ||
++                 n.key == "input_width" || n.key == "input_height" ||
++                 n.key == "decoder_classes" || n.key == "winch_class_id") && !integer(n.value))
++                ice_error = true;
++            if (n.key == "model" || n.key == "Model_path") {
++                const auto inserted = aliases.emplace("model", n.value);
++                if (n.value.empty() || (!inserted.second && inserted.first->second != n.value))
++                    ice_error = true;
++            }
++            if (n.key == "video_channel" || n.key == "camera_ids") {
++                if (n.value.size() < 3 || n.value.front() != '[' || n.value.back() != ']' ||
++                    n.value[n.value.size() - 2] == ',') ice_error = true;
++                else {
++                    std::istringstream items(n.value.substr(1, n.value.size() - 2));
++                    std::string item;
++                    while (std::getline(items, item, ','))
++                        if (!integer(trim(item))) ice_error = true;
++                }
++            }
++            if (n.key == "area_ratio" || n.key == "confidence_threshold" ||
++                n.key == "score_threshold" || n.key == "score" || n.key == "nms_threshold") {
++                char* end = nullptr;
++                errno = 0;
++                const float value = std::strtof(n.value.c_str(), &end);
++                if (errno || end == n.value.c_str() || *end != '\0' || !std::isfinite(value))
++                    ice_error = true;
++            }
++        }
++    }
++    if (ground_parse_error || ice_error) {
+         err = static_cast<uint32_t>(EvsStatus::ConfigParse);
+         return false;
+     }
+     return true;
+ }
+ 
++namespace detail {
++bool load_task_config_with_module(std::string_view path, TaskConfig& cfg, uint32_t& err,
++                                  uint16_t& parsed_module) {
++    TaskConfig next = cfg;
++    const bool ok = parse_task_config(path, next, err);
++    parsed_module = next.module_id;
++    // Only ice adds transactional publication; preserve legacy partial overlays elsewhere.
++    if (ok || parsed_module != 8) cfg = std::move(next);
++    return ok;
++}
++} // namespace detail
++
++bool load_task_config(std::string_view path, TaskConfig& cfg, uint32_t& err) {
++    uint16_t parsed_module = cfg.module_id;
++    return detail::load_task_config_with_module(path, cfg, err, parsed_module);
++}
++
+ } // namespace evs
+diff --git a/src/core/log.cpp b/src/core/log.cpp
+index 8ecf650..4d43420 100644
+--- a/src/core/log.cpp
++++ b/src/core/log.cpp
+@@ -168,7 +168,7 @@ void Logger::write(LogLevel level, const char* file, int line, const char* fmt,
+ }
+ 
+ void Logger::writev(LogLevel level, const char* file, int line, const char* fmt,
+-                    std::va_list ap) {
++                    std::va_list ap) try {
+     if (level == LogLevel::Off || !fmt) return;
+ 
+     LogLevel active{};
+@@ -228,6 +228,8 @@ void Logger::writev(LogLevel level, const char* file, int line, const char* fmt,
+         std::fwrite(text.data(), 1, text.size(), stderr);
+         std::fflush(stderr);
+     }
++} catch (...) {
++    // A log/sink failure must not reject an already committed policy update.
+ }
+ 
+ } // namespace evs
+diff --git a/src/tasks/winch_ice/winch_ice_plugin.cpp b/src/tasks/winch_ice/winch_ice_plugin.cpp
+index befdf22..f2a1876 100644
+--- a/src/tasks/winch_ice/winch_ice_plugin.cpp
++++ b/src/tasks/winch_ice/winch_ice_plugin.cpp
+@@ -1,48 +1,247 @@
+ #include "winch_ice_plugin.h"
+-
+ #include "evs/status.h"
++#include "evs/testing/ice_replay.h"
+ #include "evs_register.h"
++#include <algorithm>
++#include <chrono>
++#include <cmath>
+ 
+ namespace evs {
++using namespace winch_ice;
++
++namespace {
++uint32_t ice_status(EvsStatus s) {
++    return with_module(8, static_cast<uint32_t>(s));
++}
++
++#if defined(EVS_WITH_OPENCV)
++float overlap(const Target& a, const Target& b) {
++    const float w = std::max(0.f, std::min(a.x + a.w / 2, b.x + b.w / 2) -
++                                      std::max(a.x - a.w / 2, b.x - b.w / 2));
++    const float h = std::max(0.f, std::min(a.y + a.h / 2, b.y + b.h / 2) -
++                                      std::max(a.y - a.h / 2, b.y - b.h / 2));
++    const float intersection = w * h;
++    return intersection / (a.w * a.h + b.w * b.h - intersection);
++}
++
++Detection pixel_box(const Target& t, int w, int h) {
++    // Same rounded half-open endpoints define both the denominator and the overlay.
++    const int left = std::clamp(int(std::lround((t.x - t.w / 2) * w)), 0, w);
++    const int top = std::clamp(int(std::lround((t.y - t.h / 2) * h)), 0, h);
++    const int right = std::clamp(int(std::lround((t.x + t.w / 2) * w)), 0, w);
++    const int bottom = std::clamp(int(std::lround((t.y + t.h / 2) * h)), 0, h);
++    return {uint32_t(std::max(0, t.class_id)),
++            t.confidence,
++            uint32_t(left),
++            uint32_t(top),
++            uint32_t(std::max(0, right - left)),
++            uint32_t(std::max(0, bottom - top))};
++}
++
++bool intersects(const Detection& a, const Detection& b) {
++    return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height &&
++           b.y < a.y + a.height;
++}
++#endif
++} // namespace
+ 
+ uint32_t WinchIcePlugin::configure(const TaskConfig& cfg) {
+-    if (cfg.area_ratio < 0.f || cfg.area_ratio > 1.f)
++    if (!std::isfinite(cfg.confidence_threshold) || cfg.confidence_threshold < 0 ||
++        cfg.confidence_threshold > 1 || !std::isfinite(cfg.nms_threshold) ||
++        cfg.nms_threshold < 0 || cfg.nms_threshold > 1 || !std::isfinite(cfg.area_ratio) ||
++        cfg.area_ratio < 0 || cfg.area_ratio > 1 || cfg.ice.saturation_max < 0 ||
++        cfg.ice.saturation_max > 255 || cfg.ice.value_min < 0 || cfg.ice.value_min > 255)
+         return static_cast<uint32_t>(EvsStatus::OutOfRange);
+-    area_ratio_ = cfg.area_ratio;
+-    exit_on_alarm_ = cfg.exit_on_alarm;
+-    return 0u;
++#if !defined(EVS_WITH_OPENCV)
++    return static_cast<uint32_t>(EvsStatus::NotSupported);
++#else
++    if (cfg.video_channel.size() != 1 || cfg.video_channel[0] < 0 ||
++        cfg.video_channel[0] >= kCameraChannelUnused || cfg.ground.enabled)
++        return static_cast<uint32_t>(EvsStatus::ConfigInvalid);
++    if (configured_ && cfg.video_channel != cfg_.video_channel)
++        return static_cast<uint32_t>(EvsStatus::NotSupported);
++    auto next = cfg; // Allocate before committing an update.
++    using std::swap;
++    swap(cfg_, next);
++    configured_ = true;
++    return 0;
++#endif
++}
++
++void WinchIcePlugin::summarize() noexcept {
++    bool alarm = false, valid = false;
++    for (const auto& r : report_.objects) {
++        valid |= r.valid;
++        alarm |= r.valid && r.state == ObjectState::Alarm;
++    }
++    report_.alert_level = alarm ? AlertLevel::ALERT_WARN : AlertLevel::ALERT_NONE;
++    report_.result_code = valid ? ResultCode::RESULT_MATCH : ResultCode::RESULT_NO_RESULT;
+ }
+ 
+-uint32_t WinchIcePlugin::decide(const Frame& frame, const MachineContext& ctx,
++void WinchIcePlugin::publish(Result& out, uint32_t status) noexcept {
++    summarize();
++    report_.status = status;
++    out.status = status;
++    out.ice_ratio = report_.objects.size() == 1 && report_.objects[0].valid
++                        ? report_.objects[0].ice_ratio
++                        : kIceRatioUnknown;
++    out.alarm =
++        report_.alert_level == AlertLevel::ALERT_WARN ? AlarmState::Alarm : AlarmState::None;
++    out.targets.clear();
++    out.camera_channel = pack_camera_channel(static_cast<uint8_t>(report_.camera_channel));
++}
++
++void WinchIcePlugin::reject_call(uint32_t status, Result& out) noexcept {
++    report_ = WinchSnowResult{};
++    report_.camera_channel = configured_ ? uint32_t(cfg_.video_channel[0]) : 0xFFFFFFFFu;
++#if defined(EVS_WITH_OPENCV)
++    measurements_.clear();
++#endif
++    publish(out, status);
++}
++
++uint32_t WinchIcePlugin::decide(const Frame& frame, const MachineContext&,
+                                 const std::vector<Target>& targets, Result& out) {
+-    (void)frame;
+-    (void)ctx;
++    reject_call(0, out);
++    if (!configured_ || frame.camera_id != cfg_.video_channel[0]) {
++        publish(out, ice_status(configured_ ? EvsStatus::InvalidCameraIndex
++                                            : EvsStatus::NotInitialized));
++        return out.status;
++    }
++#if !defined(EVS_WITH_OPENCV)
+     (void)targets;
+-    (void)area_ratio_;
+-    (void)exit_on_alarm_;
+-    (void)ice_exited_;
+-    // TODO: measure ice area / frame area into out.ice_ratio. When the ratio
+-    // crosses area_ratio_ and exit_on_alarm_ is set, raise alarm once and
+-    // latch ice_exited_ so later frames stay quiet until reset().
++    publish(out, ice_status(EvsStatus::NotSupported));
++    return out.status;
++#else
++    const auto start = std::chrono::steady_clock::now();
++    auto fail = [&](EvsStatus status) {
++        reject_call(ice_status(status), out);
++        return out.status;
++    };
++    std::vector<Target> selected;
++    for (const auto& t : targets) {
++        if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.w) ||
++            !std::isfinite(t.h) || t.w <= 0 || t.h <= 0 || t.x - t.w / 2 < -1e-6f ||
++            t.y - t.h / 2 < -1e-6f || t.x + t.w / 2 > 1.000001f || t.y + t.h / 2 > 1.000001f)
++            return fail(EvsStatus::InvalidParameter);
++        if (!std::isfinite(t.confidence) || t.confidence < 0 || t.confidence > 1)
++            return fail(EvsStatus::ModelInvalidFormat);
++        if (t.class_id == cfg_.person_class_id && t.confidence >= cfg_.confidence_threshold)
++            selected.push_back(t);
++    }
++    std::sort(selected.begin(), selected.end(),
++              [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
++    std::vector<Target> kept;
++    for (const auto& t : selected) {
++        if (std::none_of(kept.begin(), kept.end(),
++                         [&](const auto& other) { return overlap(t, other) > cfg_.nms_threshold; }))
++            kept.push_back(t);
++        if (kept.size() > 2) {
++            fail(EvsStatus::OutOfRange);
++            report_.reason = Reason::UnexpectedObjectCount;
++            return out.status;
++        }
++    }
++    selected.swap(kept);
++    std::sort(selected.begin(), selected.end(),
++              [](const auto& a, const auto& b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
++    IceFramePixels pixels;
++    if (const auto rc = prepare_ice_pixels(frame, cfg_.ice, pixels)) {
++        reject_call(with_module(8, rc), out);
++        return out.status;
++    }
++    report_.processed = true;
++    if (selected.empty()) {
++        report_.reason = Reason::ObjectNotFound;
++        publish(out);
++        return 0;
++    }
++    const auto count = selected.size();
++    report_.objects.resize(count);
++    measurements_.resize(count);
++    for (size_t i = 0; i < count; ++i) {
++        auto& r = report_.objects[i];
++        r.measurement_timestamp_ms = static_cast<uint32_t>(frame.timestamp_us / 1000);
++        r.winch_id = uint32_t(i);
++        r.box = pixel_box(selected[i], frame.width, frame.height);
++        if (r.box.width < 3 || r.box.height < 3) {
++            r.state = ObjectState::Failed;
++            r.reason = Reason::InvalidSurface;
++            r.status = ice_status(EvsStatus::InvalidImageSize);
++            continue;
++        }
++        bool ambiguous = false;
++        for (size_t j = 0; j < selected.size(); ++j)
++            if (i != j && intersects(r.box, pixel_box(selected[j], frame.width, frame.height)))
++                ambiguous = true;
++        if (ambiguous) {
++            r.state = ObjectState::Failed;
++            r.reason = Reason::OverlappingBoxes;
++            r.status = ice_status(EvsStatus::InvalidParameter);
++            continue;
++        }
++        const cv::Rect rect(int(r.box.x), int(r.box.y), int(r.box.width), int(r.box.height));
++        const auto rc = measure_ice_pixels(pixels, rect, measurements_[i]);
++        if (rc == uint32_t(EvsStatus::MemoryAllocation) ||
++            rc == uint32_t(EvsStatus::PostprocessFailed)) {
++            reject_call(with_module(8, rc), out);
++            return out.status;
++        }
++        r.surface_pixels = measurements_[i].surface_pixels;
++        r.snow_pixels = measurements_[i].snow_pixels;
++        r.status = with_module(8, rc);
++        if (rc) {
++            r.state = ObjectState::Failed;
++            r.reason = rc == kIceUnobservable ? Reason::Unobservable : Reason::InvalidSurface;
++        } else {
++            r.valid = true;
++            r.ice_ratio = measurements_[i].ratio;
++            r.state = r.ice_ratio >= cfg_.area_ratio ? ObjectState::Alarm : ObjectState::Normal;
++        }
++    }
++    report_.processing_time_ms =
++        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++    publish(out);
++    return 0;
++#endif
++}
++
++bool WinchIcePlugin::copy_ice_masks(std::vector<testing::IceMaskSnapshot>& out) const {
++    out.clear();
+ #if defined(EVS_WITH_OPENCV)
+-    // Optional OpenCV area measurement belongs in this directory only.
++    for (size_t i = 0; i < measurements_.size(); ++i) {
++        const auto& m = measurements_[i];
++        if (m.surface.empty())
++            continue;
++        testing::IceMaskSnapshot s;
++        s.winch_id = report_.objects[i].winch_id;
++        s.timestamp_ms = report_.objects[i].measurement_timestamp_ms;
++        s.width = m.surface.cols;
++        s.height = m.surface.rows;
++        s.surface.assign(m.surface.datastart, m.surface.dataend);
++        if (!m.snow.empty())
++            s.snow.assign(m.snow.datastart, m.snow.dataend);
++        out.push_back(std::move(s));
++    }
++    return true;
++#else
++    return false;
+ #endif
+-    out.ice_ratio = 0.f;
+-    out.alarm = AlarmState::None;
+-    out.targets.clear();
+-    return 0u;
+ }
+ 
+-void WinchIcePlugin::reset() { ice_exited_ = false; }
++void WinchIcePlugin::reset() {
++    configured_ = false;
++    report_ = WinchSnowResult{};
++#if defined(EVS_WITH_OPENCV)
++    measurements_.clear();
++#endif
++}
+ 
+ namespace {
+-
+ std::unique_ptr<IFunctionPlugin> make_winch_ice_plugin() {
+     return std::make_unique<WinchIcePlugin>();
+ }
+ 
+ const FunctionPluginRegistration kWinchIce(0x0008, make_winch_ice_plugin);
+-
+ } // namespace
+-
+ } // namespace evs
+diff --git a/src/tasks/winch_ice/winch_ice_plugin.h b/src/tasks/winch_ice/winch_ice_plugin.h
+index 54d30ce..74fcd3b 100644
+--- a/src/tasks/winch_ice/winch_ice_plugin.h
++++ b/src/tasks/winch_ice/winch_ice_plugin.h
+@@ -1,23 +1,31 @@
+ #pragma once
+ #include "evs/function_plugin.h"
++#include "evs/winch_ice.h"
++#include "ice_measurement.h"
+ 
+ namespace evs {
+-
+-// 0x0008 winch-ice skeleton. Area measurement is not filled in.
+-// exit_on_alarm: once an alarm has been raised, later frames stay silent
+-// until reset(). The skeleton never raises that alarm.
+ class WinchIcePlugin : public IFunctionPlugin {
+ public:
+     uint16_t module_id() const override { return 0x0008; }
+-    uint32_t configure(const TaskConfig& cfg) override;
+-    uint32_t decide(const Frame& frame, const MachineContext& ctx,
+-                    const std::vector<Target>& targets, Result& out) override;
++
++    uint32_t configure(const TaskConfig&) override;
++    void reject_call(uint32_t status, Result& out) noexcept override;
++    uint32_t decide(const Frame&, const MachineContext&, const std::vector<Target>&,
++                    Result&) override;
++
++    const winch_ice::WinchSnowResult* winch_result() const override { return &report_; }
++
++    bool copy_ice_masks(std::vector<testing::IceMaskSnapshot>&) const override;
+     void reset() override;
+ 
+ private:
+-    float area_ratio_ = 0.3f;
+-    bool exit_on_alarm_ = true;
+-    bool ice_exited_ = false; // TODO: set when exit_on_alarm trips
++    void summarize() noexcept;
++    void publish(Result&, uint32_t status = 0) noexcept;
++    TaskConfig cfg_;
++    winch_ice::WinchSnowResult report_;
++    bool configured_ = false;
++#if defined(EVS_WITH_OPENCV)
++    std::vector<IceMeasurement> measurements_;
++#endif
+ };
+-
+ } // namespace evs
+diff --git a/src/vision_task.cpp b/src/vision_task.cpp
+index 4dd62ee..d67ecc7 100644
+--- a/src/vision_task.cpp
++++ b/src/vision_task.cpp
+@@ -1,23 +1,30 @@
+ #include "evs/vision_task.h"
++#include "core/config_internal.h"
++#include "evs/testing/ice_replay.h"
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <limits>
+ #include <map>
+ #include <sstream>
+ #include <utility>
+ #include <vector>
+ 
+-#include "evs/geom.h"
+ #include "evs/backend_factory.h"
+-#include "evs/model_registry.h"
+-#include "evs/task_config.h"
++#if defined(EVS_BACKEND_RKNN)
++#include "evs/rknn_backend.h"
++#endif
++#include <cmath>
++#include "evs/debug.h"
++#include "evs/detection_decoder.h"
+ #include "evs/function_plugin.h"
++#include "evs/geom.h"
+ #include "evs/ground_mapper.h"
+ #include "evs/ground_metrics.h"
+-#include "evs/detection_decoder.h"
+-#include "evs/preprocess.h"
+ #include "evs/log.h"
+-#include "evs/debug.h"
++#include "evs/model_registry.h"
++#include "evs/preprocess.h"
++#include "evs/task_config.h"
+ 
+ namespace evs {
+ 
+@@ -99,53 +106,83 @@ uint32_t VisionTask::initialize(std::string_view config_path) {
+     TaskConfig cfg;
+     uint32_t err = 0;
+     EVS_LOGI("initializing from %s", cfp.c_str());
+-    if (!load_task_config(config_path, cfg, err)) {
++    uint16_t parsed_module = cfg.module_id;
++    if (!detail::load_task_config_with_module(config_path, cfg, err, parsed_module)) {
+         EVS_LOGE("config parse failed: %s", cfp.c_str());
+         // rollback: nothing allocated yet
+         const uint32_t code = err ? err : static_cast<uint32_t>(EvsStatus::ConfigParse);
+-        return with_module(cfg.module_id, code);
++        return with_module(parsed_module, code);
+     }
+ 
++    return initialize(cfg);
++}
++
++uint32_t VisionTask::initialize(const TaskConfig& config) {
++    if (impl_->initialized)
++        return 0u;
++    TaskConfig cfg = config;
++
++    if (cfg.module_id == 8) {
++        if (cfg.ground.enabled ||
++            cfg.Model_path.empty() || cfg.input_width <= 0 || cfg.input_height <= 0 ||
++            cfg.input_width > 8192 || cfg.input_height > 8192 ||
++            cfg.decoder_classes < 1 || cfg.decoder_classes > 4096 ||
++            cfg.person_class_id < 0 || cfg.person_class_id >= cfg.decoder_classes ||
++            (cfg.input_format != "rgb" && cfg.input_format != "bgr"))
++            return with_module(8, static_cast<uint32_t>(EvsStatus::ConfigInvalid));
++        if (cfg.backend != "rknn" ||
++            (cfg.output_format != "flat6" && cfg.output_format != "yolov8" &&
++             cfg.output_format != "yolox"))
++            return with_module(8, static_cast<uint32_t>(EvsStatus::NotSupported));
++    }
++
++    auto& reg = global_registry();
++    std::shared_ptr<IInferBackend> be;
++    std::unique_ptr<IDetectionDecoder> dec;
+     if (!create_backend(cfg.backend)) {
+         EVS_LOGE("backend '%s' is not compiled into this build", cfg.backend.c_str());
+         return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::NotSupported));
+     }
+-    auto& reg = global_registry();
+-    auto be = reg.acquire(cfg.backend, cfg.Model_path, cfg.init_timeout_s);
++    be = reg.acquire(cfg.backend, cfg.Model_path, cfg.init_timeout_s);
+     if (!be) {
+-        EVS_LOGE("model load failed: backend=%s model=%s",
+-                 cfg.backend.c_str(), cfg.Model_path.c_str());
++        EVS_LOGE("model load failed: %s", cfg.Model_path.c_str());
+         return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::ModelLoadFailed));
+     }
+-
+-    // Tell the backend the input tensor shape so backends that need it
+-    // spatially (e.g. the x86 reference detector) can interpret the buffer.
++#if defined(EVS_BACKEND_RKNN)
++    if (cfg.module_id == 8) {
++        const auto rc = static_cast<RknnBackend*>(be.get())->validateDetectionModel(
++            cfg.output_format, cfg.decoder_classes, cfg.input_width, cfg.input_height);
++        if (rc) {
++            reg.release(cfg.backend, cfg.Model_path);
++            return with_module(8, rc);
++        }
++    }
++#endif
+     be->configure_input(cfg.input_width, cfg.input_height);
+-
+-    // Model-output decoder: unknown format must fail fast rather than produce
+-    // silent garbage in the policy below.
+-    auto dec = create_decoder(cfg.output_format, cfg.person_class_id, cfg.decoder_classes, cfg.input_width, cfg.input_height);
++    dec = create_decoder(cfg.output_format, cfg.person_class_id, cfg.decoder_classes,
++                         cfg.input_width, cfg.input_height);
+     if (!dec) {
+-        EVS_LOGE("unknown output_format=%s", cfg.output_format.c_str());
++        EVS_LOGE("unknown output_format: %s", cfg.output_format.c_str());
+         reg.release(cfg.backend, cfg.Model_path);
+-        return with_module(cfg.module_id,
+-                           static_cast<uint32_t>(EvsStatus::ModelInvalidFormat));
++        return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::ModelInvalidFormat));
+     }
+-
+     auto plugin = create_function_plugin(cfg.module_id);
+     if (!plugin) {
+-        EVS_LOGE("no function plugin for module 0x%04X", cfg.module_id);
+-        reg.release(cfg.backend, cfg.Model_path);
++        EVS_LOGE("no function plugin for module_id=0x%04X", cfg.module_id);
++        if (be)
++            reg.release(cfg.backend, cfg.Model_path);
+         return with_module(cfg.module_id, static_cast<uint32_t>(EvsStatus::NotSupported));
+     }
+     if (const uint32_t pc = plugin->configure(cfg)) {
+-        EVS_LOGE("function plugin configure failed (status=0x%08X)", pc);
+-        reg.release(cfg.backend, cfg.Model_path);
++        EVS_LOGE("plugin configure failed: module_id=0x%04X status=0x%08X", cfg.module_id, pc);
++        if (be)
++            reg.release(cfg.backend, cfg.Model_path);
+         return with_module(cfg.module_id, pc);
+     }
+     GroundMapperMap ground_mappers;
+     if (const uint32_t ge = build_ground_mappers(cfg.ground, ground_mappers)) {
+-        reg.release(cfg.backend, cfg.Model_path);
++        if (be)
++            reg.release(cfg.backend, cfg.Model_path);
+         return with_module(cfg.module_id, ge);
+     }
+     warn_missing_ground_mappers(cfg, ground_mappers);
+@@ -176,7 +213,15 @@ uint32_t VisionTask::initialize(std::string_view config_path) {
+                 impl_->cfg.input_height * 3,
+             0);
+         std::vector<float> warm_out;
+-        const uint32_t wr = impl_->backend->infer(dummy, warm_out);
++        uint32_t wr;
++#if defined(EVS_BACKEND_RKNN)
++        if (impl_->cfg.module_id == 8)
++            wr = static_cast<RknnBackend*>(impl_->backend.get())->inferDetectionRows(
++                dummy, warm_out, impl_->cfg.output_format, impl_->cfg.decoder_classes,
++                impl_->cfg.input_width, impl_->cfg.input_height);
++        else
++#endif
++            wr = impl_->backend->infer(dummy, warm_out);
+         if (wr != 0u) {
+             EVS_LOGW("warmup inference failed (status=0x%08X)", wr);
+         } else {
+@@ -211,7 +256,18 @@ uint32_t VisionTask::acceptFrame(const Frame& frame) const {
+ }
+ 
+ uint32_t VisionTask::detect(const Frame& frame, const MachineContext& ctx, Result& out) {
+-    if (const uint32_t ck = acceptFrame(frame)) return ck;
++    if (impl_->cfg.module_id == 0x0008) {
++        out = Result{};
++        out.ice_ratio = kIceRatioUnknown;
++        if (frame.camera_id >= 0 && frame.camera_id < kCameraChannelUnused)
++            out.camera_channel = pack_camera_channel(static_cast<uint8_t>(frame.camera_id));
++    }
++    if (const uint32_t ck = acceptFrame(frame)) {
++        if (impl_->cfg.module_id == 0x0008)
++            return rejectWinchSnow(with_module(8, ck), out);
++        return ck;
++    }
++
+ 
+     // Optical blind is judged after preprocessing, before inference.
+     // (placeholder: never blind in the scaffold build)
+@@ -235,6 +291,7 @@ uint32_t VisionTask::detect(const Frame& frame, const MachineContext& ctx, Resul
+             EVS_LOGE("preprocess failed (status=0x%08X)", pr);
+             impl_->dbg.note(0.0, 0.0, 0.0, ms_since(t0), pr, AlarmState::None,
+                             0, frame.timestamp_us);
++            if (impl_->cfg.module_id == 0x0008) return rejectWinchSnow(pr, out);
+             return pr;
+         }
+     } else {
+@@ -250,7 +307,17 @@ uint32_t VisionTask::detect(const Frame& frame, const MachineContext& ctx, Resul
+ uint32_t VisionTask::detectPrepared(const Frame& frame, const MachineContext& ctx,
+                                     std::vector<uint8_t> tensor, const PreprocessMap& map,
+                                     double preprocess_ms, Result& out) {
+-    if (const uint32_t ck = acceptFrame(frame)) return ck;
++    if (impl_->cfg.module_id == 0x0008) {
++        out = Result{};
++        out.ice_ratio = kIceRatioUnknown;
++        if (frame.camera_id >= 0 && frame.camera_id < kCameraChannelUnused)
++            out.camera_channel = pack_camera_channel(static_cast<uint8_t>(frame.camera_id));
++    }
++    if (const uint32_t ck = acceptFrame(frame)) {
++        if (impl_->cfg.module_id == 0x0008)
++            return rejectWinchSnow(with_module(8, ck), out);
++        return ck;
++    }
+     const std::size_t need = static_cast<std::size_t>(impl_->cfg.input_width) *
+                              static_cast<std::size_t>(impl_->cfg.input_height) * 3u;
+     if (tensor.size() != need || map.in_w != impl_->cfg.input_width ||
+@@ -258,12 +325,41 @@ uint32_t VisionTask::detectPrepared(const Frame& frame, const MachineContext& ct
+         EVS_LOGW("detectPrepared: tensor %zu bytes, map %dx%d, model %dx%d",
+                  tensor.size(), map.in_w, map.in_h, impl_->cfg.input_width,
+                  impl_->cfg.input_height);
+-        return with_module(impl_->cfg.module_id,
+-                           static_cast<uint32_t>(EvsStatus::InvalidImageSize));
++        const uint32_t rc =
++            with_module(impl_->cfg.module_id, static_cast<uint32_t>(EvsStatus::InvalidImageSize));
++        if (impl_->cfg.module_id == 0x0008) return rejectWinchSnow(rc, out);
++        return rc;
+     }
+     return finishDetect(frame, ctx, tensor, map, preprocess_ms, out);
+ }
+ 
++bool VisionTask::lastWinchSnowResult(winch_ice::WinchSnowResult& out) const {
++    const auto* result = winchSnowResultView();
++    if (!result)
++        return false;
++    out = *result;
++    return true;
++}
++
++const winch_ice::WinchSnowResult* VisionTask::winchSnowResultView() const noexcept {
++    return impl_->initialized && impl_->plugin ? impl_->plugin->winch_result() : nullptr;
++}
++
++uint32_t VisionTask::rejectWinchSnow(uint32_t status, Result& out) noexcept {
++    if (impl_->initialized && impl_->plugin && impl_->cfg.module_id == 0x0008)
++        impl_->plugin->reject_call(status, out);
++    else {
++        out = Result{};
++        out.ice_ratio = kIceRatioUnknown;
++        out.status = status;
++    }
++    return status;
++}
++
++bool VisionTask::copyIceMasks(std::vector<testing::IceMaskSnapshot>& out) const {
++    return impl_->initialized && impl_->plugin && impl_->plugin->copy_ice_masks(out);
++}
++
+ int VisionTask::inputWidth() const {
+     return impl_->initialized ? impl_->cfg.input_width : 0;
+ }
+@@ -289,13 +385,22 @@ uint32_t VisionTask::finishDetect(const Frame& frame, const MachineContext& ctx,
+ 
+     const Clock::time_point t1 = Clock::now();
+     std::vector<float> output;
+-    uint32_t r = impl_->backend->infer(input, output);
++    uint32_t r;
++#if defined(EVS_BACKEND_RKNN)
++    if (impl_->cfg.module_id == 8)
++        r = static_cast<RknnBackend*>(impl_->backend.get())->inferDetectionRows(
++            input, output, impl_->cfg.output_format, impl_->cfg.decoder_classes,
++            impl_->cfg.input_width, impl_->cfg.input_height);
++    else
++#endif
++        r = impl_->backend->infer(input, output);
+     const double infer_ms = ms_since(t1);
+     if (r != 0u) {
+         r = with_module(impl_->cfg.module_id, r);
+         EVS_LOGE("inference failed (status=0x%08X, input=%zu B)", r, input.size());
+         impl_->dbg.note(pre_ms, infer_ms, 0.0, pre_ms + ms_since(t_start), r,
+                         AlarmState::None, 0, frame.timestamp_us);
++        if (impl_->cfg.module_id == 0x0008) return rejectWinchSnow(r, out);
+         return r;
+     }
+ 
+@@ -306,6 +411,23 @@ uint32_t VisionTask::finishDetect(const Frame& frame, const MachineContext& ctx,
+     // so the policy works in original-frame coordinates.
+     for (auto& t : targets)
+         map_target_to_original(pre_map, t, frame.width, frame.height);
++    if (impl_->cfg.module_id == 8) {
++        // Clip boxes after undoing letterbox. Padding itself is not image area.
++        for (auto& t : targets) {
++            if (!std::isfinite(t.x) || !std::isfinite(t.y) || !std::isfinite(t.w) ||
++                !std::isfinite(t.h) || t.w < 0 || t.h < 0)
++                return rejectWinchSnow(with_module(8, uint32_t(EvsStatus::ModelInvalidFormat)), out);
++            const float left = std::clamp(t.x - t.w / 2, 0.f, 1.f);
++            const float top = std::clamp(t.y - t.h / 2, 0.f, 1.f);
++            const float right = std::clamp(t.x + t.w / 2, 0.f, 1.f);
++            const float bottom = std::clamp(t.y + t.h / 2, 0.f, 1.f);
++            t.x = (left + right) / 2; t.y = (top + bottom) / 2;
++            t.w = right - left; t.h = bottom - top;
++        }
++        targets.erase(std::remove_if(targets.begin(), targets.end(), [](const auto& t) {
++            return t.w <= 0 || t.h <= 0;
++        }), targets.end());
++    }
+     for (auto& target : targets) {
+         target.ground_ok = false;
+         target.ground_x_m = 0.f;
+@@ -329,6 +451,8 @@ uint32_t VisionTask::finishDetect(const Frame& frame, const MachineContext& ctx,
+     }
+     const double decode_ms = ms_since(t2);
+     out = Result{};
++    if (impl_->cfg.module_id == 0x0008)
++        out.ice_ratio = kIceRatioUnknown;
+     out.status = 0u;
+     out.camera_blind = false;
+     if (!impl_->plugin)
+@@ -376,6 +500,18 @@ uint32_t VisionTask::updateConfig(std::string_view config_path) {
+         const uint32_t code = err ? err : static_cast<uint32_t>(EvsStatus::ConfigParse);
+         return with_module(module, code);
+     }
++    return updateConfig(newcfg);
++}
++
++uint32_t VisionTask::updateConfig(const TaskConfig& config) {
++    if (!impl_->initialized)
++        return static_cast<uint32_t>(EvsStatus::NotInitialized);
++    const uint16_t module = impl_->cfg.module_id;
++    TaskConfig newcfg = config;
++    if (module == 8 && (newcfg.input_width != impl_->cfg.input_width ||
++        newcfg.input_height != impl_->cfg.input_height ||
++        newcfg.input_format != impl_->cfg.input_format || newcfg.letterbox != impl_->cfg.letterbox))
++        return with_module(8, static_cast<uint32_t>(EvsStatus::NotSupported));
+     // Backend / model are immutable at runtime.
+     if (newcfg.backend != impl_->cfg.backend || newcfg.Model_path != impl_->cfg.Model_path) {
+         EVS_LOGW("updateConfig rejected: backend/model change %s -> %s",
+@@ -426,6 +562,7 @@ uint32_t VisionTask::updateConfig(std::string_view config_path) {
+     impl_->cfg.basic_boom_only = newcfg.basic_boom_only;
+     impl_->cfg.area_ratio = newcfg.area_ratio;
+     impl_->cfg.exit_on_alarm = newcfg.exit_on_alarm;
++    impl_->cfg.ice = newcfg.ice;
+ 
+     // Debug settings stay hot even when everything else is frozen: a field
+     // technician must be able to turn dumping on without a restart.
+@@ -444,7 +581,7 @@ uint32_t VisionTask::updateConfig(std::string_view config_path) {
+ 
+ void VisionTask::release() {
+     if (!impl_) return;
+-    if (impl_->initialized && !impl_->cfg.Model_path.empty()) {
++    if (impl_->initialized && impl_->backend) {
+         EVS_LOGI("releasing %s:%s (%llu frames processed)",
+                  impl_->cfg.backend.c_str(), impl_->cfg.Model_path.c_str(),
+                  static_cast<unsigned long long>(impl_->dbg.stats().frames));
+@@ -465,16 +602,13 @@ std::string VisionTask::debugSnapshot() const {
+     const DebugStats& s = impl_->dbg.stats();
+     std::ostringstream js;
+     js << "{\"initialized\":" << (impl_->initialized ? "true" : "false")
+-       << ",\"task\":" << jstr(c.task)
+-       << ",\"backend\":" << jstr(c.backend)
+-       << ",\"Model_path\":" << jstr(c.Model_path)
+-       << ",\"output_format\":" << jstr(c.output_format)
++       << ",\"task\":" << jstr(c.task) << ",\"backend\":" << jstr(c.backend)
++       << ",\"Model_path\":" << jstr(c.Model_path) << ",\"output_format\":" << jstr(c.output_format)
+        << ",\"input\":{\"w\":" << c.input_width << ",\"h\":" << c.input_height
+        << ",\"format\":" << jstr(c.input_format)
+        << ",\"letterbox\":" << (c.letterbox ? "true" : "false") << "}"
+        << ",\"confidence_threshold\":" << c.confidence_threshold
+-       << ",\"latency_budget_ms\":" << c.latency_budget_ms
+-       << ",\"frames\":" << s.frames
++       << ",\"latency_budget_ms\":" << c.latency_budget_ms << ",\"frames\":" << s.frames
+        << ",\"stats\":" << impl_->dbg.snapshot_json();
+     // Append the last few log lines so a remote snapshot carries context.
+     js << ",\"log\":[";
+diff --git a/tests/test_core.cpp b/tests/test_core.cpp
+index 3b22644..995ed9f 100644
+--- a/tests/test_core.cpp
++++ b/tests/test_core.cpp
+@@ -1027,14 +1027,21 @@ int main() {
+         ic.module_id = 0x0008;
+         ic.area_ratio = 0.3f;
+         ic.exit_on_alarm = true;
+-        CHECK(ice && ice->configure(ic) == 0u, "ice configure");
++#if defined(EVS_WITH_OPENCV)
++        CHECK(ice && ice->configure(ic) == static_cast<uint32_t>(EvsStatus::ConfigInvalid),
++              "ice requires a configured camera");
++#else
++        CHECK(ice && ice->configure(ic) == static_cast<uint32_t>(EvsStatus::NotSupported),
++              "ice requires OpenCV");
++#endif
+         ic.area_ratio = 1.5f;
+         CHECK(ice->configure(ic) == static_cast<uint32_t>(EvsStatus::OutOfRange),
+               "ice rejects area_ratio > 1");
+         Result ir{};
+         ir.limit_state = 3;
+-        CHECK(ice->decide(Frame{}, MachineContext{}, {}, ir) == 0u, "ice decide");
+-        CHECK(ir.ice_ratio == 0.f, "ice ratio placeholder 0");
++        CHECK(ice->decide(Frame{}, MachineContext{}, {}, ir) != 0u && ir.status != 0u,
++              "unconfigured ice returns failure");
++        CHECK(ir.ice_ratio == kIceRatioUnknown, "failed ice is unknown");
+         CHECK(ir.limit_state == 3, "ice does not change limit_state");
+ 
+         const std::string hy =

@@ -1,0 +1,29 @@
+# YOLOX on the RK3576 NPU.
+#
+# Matches YOLOX_CPP_ Demo: one output blob, 640 input, COCO 80 classes.
+# Layout is [8400, 85] = stride 8, then 16, then 32. Inside a stride, y is
+# the outer index and x is the inner index. Each anchor is
+# cx, cy, w, h, objectness, class scores.
+# Objectness and class scores are probabilities. If the graph still emits
+# logits, run with EVS_YOLOX_SIGMOID=1.
+# Per-scale maps [1, 85, S, S] or [1, S, S, 85] are also accepted.
+#
+#   ./v4l2_detect --task configs/eval_yolox.yaml --device /dev/video0 \
+#                 --frames 5 --rga
+task: eval_yolox
+module_id: 0x0004
+camera:
+  video_channel: [0]
+
+backend: rknn
+# Relative to the process current directory.
+Model_path: yolox.rknn
+output_format: yolox
+person_class_id: 0
+decoder_classes: 80
+
+input_width: 640
+input_height: 640
+input_format: rgb
+letterbox: true
+confidence_threshold: 0.25

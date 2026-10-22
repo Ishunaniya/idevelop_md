@@ -1,0 +1,52 @@
+Start testing: Oct 21 00:12 CST
+----------------------------------------------------------
+1/3 Testing: evs_tests
+1/3 Test: evs_tests
+Command: "/tmp/ice_slim_nocv/evs_tests"
+Directory: /tmp/ice_slim_nocv
+"evs_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+
+PASS=235 FAIL=0
+<end of output>
+Test time =   0.52 sec
+----------------------------------------------------------
+Test Passed.
+"evs_tests" end time: Oct 21 00:12 CST
+"evs_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/3 Testing: evs_ice_tests
+2/3 Test: evs_ice_tests
+Command: "/tmp/ice_slim_nocv/evs_ice_tests"
+Directory: /tmp/ice_slim_nocv
+"evs_ice_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ICE PASS=86 FAIL=0
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_tests" end time: Oct 21 00:12 CST
+"evs_ice_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/3 Testing: evs_ice_dynamic_tests
+3/3 Test: evs_ice_dynamic_tests
+Command: "/tmp/ice_slim_nocv/evs_ice_dynamic_tests"
+Directory: /tmp/ice_slim_nocv
+"evs_ice_dynamic_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ICE PASS=86 FAIL=0
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_dynamic_tests" end time: Oct 21 00:12 CST
+"evs_ice_dynamic_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 21 00:12 CST

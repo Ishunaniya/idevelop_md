@@ -1,0 +1,33 @@
+# Offline evaluation on the RK3576 board itself (NPU path).
+#
+# Same harness as configs/eval_onnx.yaml, but the backend is the RKNN runtime
+# running the .rknn model on /dev/dri/renderD* (RK3576 NPU). Use it to prove
+# that the NPU produces the same boxes as the PC/ONNX path -- the YOLOv5 decode
+# is shared code (src/backend/yolo_decode.h), so any difference is a real bug.
+#
+#   ./eval_offline --task configs/eval_rknn.yaml \
+#                  --dataset ./eval_onnx_demo --iou 0.5 --score 0.25 --out ./out
+#
+# EVS_RKNN_INPUT_SCALE: value range fed to a float32 model input.
+#   unset / 1.0  -> raw 0..255 (official rknn yolov5 recipe: mean/std are baked
+#                   into the converted graph)
+#   0.00392157  -> 0..1 (model exported from ONNX that already divides by 255)
+# Start with 1.0; if the NPU reports thousands of low-confidence boxes, retry with
+# 0.00392157 (or vice versa) -- that mismatch is the usual cause.
+task: eval_rknn
+module_id: 0x0004
+camera:
+  video_channel: [0]
+
+backend: rknn
+# Relative to the process current directory.
+Model_path: yolov5s-640-640_rk3576.rknn
+output_format: yolov8          # backend emits [x,y,w,h, s0..s79]
+person_class_id: 0             # COCO person (0)
+decoder_classes: 80
+
+input_width: 640
+input_height: 640
+input_format: rgb
+letterbox: true
+confidence_threshold: 0.25

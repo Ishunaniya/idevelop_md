@@ -1,0 +1,46 @@
+configs/eval_demo.yaml 1 0 4 x86  320 240 0.45 0.5 -1 1 4 circle 0 5 75 10
+0 homography /userdata/matrix_0_1280x720.txt 1280 720
+1 homography /userdata/matrix_1_1280x720.txt 1280 720
+2 homography /userdata/matrix_2_1280x720.txt 1280 720
+3 homography /userdata/matrix_3_1280x720.txt 1280 720
+0,
+configs/eval_onnx.yaml 1 0 4 onnx X:/new_qt5_qml/edgevision/yolov5s.onnx 640 640 0.25 0.5 0 1 4 circle 0 5 75 10
+0 homography /userdata/matrix_0_1280x720.txt 1280 720
+1 homography /userdata/matrix_1_1280x720.txt 1280 720
+2 homography /userdata/matrix_2_1280x720.txt 1280 720
+3 homography /userdata/matrix_3_1280x720.txt 1280 720
+0,
+configs/eval_rknn.yaml 1 0 4 rknn yolov5s-640-640_rk3576.rknn 640 640 0.25 0.5 0 1 4 circle 0 5 75 10
+0 homography /userdata/matrix_0_1280x720.txt 1280 720
+1 homography /userdata/matrix_1_1280x720.txt 1280 720
+2 homography /userdata/matrix_2_1280x720.txt 1280 720
+3 homography /userdata/matrix_3_1280x720.txt 1280 720
+0,
+configs/height_limit.yaml 1 0 7 mock models/height_switch.rknn 640 640 0.45 0.5 -1 1 4 circle 0 5 75 10
+0 homography /userdata/matrix_0_1280x720.txt 1280 720
+1 homography /userdata/matrix_1_1280x720.txt 1280 720
+2 homography /userdata/matrix_2_1280x720.txt 1280 720
+3 homography /userdata/matrix_3_1280x720.txt 1280 720
+0,
+configs/load_under.yaml 1 0 5 mock models/person.rknn 640 640 0.45 0.5 -1 1 1 circle 10 5 75 10
+0 homography  1280 720
+0,
+configs/sample_load_near.yaml 1 0 4 mock models/person.rknn 640 640 0.45 0.5 -1 1 4 circle 10 5 75 10
+0 homography /userdata/matrix_0_1280x720.txt 1280 720
+1 homography /userdata/matrix_1_1280x720.txt 1280 720
+2 homography /userdata/matrix_2_1280x720.txt 1280 720
+3 homography /userdata/matrix_3_1280x720.txt 1280 720
+0,
+configs/boom_under.yaml 1 0 6 mock models/person.rknn 640 640 0.45 0.5 -1 1 2 sector 0 5 75 10
+2 homography  1280 720
+3 homography  1280 720
+2,3,
+configs/eval_yolox.yaml 1 0 4 rknn yolox.rknn 640 640 0.25 0.5 0 1 4 circle 0 5 75 10
+0 homography /userdata/matrix_0_1280x720.txt 1280 720
+1 homography /userdata/matrix_1_1280x720.txt 1280 720
+2 homography /userdata/matrix_2_1280x720.txt 1280 720
+3 homography /userdata/matrix_3_1280x720.txt 1280 720
+0,
+configs/load_near.yaml 1 0 4 mock models/person.rknn 640 640 0.45 0.5 -1 1 1 circle 10 5 75 10
+0 homography  1280 720
+0,

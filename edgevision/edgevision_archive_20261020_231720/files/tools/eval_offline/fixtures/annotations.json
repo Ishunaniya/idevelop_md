@@ -1,0 +1,102 @@
+{
+  "class_names": [
+    "person",
+    "helmet"
+  ],
+  "images": [
+    {
+      "file": "img1_person.ppm",
+      "boxes": [
+        {
+          "class": 0,
+          "x": 0.3,
+          "y": 0.4,
+          "w": 0.2,
+          "h": 0.3
+        }
+      ]
+    },
+    {
+      "file": "img2_helmet.ppm",
+      "boxes": [
+        {
+          "class": 1,
+          "x": 0.62,
+          "y": 0.5,
+          "w": 0.16,
+          "h": 0.22
+        }
+      ]
+    },
+    {
+      "file": "img3_empty.ppm",
+      "boxes": []
+    },
+    {
+      "file": "img4_person_noise.ppm",
+      "boxes": [
+        {
+          "class": 0,
+          "x": 0.35,
+          "y": 0.45,
+          "w": 0.2,
+          "h": 0.3
+        }
+      ]
+    },
+    {
+      "file": "img5_two_persons.ppm",
+      "boxes": [
+        {
+          "class": 0,
+          "x": 0.25,
+          "y": 0.4,
+          "w": 0.15,
+          "h": 0.25
+        },
+        {
+          "class": 0,
+          "x": 0.7,
+          "y": 0.55,
+          "w": 0.15,
+          "h": 0.25
+        }
+      ]
+    },
+    {
+      "file": "img6_both.ppm",
+      "boxes": [
+        {
+          "class": 1,
+          "x": 0.55,
+          "y": 0.45,
+          "w": 0.16,
+          "h": 0.22
+        },
+        {
+          "class": 0,
+          "x": 0.3,
+          "y": 0.55,
+          "w": 0.18,
+          "h": 0.28
+        }
+      ]
+    },
+    {
+      "file": "img7_fp.ppm",
+      "boxes": []
+    },
+    {
+      "file": "img8_fn.ppm",
+      "boxes": [
+        {
+          "class": 0,
+          "x": 0.5,
+          "y": 0.5,
+          "w": 0.03,
+          "h": 0.03
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+Start testing: Oct 21 00:12 CST
+----------------------------------------------------------
+1/4 Testing: evs_tests
+1/4 Test: evs_tests
+Command: "/tmp/ice_slim_static/evs_tests"
+Directory: /tmp/ice_slim_static
+"evs_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+
+PASS=235 FAIL=0
+<end of output>
+Test time =   0.72 sec
+----------------------------------------------------------
+Test Passed.
+"evs_tests" end time: Oct 21 00:12 CST
+"evs_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/4 Testing: evs_ice_tests
+2/4 Test: evs_ice_tests
+Command: "/tmp/ice_slim_static/evs_ice_tests"
+Directory: /tmp/ice_slim_static
+"evs_ice_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ICE PASS=204 FAIL=0
+<end of output>
+Test time =   0.25 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_tests" end time: Oct 21 00:12 CST
+"evs_ice_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/4 Testing: evs_ice_allocation_tests
+3/4 Test: evs_ice_allocation_tests
+Command: "/tmp/ice_slim_static/evs_ice_allocation_tests"
+Directory: /tmp/ice_slim_static
+"evs_ice_allocation_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ALLOCATION PASS=75 FAIL=0
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_allocation_tests" end time: Oct 21 00:12 CST
+"evs_ice_allocation_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/4 Testing: evs_ice_cli
+4/4 Test: evs_ice_cli
+Command: "/usr/bin/python3" "/home/tronlong/lyp/code/edgevision/tests/test_ice_cli.py" "/tmp/ice_slim_static/ice_replay" "/home/tronlong/lyp/code/edgevision"
+Directory: /tmp/ice_slim_static
+"evs_ice_cli" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+CLI PASS: retired configurations and missing model rejected; no result fallback
+<end of output>
+Test time =   0.35 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_cli" end time: Oct 21 00:12 CST
+"evs_ice_cli" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 21 00:12 CST

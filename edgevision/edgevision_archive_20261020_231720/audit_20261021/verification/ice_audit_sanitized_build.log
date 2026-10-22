@@ -1,0 +1,66 @@
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- EVS_BACKEND = mock
+-- Configuring done (2.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: /tmp/ice_audit_sanitized
+[  3%] Building CXX object CMakeFiles/evs_height_limit_objs.dir/src/tasks/height_limit/height_limit_plugin.cpp.o
+[  7%] Building CXX object CMakeFiles/evs_person_objs.dir/src/tasks/person/person_plugin.cpp.o
+[ 10%] Building CXX object CMakeFiles/evs_height_limit_objs.dir/src/tasks/height_limit/height_limit_mount.cpp.o
+[ 10%] Built target evs_height_limit_objs
+[ 14%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_plugin.cpp.o
+[ 14%] Built target evs_person_objs
+[ 17%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/ice_measurement.cpp.o
+[ 21%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_api.cpp.o
+[ 25%] Building CXX object CMakeFiles/evs_objs.dir/src/core/config.cpp.o
+[ 25%] Built target evs_ice_objs
+[ 28%] Linking CXX static library libevs_person.a
+[ 28%] Built target evs_person
+[ 32%] Linking CXX static library libevs_height_limit.a
+[ 32%] Built target evs_height_limit
+[ 35%] Linking CXX static library libevs_ice.a
+[ 35%] Built target evs_ice
+[ 39%] Building CXX object CMakeFiles/evs_objs.dir/src/core/model_registry.cpp.o
+[ 42%] Building CXX object CMakeFiles/evs_objs.dir/src/core/backend_factory.cpp.o
+[ 46%] Building CXX object CMakeFiles/evs_objs.dir/src/core/detection_decoder.cpp.o
+[ 50%] Building CXX object CMakeFiles/evs_objs.dir/src/core/preprocess.cpp.o
+[ 53%] Building CXX object CMakeFiles/evs_objs.dir/src/core/log.cpp.o
+[ 57%] Building CXX object CMakeFiles/evs_objs.dir/src/core/debug.cpp.o
+[ 60%] Building CXX object CMakeFiles/evs_objs.dir/src/core/offline_eval.cpp.o
+[ 64%] Building CXX object CMakeFiles/evs_objs.dir/src/vision_task.cpp.o
+[ 67%] Building CXX object CMakeFiles/evs_objs.dir/src/tasks/function_plugin_factory.cpp.o
+[ 71%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/homography_mapper.cpp.o
+[ 75%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/crane_pose_mapper.cpp.o
+[ 78%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/ground_mapper_factory.cpp.o
+[ 82%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/ground_params.cpp.o
+[ 85%] Building CXX object CMakeFiles/evs_objs.dir/src/ground/ground_metrics.cpp.o
+[ 89%] Building CXX object CMakeFiles/evs_objs.dir/src/backend/mock/mock_backend.cpp.o
+[ 89%] Built target evs_objs
+[ 92%] Linking CXX static library libevs.a
+[ 92%] Built target evs
+[ 96%] Building CXX object CMakeFiles/evs_tests.dir/tests/test_core.cpp.o
+[100%] Linking CXX executable evs_tests
+[100%] Built target evs_tests
+[  3%] Built target evs_person_objs
+[ 10%] Built target evs_height_limit_objs
+[ 14%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_api.cpp.o
+[ 71%] Built target evs_objs
+[ 75%] Built target evs_person
+[ 78%] Built target evs_height_limit
+[ 82%] Built target evs
+/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp: In static member function ‘static bool evs::testing::IceReplayAccess::copyMasks(const evs::winch_ice::Detector&, std::vector<evs::testing::IceMaskSnapshot>&)’:
+/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:180:38: error: ‘bool evs::VisionTask::copyIceMasks(std::vector<evs::testing::IceMaskSnapshot>&) const’ is private within this context
+  180 |     return d.impl_->task.copyIceMasks(out);
+      |            ~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+In file included from /home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:2:
+/home/tronlong/lyp/code/edgevision/include/evs/vision_task.h:78:10: note: declared private here
+   78 |     bool copyIceMasks(std::vector<testing::IceMaskSnapshot>& out) const;
+      |          ^~~~~~~~~~~~
+gmake[3]: *** [CMakeFiles/evs_ice_objs.dir/build.make:104: CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_api.cpp.o] Error 1
+gmake[2]: *** [CMakeFiles/Makefile2:259: CMakeFiles/evs_ice_objs.dir/all] Error 2
+gmake[1]: *** [CMakeFiles/Makefile2:350: CMakeFiles/evs_ice_tests.dir/rule] Error 2
+gmake: *** [Makefile:296: evs_ice_tests] Error 2

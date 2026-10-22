@@ -1,0 +1,25 @@
+src/backend/rknn/rknn_backend.cpp: 0
+
+src/core/config.cpp: 0
+
+src/core/log.cpp: 0
+
+src/core/model_registry.cpp: 0
+
+src/tasks/winch_ice/ice_measurement.cpp: 0
+
+src/tasks/winch_ice/winch_ice_api.cpp: 0
+
+src/tasks/winch_ice/winch_ice_plugin.cpp: 0
+
+src/vision_task.cpp: 0
+
+tests/test_core.cpp: 0
+
+tests/test_ice.cpp: 0
+
+tests/test_ice_allocation.cpp: 0
+
+tools/ice_replay/main.cpp: 0
+
+tools/winch_ice_demo/main.cpp: 0

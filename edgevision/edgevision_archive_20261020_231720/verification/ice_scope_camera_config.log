@@ -1,0 +1,7 @@
+-- EVS_BACKEND = rknn
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (1.3s)
+-- Generating done (0.3s)
+-- Build files have been written to: /tmp/ice_scope_camera

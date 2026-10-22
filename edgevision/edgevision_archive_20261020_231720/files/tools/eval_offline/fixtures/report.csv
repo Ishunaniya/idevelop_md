@@ -1,0 +1,4 @@
+class,name,tp,fp,fn,precision,recall,f1,ap
+0,person,5,1,1,0.833333,0.833333,0.833333,0.833333
+1,helmet,2,0,0,1,1,1,1
+ALL,MICRO,7,1,1,0.875,0.875,0.875,0.916667

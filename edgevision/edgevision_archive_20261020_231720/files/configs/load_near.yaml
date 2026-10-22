@@ -1,0 +1,50 @@
+task: load_near
+module_id: 0x0004
+camera:
+  video_channel: [0]         # 臂头变焦 IPC ×1
+
+ground:
+  enabled: true
+  reference: camera_origin   # 改为 task 后由 PersonPlugin 提供吊钩参考点
+  distance_mode: legacy_forward_y
+  cameras:
+    - id: 0
+      mapper: homography
+      params:
+        matrix: /userdata/matrix_0_1280x720.txt
+        calibration_width: 1280
+        calibration_height: 720
+        strict_matrix: true
+
+backend: mock
+Model_path: models/person.rknn
+output_format: flat6        # 解码器格式：flat6=单类6float；yolov8=[N,4+C] argmax
+person_class_id: -1         # yolov8 时指定 person 类序号；-1=不过滤（单类模型）
+input_width: 640
+input_height: 640
+warmup: true
+init_timeout_s: 60
+npu_core_mask: 1
+
+latency_budget_ms: 200
+min_fps: 5
+
+on_missing_context: alarm   # 无工况且检测到人 -> 立即报警
+work_motion_epsilon: 0.1    # 判定「作业中」的角速度或动作阈值
+
+zone:
+  type: circle
+  radius_m: 10               # 以吊钩地面投影为圆心
+  consecutive_frames: 3      # 作业连续 3 帧有人则报警
+
+confidence_threshold: 0.45
+
+# 调试开关（可 updateConfig 热更新，无需重启）
+debug:
+  enabled: false              # 总开关；关掉时不缓存张量、不落盘
+  dump_input: false           # 保存模型输入张量为 PPM
+  dump_meta: true             # 同时保存同帧 JSON 元信息（框/映射/状态）
+  dump_on_alarm_only: true    # 只存告警帧
+  dump_every_n: 0             # 0=不按周期存；1=每帧（仅排障时开）
+  dump_dir: /tmp/evs_debug
+  max_dumps: 100              # 安全阀：写满即停

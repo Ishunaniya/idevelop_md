@@ -1,0 +1,12 @@
+Internal ctest changing into directory: /tmp/ice_slim_nocv
+Test project /tmp/ice_slim_nocv
+    Start 1: evs_tests
+1/3 Test #1: evs_tests ........................   Passed    0.52 sec
+    Start 2: evs_ice_tests
+2/3 Test #2: evs_ice_tests ....................   Passed    0.10 sec
+    Start 3: evs_ice_dynamic_tests
+3/3 Test #3: evs_ice_dynamic_tests ............   Passed    0.04 sec
+
+100% tests passed, 0 tests failed out of 3
+
+Total Test time (real) =   0.68 sec

@@ -1,0 +1,17 @@
+# Offline evaluation demo config (X86 host).
+# Runs the x86 reference detector on the synthetic fixtures under
+# tools/eval_offline/fixtures/. Swap `backend: onnx` (and point `model` at your
+# exported .onnx) to evaluate the REAL model on field photos.
+task: eval_demo
+module_id: 0x0004
+camera:
+  video_channel: [0]
+
+backend: x86
+Model_path: ""                  # x86 reference detector ignores the model file
+output_format: flat6            # reference detector emits the legacy flat6 layout
+input_width: 320
+input_height: 240
+input_format: rgb               # reference detector reads the RGB NHWC tensor
+letterbox: true
+confidence_threshold: 0.45

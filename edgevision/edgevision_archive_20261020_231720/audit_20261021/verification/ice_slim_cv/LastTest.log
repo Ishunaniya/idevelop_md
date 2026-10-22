@@ -1,0 +1,84 @@
+Start testing: Oct 21 00:12 CST
+----------------------------------------------------------
+1/5 Testing: evs_tests
+1/5 Test: evs_tests
+Command: "/tmp/ice_slim_cv/evs_tests"
+Directory: /tmp/ice_slim_cv
+"evs_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+
+PASS=235 FAIL=0
+<end of output>
+Test time =   0.44 sec
+----------------------------------------------------------
+Test Passed.
+"evs_tests" end time: Oct 21 00:12 CST
+"evs_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/5 Testing: evs_ice_tests
+2/5 Test: evs_ice_tests
+Command: "/tmp/ice_slim_cv/evs_ice_tests"
+Directory: /tmp/ice_slim_cv
+"evs_ice_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ICE PASS=204 FAIL=0
+<end of output>
+Test time =   0.39 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_tests" end time: Oct 21 00:12 CST
+"evs_ice_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/5 Testing: evs_ice_allocation_tests
+3/5 Test: evs_ice_allocation_tests
+Command: "/tmp/ice_slim_cv/evs_ice_allocation_tests"
+Directory: /tmp/ice_slim_cv
+"evs_ice_allocation_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ALLOCATION PASS=75 FAIL=0
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_allocation_tests" end time: Oct 21 00:12 CST
+"evs_ice_allocation_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/5 Testing: evs_ice_dynamic_tests
+4/5 Test: evs_ice_dynamic_tests
+Command: "/tmp/ice_slim_cv/evs_ice_dynamic_tests"
+Directory: /tmp/ice_slim_cv
+"evs_ice_dynamic_tests" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+ICE PASS=204 FAIL=0
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_dynamic_tests" end time: Oct 21 00:12 CST
+"evs_ice_dynamic_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/5 Testing: evs_ice_cli
+5/5 Test: evs_ice_cli
+Command: "/usr/bin/python3" "/home/tronlong/lyp/code/edgevision/tests/test_ice_cli.py" "/tmp/ice_slim_cv/ice_replay" "/home/tronlong/lyp/code/edgevision"
+Directory: /tmp/ice_slim_cv
+"evs_ice_cli" start time: Oct 21 00:12 CST
+Output:
+----------------------------------------------------------
+CLI PASS: retired configurations and missing model rejected; no result fallback
+<end of output>
+Test time =   0.29 sec
+----------------------------------------------------------
+Test Passed.
+"evs_ice_cli" end time: Oct 21 00:12 CST
+"evs_ice_cli" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 21 00:12 CST

@@ -1,0 +1,335 @@
+{
+  "description": "6 images, 4 independent scenes. Two pairs are resized duplicates. Manual illustrative ROIs only; these are not field calibration or labeled ground truth.",
+  "images": [
+    {
+      "file": "img_v3_0214i_b039903b-0ecc-48c2-8bc9-08dbf16c70bm.jpg",
+      "scene": "snow_a",
+      "reference_size": [
+        800,
+        576
+      ],
+      "polygon_pixels": [
+        [
+          180,
+          40
+        ],
+        [
+          490,
+          100
+        ],
+        [
+          765,
+          170
+        ],
+        [
+          775,
+          560
+        ],
+        [
+          390,
+          560
+        ],
+        [
+          92,
+          475
+        ],
+        [
+          45,
+          365
+        ],
+        [
+          55,
+          230
+        ],
+        [
+          110,
+          90
+        ]
+      ],
+      "note": "Illustrative manual surface outline; foreground rope/OSD cannot be completely removed with a single polygon. No pixel ground truth."
+    },
+    {
+      "file": "img_v3_0214i_b039903b-0ecc-48c2-8bc9-08dbf16c70bm.png",
+      "scene": "snow_a",
+      "reference_size": [
+        518,
+        373
+      ],
+      "polygon_pixels": [
+        [
+          116,
+          26
+        ],
+        [
+          317,
+          65
+        ],
+        [
+          495,
+          110
+        ],
+        [
+          501,
+          362
+        ],
+        [
+          252,
+          362
+        ],
+        [
+          60,
+          307
+        ],
+        [
+          29,
+          236
+        ],
+        [
+          36,
+          149
+        ],
+        [
+          71,
+          58
+        ]
+      ],
+      "note": "Illustrative manual surface outline; foreground rope/OSD cannot be completely removed with a single polygon. No pixel ground truth."
+    },
+    {
+      "file": "img_v3_0214i_b5ecfec5-472e-4725-a63c-b43848d2a8am.jpg",
+      "scene": "snow_b",
+      "reference_size": [
+        704,
+        576
+      ],
+      "polygon_pixels": [
+        [
+          210,
+          65
+        ],
+        [
+          390,
+          52
+        ],
+        [
+          540,
+          70
+        ],
+        [
+          635,
+          115
+        ],
+        [
+          670,
+          250
+        ],
+        [
+          650,
+          470
+        ],
+        [
+          500,
+          515
+        ],
+        [
+          240,
+          525
+        ],
+        [
+          165,
+          445
+        ],
+        [
+          145,
+          270
+        ],
+        [
+          160,
+          135
+        ]
+      ],
+      "note": "Illustrative manual surface outline; foreground rope/OSD cannot be completely removed with a single polygon. No pixel ground truth."
+    },
+    {
+      "file": "img_v3_0214i_bcfb0319-9f3a-4947-ba6b-890a0bd1176m.jpg",
+      "scene": "snow_c",
+      "reference_size": [
+        704,
+        576
+      ],
+      "polygon_pixels": [
+        [
+          185,
+          155
+        ],
+        [
+          365,
+          130
+        ],
+        [
+          505,
+          142
+        ],
+        [
+          625,
+          175
+        ],
+        [
+          655,
+          335
+        ],
+        [
+          640,
+          540
+        ],
+        [
+          520,
+          565
+        ],
+        [
+          205,
+          565
+        ],
+        [
+          105,
+          510
+        ],
+        [
+          95,
+          335
+        ],
+        [
+          120,
+          225
+        ]
+      ],
+      "note": "Illustrative manual surface outline; foreground rope/OSD cannot be completely removed with a single polygon. No pixel ground truth."
+    },
+    {
+      "file": "img_v3_0214i_d7d02ced-504f-403c-8e71-1c49664bdb8m(1).jpg",
+      "scene": "bare_a",
+      "reference_size": [
+        1280,
+        720
+      ],
+      "polygon_pixels": [
+        [
+          304,
+          61
+        ],
+        [
+          560,
+          56
+        ],
+        [
+          880,
+          88
+        ],
+        [
+          1153,
+          173
+        ],
+        [
+          1249,
+          288
+        ],
+        [
+          1233,
+          448
+        ],
+        [
+          1056,
+          552
+        ],
+        [
+          688,
+          617
+        ],
+        [
+          384,
+          657
+        ],
+        [
+          288,
+          636
+        ],
+        [
+          232,
+          560
+        ],
+        [
+          192,
+          384
+        ],
+        [
+          224,
+          160
+        ]
+      ],
+      "note": "Illustrative manual surface outline; foreground rope/OSD cannot be completely removed with a single polygon. No pixel ground truth."
+    },
+    {
+      "file": "img_v3_0214i_d7d02ced-504f-403c-8e71-1c49664bdb8m.jpg",
+      "scene": "bare_a",
+      "reference_size": [
+        800,
+        450
+      ],
+      "polygon_pixels": [
+        [
+          190,
+          38
+        ],
+        [
+          350,
+          35
+        ],
+        [
+          550,
+          55
+        ],
+        [
+          720,
+          108
+        ],
+        [
+          780,
+          180
+        ],
+        [
+          770,
+          280
+        ],
+        [
+          660,
+          345
+        ],
+        [
+          430,
+          385
+        ],
+        [
+          240,
+          410
+        ],
+        [
+          180,
+          397
+        ],
+        [
+          145,
+          350
+        ],
+        [
+          120,
+          240
+        ],
+        [
+          140,
+          100
+        ]
+      ],
+      "note": "Illustrative manual surface outline; foreground rope/OSD cannot be completely removed with a single polygon. No pixel ground truth."
+    }
+  ]
+}

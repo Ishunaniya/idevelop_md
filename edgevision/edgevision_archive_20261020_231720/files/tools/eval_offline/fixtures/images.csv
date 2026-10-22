@@ -1,0 +1,9 @@
+file,tp,fp,fn
+img1_person.ppm,1,0,0
+img2_helmet.ppm,1,0,0
+img3_empty.ppm,0,0,0
+img4_person_noise.ppm,1,0,0
+img5_two_persons.ppm,2,0,0
+img6_both.ppm,2,0,0
+img7_fp.ppm,0,1,0
+img8_fn.ppm,0,0,1

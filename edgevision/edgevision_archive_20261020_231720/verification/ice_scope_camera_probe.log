@@ -1,0 +1,16 @@
+Native GStreamer camera target compiled; no-device default arguments reached camera open.
+Synthetic capture + SDK simulation: 20/60/20, two objects, optional gate passed.
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":0,"result_code":1,"camera_channel":0,"processed":true,"reason":"none","inference_time_ms":5,"processing_time_ms":35.673622,"objects":[{"id":0,"state":1,"valid":true,"ratio":0.200000003,"status":0,"reason":"none","measurement_timestamp_ms":5948554,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":2000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":5948554,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":1,"result_code":1,"camera_channel":0,"processed":true,"reason":"none","inference_time_ms":1,"processing_time_ms":29.396021,"objects":[{"id":0,"state":2,"valid":true,"ratio":0.600000024,"status":0,"reason":"none","measurement_timestamp_ms":5948590,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":6000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":5948590,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":0,"result_code":1,"camera_channel":0,"processed":true,"reason":"none","inference_time_ms":7,"processing_time_ms":36.777746,"objects":[{"id":0,"state":1,"valid":true,"ratio":0.200000003,"status":0,"reason":"none","measurement_timestamp_ms":5948620,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":2000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":5948620,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+
+Native no-device error:
+2026-10-20 23:30:08.886 [INFO] rknn_backend.cpp:193 rknn:model ready: in 640x640x3 type=int8 fmt=NHWC elems=1228800, outputs=1, in_scale=1.0000
+2026-10-20 23:30:08.896 [INFO] rknn_backend.cpp:206 rknn:  out[0] name= dims=[1 8400 6 0] type=fp32 elems=50400
+2026-10-20 23:30:08.896 [INFO] model_registry.cpp:32 loaded rknn:/tmp/ice_slim_sdk/Y.rknn (timeout=60s)
+2026-10-20 23:30:08.896 [INFO] vision_task.cpp:234 task ready: module=0x0008 backend=rknn model=/tmp/ice_slim_sdk/Y.rknn input=640x640 letterbox=1 debug=0
+[gst] pipeline: v4l2src device=/no/such/camera io-mode=mmap ! videoconvert ! video/x-raw,format=I420 ! videoconvert ! video/x-raw,format=NV12 ! appsink name=cap drop=true sync=false max-buffers=1
+[gst] failed to set pipeline PLAYING
+2026-10-20 23:30:09.081 [INFO] vision_task.cpp:585 releasing rknn:/tmp/ice_slim_sdk/Y.rknn (0 frames processed)
+2026-10-20 23:30:09.081 [INFO] model_registry.cpp:46 destroying rknn:/tmp/ice_slim_sdk/Y.rknn (ref=0)
+camera open failed

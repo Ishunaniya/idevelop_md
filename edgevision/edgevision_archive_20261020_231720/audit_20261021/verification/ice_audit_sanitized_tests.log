@@ -1,0 +1,10 @@
+Internal ctest changing into directory: /tmp/ice_audit_sanitized
+Test project /tmp/ice_audit_sanitized
+    Start 1: evs_tests
+1/2 Test #1: evs_tests ........................   Passed    0.81 sec
+    Start 2: evs_ice_tests
+2/2 Test #2: evs_ice_tests ....................   Passed    0.20 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   1.01 sec

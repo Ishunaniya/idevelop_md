@@ -1,0 +1,40 @@
+-- Install configuration: ""
+-- Installing: /tmp/ice_scope_install/include
+-- Installing: /tmp/ice_scope_install/include/evs
+-- Installing: /tmp/ice_scope_install/include/evs/ground_params.h
+-- Installing: /tmp/ice_scope_install/include/evs/ground_mapper.h
+-- Installing: /tmp/ice_scope_install/include/evs/offline_eval.h
+-- Installing: /tmp/ice_scope_install/include/evs/ground_metrics.h
+-- Installing: /tmp/ice_scope_install/include/evs/frame.h
+-- Installing: /tmp/ice_scope_install/include/evs/function_plugin.h
+-- Installing: /tmp/ice_scope_install/include/evs/iinfer_backend.h
+-- Installing: /tmp/ice_scope_install/include/evs/x86_backend.h
+-- Installing: /tmp/ice_scope_install/include/evs/debug.h
+-- Installing: /tmp/ice_scope_install/include/evs/winch_ice.h
+-- Installing: /tmp/ice_scope_install/include/evs/model_registry.h
+-- Installing: /tmp/ice_scope_install/include/evs/mock_backend.h
+-- Installing: /tmp/ice_scope_install/include/evs/rknn_backend.h
+-- Installing: /tmp/ice_scope_install/include/evs/detection_decoder.h
+-- Installing: /tmp/ice_scope_install/include/evs/preprocess.h
+-- Installing: /tmp/ice_scope_install/include/evs/geom.h
+-- Installing: /tmp/ice_scope_install/include/evs/person_plugin.h
+-- Installing: /tmp/ice_scope_install/include/evs/status.h
+-- Installing: /tmp/ice_scope_install/include/evs/testing
+-- Installing: /tmp/ice_scope_install/include/evs/testing/ice_replay.h
+-- Installing: /tmp/ice_scope_install/include/evs/task_config.h
+-- Installing: /tmp/ice_scope_install/include/evs/backend_factory.h
+-- Installing: /tmp/ice_scope_install/include/evs/log.h
+-- Installing: /tmp/ice_scope_install/include/evs/vision_task.h
+-- Installing: /tmp/ice_scope_install/include/evs/ground_config.h
+-- Installing: /tmp/ice_scope_install/lib/libevs.a
+-- Installing: /tmp/ice_scope_install/lib/libevs_ice.a
+-- Installing: /tmp/ice_scope_install/lib/libevs_core.so.3
+-- Installing: /tmp/ice_scope_install/lib/libevs_core.so
+-- Installing: /tmp/ice_scope_install/lib/libevs_ice.so.3
+-- Installing: /tmp/ice_scope_install/lib/libevs_ice.so
+-- Installing: /tmp/ice_scope_install/bin/ice_replay
+-- Set non-toolchain portion of runtime path of "/tmp/ice_scope_install/bin/ice_replay" to "$ORIGIN/../lib"
+-- Installing: /tmp/ice_scope_install/bin/winch_ice_demo
+-- Set non-toolchain portion of runtime path of "/tmp/ice_scope_install/bin/winch_ice_demo" to "$ORIGIN/../lib"
+-- Installing: /tmp/ice_scope_install/share/edgevision/configs/winch_ice.yaml
+-- Installing: /tmp/ice_scope_install/share/edgevision/docs/winch_ice.md

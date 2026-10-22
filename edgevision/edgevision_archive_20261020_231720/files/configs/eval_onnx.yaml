@@ -1,0 +1,27 @@
+# Real-model offline evaluation config (X86 host + ONNXRuntime).
+#
+# Runs the real exported YOLOv5s ONNX model (standard Ultralytics export:
+# NCHW float32 input [1,3,640,640], three raw detection heads [1,255,S,S]).
+# The X86 backend decodes the heads (anchors + sigmoid + NMS) and emits
+# "yolov8" rows, then the pluggable YoloV8Decoder keeps only person (class 0).
+#
+# Usage:
+#   eval_offline --task configs/eval_onnx.yaml \
+#                --dataset <dir with images/ + annotations.json> \
+#                --iou 0.5 --score 0.25 --dump --out ./out
+task: eval_onnx
+module_id: 0x0004
+camera:
+  video_channel: [0]
+
+backend: onnx
+Model_path: "X:/new_qt5_qml/edgevision/yolov5s.onnx"
+output_format: yolov8          # backend emits [x,y,w,h, s0..s79]; decoder consumes it
+person_class_id: 0             # keep only COCO person (0); -1 = keep all 80 classes
+decoder_classes: 80            # yolov8 row width = 4 + decoder_classes
+
+input_width: 640
+input_height: 640
+input_format: rgb              # RGB, matches the PyTorch export
+letterbox: true
+confidence_threshold: 0.25

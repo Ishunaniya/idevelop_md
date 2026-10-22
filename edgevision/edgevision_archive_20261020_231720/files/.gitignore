@@ -1,0 +1,35 @@
+# CMake / build trees
+build/
+build_*/
+build_board/
+b_verify/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CMakeFiles/
+Makefile
+!**/CMakeLists.txt
+
+# Compiled objects and third-party binaries
+*.o
+*.obj
+*.dll
+*.so
+*.a
+*.exe
+*.pdb
+
+# Local logs and probe output
+*.log
+
+# Editor / OS
+*~
+*.swp
+.DS_Store
+.directory
+*.code-workspace
+
+# Python verification caches
+__pycache__/
+*.pyc

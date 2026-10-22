@@ -1,0 +1,26 @@
+[ 10%] Built target evs_person_objs
+[  7%] Built target evs_height_limit_objs
+[ 14%] Building CXX object CMakeFiles/evs_objs.dir/src/vision_task.cpp.o
+[ 17%] Building CXX object CMakeFiles/evs_ice_objs.dir/src/tasks/winch_ice/winch_ice_api.cpp.o
+[ 25%] Built target evs_ice_objs
+[ 28%] Built target evs_person
+[ 32%] Built target evs_height_limit
+[ 35%] Linking CXX static library libevs_ice.a
+[ 35%] Built target evs_ice
+[ 89%] Built target evs_objs
+[ 92%] Linking CXX static library libevs.a
+[ 92%] Built target evs
+[ 96%] Building CXX object CMakeFiles/evs_tests.dir/tests/test_core.cpp.o
+[100%] Linking CXX executable evs_tests
+[100%] Built target evs_tests
+[  3%] Built target evs_person_objs
+[ 10%] Built target evs_height_limit_objs
+[ 21%] Built target evs_ice_objs
+[ 78%] Built target evs_objs
+[ 82%] Built target evs_person
+[ 85%] Built target evs_ice
+[ 89%] Built target evs_height_limit
+[ 92%] Built target evs
+[ 96%] Building CXX object CMakeFiles/evs_ice_tests.dir/tests/test_ice.cpp.o
+[100%] Linking CXX executable evs_ice_tests
+[100%] Built target evs_ice_tests

@@ -1,0 +1,44 @@
+flags=[] exit=0
+2026-10-21 00:17:10.389 [INFO] rknn_backend.cpp:193 rknn:model ready: in 640x640x3 type=int8 fmt=NHWC elems=1228800, outputs=1, in_scale=1.0000
+2026-10-21 00:17:10.389 [INFO] rknn_backend.cpp:206 rknn:  out[0] name= dims=[1 8400 6 0] type=fp32 elems=50400
+2026-10-21 00:17:10.389 [INFO] model_registry.cpp:32 loaded rknn:/tmp/ice_slim_sdk/Y.rknn (timeout=60s)
+2026-10-21 00:17:10.389 [INFO] vision_task.cpp:239 task ready: module=0x0008 backend=rknn model=/tmp/ice_slim_sdk/Y.rknn input=640x640 letterbox=1 debug=0
+context_source=direct; frame-by-frame detection
+negotiated frame=200x100; capture pipeline controls resolution/framerate
+2026-10-21 00:17:10.455 [INFO] vision_task.cpp:569 releasing rknn:/tmp/ice_slim_sdk/Y.rknn (3 frames processed)
+2026-10-21 00:17:10.457 [INFO] model_registry.cpp:54 destroying rknn:/tmp/ice_slim_sdk/Y.rknn (ref=0)
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":0,"result_code":1,"camera_channel":1,"processed":true,"reason":"none","inference_time_ms":1,"processing_time_ms":20.367356,"objects":[{"id":0,"state":1,"valid":true,"ratio":0.200000003,"status":0,"reason":"none","measurement_timestamp_ms":8770332,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":2000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":8770332,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":1,"result_code":1,"camera_channel":1,"processed":true,"reason":"none","inference_time_ms":3,"processing_time_ms":18.582533,"objects":[{"id":0,"state":2,"valid":true,"ratio":0.600000024,"status":0,"reason":"none","measurement_timestamp_ms":8770358,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":6000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":8770358,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":0,"result_code":1,"camera_channel":1,"processed":true,"reason":"none","inference_time_ms":2,"processing_time_ms":17.058714,"objects":[{"id":0,"state":1,"valid":true,"ratio":0.200000003,"status":0,"reason":"none","measurement_timestamp_ms":8770377,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":2000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":8770377,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+
+flags=['--channel', '1'] exit=0
+2026-10-21 00:17:10.484 [INFO] rknn_backend.cpp:193 rknn:model ready: in 640x640x3 type=int8 fmt=NHWC elems=1228800, outputs=1, in_scale=1.0000
+2026-10-21 00:17:10.484 [INFO] rknn_backend.cpp:206 rknn:  out[0] name= dims=[1 8400 6 0] type=fp32 elems=50400
+2026-10-21 00:17:10.484 [INFO] model_registry.cpp:32 loaded rknn:/tmp/ice_slim_sdk/Y.rknn (timeout=60s)
+2026-10-21 00:17:10.485 [INFO] vision_task.cpp:239 task ready: module=0x0008 backend=rknn model=/tmp/ice_slim_sdk/Y.rknn input=640x640 letterbox=1 debug=0
+context_source=direct; frame-by-frame detection
+negotiated frame=200x100; capture pipeline controls resolution/framerate
+2026-10-21 00:17:10.539 [INFO] vision_task.cpp:569 releasing rknn:/tmp/ice_slim_sdk/Y.rknn (3 frames processed)
+2026-10-21 00:17:10.541 [INFO] model_registry.cpp:54 destroying rknn:/tmp/ice_slim_sdk/Y.rknn (ref=0)
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":0,"result_code":1,"camera_channel":1,"processed":true,"reason":"none","inference_time_ms":2,"processing_time_ms":17.929557,"objects":[{"id":0,"state":1,"valid":true,"ratio":0.200000003,"status":0,"reason":"none","measurement_timestamp_ms":8770425,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":2000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":8770425,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":1,"result_code":1,"camera_channel":1,"processed":true,"reason":"none","inference_time_ms":1,"processing_time_ms":19.984265,"objects":[{"id":0,"state":2,"valid":true,"ratio":0.600000024,"status":0,"reason":"none","measurement_timestamp_ms":8770443,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":6000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":8770443,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+{"api_called":true,"host_reason":"eligible","status":0,"ratio":-1,"alarm":0,"result_code":1,"camera_channel":1,"processed":true,"reason":"none","inference_time_ms":0,"processing_time_ms":16.083766,"objects":[{"id":0,"state":1,"valid":true,"ratio":0.200000003,"status":0,"reason":"none","measurement_timestamp_ms":8770463,"box":{"x":0,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":2000},{"id":1,"state":1,"valid":true,"ratio":0,"status":0,"reason":"none","measurement_timestamp_ms":8770463,"box":{"x":100,"y":0,"width":100,"height":100,"class_id":0,"confidence":0.719999969},"surface_pixels":10000,"snow_pixels":0}]}
+
+flags=['--channel', '0'] exit=2
+camera channel differs from task
+
+flags=['--simulate-context', '--angle', '1', '--working', '1'] exit=0
+2026-10-21 00:17:10.597 [INFO] rknn_backend.cpp:193 rknn:model ready: in 640x640x3 type=int8 fmt=NHWC elems=1228800, outputs=1, in_scale=1.0000
+2026-10-21 00:17:10.597 [INFO] rknn_backend.cpp:206 rknn:  out[0] name= dims=[1 8400 6 0] type=fp32 elems=50400
+2026-10-21 00:17:10.597 [INFO] model_registry.cpp:32 loaded rknn:/tmp/ice_slim_sdk/Y.rknn (timeout=60s)
+2026-10-21 00:17:10.597 [INFO] vision_task.cpp:239 task ready: module=0x0008 backend=rknn model=/tmp/ice_slim_sdk/Y.rknn input=640x640 letterbox=1 debug=0
+context_source=SIMULATED; frame-by-frame detection
+negotiated frame=200x100; capture pipeline controls resolution/framerate
+2026-10-21 00:17:10.598 [INFO] vision_task.cpp:569 releasing rknn:/tmp/ice_slim_sdk/Y.rknn (0 frames processed)
+2026-10-21 00:17:10.598 [INFO] model_registry.cpp:54 destroying rknn:/tmp/ice_slim_sdk/Y.rknn (ref=0)
+{"api_called":false,"host_reason":"angle_not_zero","status":0,"ratio":-1,"alarm":0,"result_code":0,"camera_channel":1,"processed":false,"reason":"none","inference_time_ms":0,"processing_time_ms":0,"objects":[]}
+{"api_called":false,"host_reason":"angle_not_zero","status":0,"ratio":-1,"alarm":0,"result_code":0,"camera_channel":1,"processed":false,"reason":"none","inference_time_ms":0,"processing_time_ms":0,"objects":[]}
+{"api_called":false,"host_reason":"angle_not_zero","status":0,"ratio":-1,"alarm":0,"result_code":0,"camera_channel":1,"processed":false,"reason":"none","inference_time_ms":0,"processing_time_ms":0,"objects":[]}
+
+flags=['--width', '1280garbage'] exit=2
+invalid integer: 1280garbage

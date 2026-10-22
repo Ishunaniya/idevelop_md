@@ -1,0 +1,131 @@
+#!/bin/sh
+# S99evsdetect -- always-on YOLO detection daemon (Buildroot SysV init).
+#
+# What it runs:
+#   v4l2_detect_evs_rga2 --daemon --stats --shm-write <ch> --rga
+# which never exits on its own, publishes every frame's boxes into
+# /dev/shm/detection_boxes (the segment qt5_qml_c001's DetectionBoxShmBridge
+# already reads), and prints one summary line per second.
+#
+# Why a wrapper instead of running it from the Qt HMI:
+#   - the Qt side has no way to supervise a 75ms-per-frame process, and a
+#     crashed detector would leave the UI showing a frozen last box;
+#   - this script is the supervisor: it restarts the detector if it dies or
+#     wedges, so the HMI always has a live producer.
+#
+# Install:
+#   cp S99evsdetect /etc/init.d/S99evsdetect && chmod +x /etc/init.d/S99evsdetect
+# Then it starts automatically on every boot (Buildroot runs S* in name order).
+#
+# Tunables (edit the block below, or override via /etc/default/evsdetect):
+#   EVS_DIR   working directory. Binary, YAML, camera config and Model_path
+#             are relative to it. Default is the current directory.
+#   CHANNEL   which /dev/shm/detection_boxes channel to publish into
+#   TASK      the task YAML (model + output_format + score threshold)
+#   CAMCFG    camera_config.json
+#   CAMCH     camera index inside CAMCFG
+#   LOGFILE   --stats output; one line per second, so ~86k lines/day
+#   RATE      log rotation threshold in KB
+
+NAME=evsdetect
+EVS_DIR=.
+DAEMON=./v4l2_detect_evs_rga2
+TASK=eval_yolo11.yaml
+CAMCFG=camera_config.json
+CAMCH=0
+CHANNEL=0
+LOGFILE=/tmp/evsdetect.log
+RATE=2048
+PIDFILE=/tmp/evsdetect.pid
+
+# /etc/default overrides (optional).
+[ -f /etc/default/$NAME ] && . /etc/default/$NAME
+
+# Never run two producers on the same channel: the second one would fight the
+# first over the NPU and both would half-rate.
+lock() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+        echo "$NAME already running (pid $(cat $PIDFILE))"
+        return 1
+    fi
+    return 0
+}
+
+start() {
+    lock || return 1
+    cd "$EVS_DIR" || { echo "$NAME: cannot cd $EVS_DIR"; return 1; }
+    [ -x "$DAEMON" ] || { echo "$NAME: $DAEMON missing"; return 1; }
+    [ -f "$TASK" ]   || { echo "$NAME: $TASK missing"; return 1; }
+
+    echo "starting $NAME -> ch$CHANNEL, log $LOGFILE"
+    # --daemon : run until signalled, no --frames limit
+    # --stats  : one line per second (a per-frame log would be ~1000 lines/min
+    #            and would bury every other message on the board)
+    # --rga    : hardware preprocessing, 51ms -> 3ms
+    "$DAEMON" --task "$TASK" --config "$CAMCFG" --channel "$CAMCH" \
+              --daemon --stats --shm-write "$CHANNEL" --rga \
+              >>"$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    sleep 2
+    if kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+        echo "$NAME started (pid $(cat $PIDFILE))"
+    else
+        echo "$NAME FAILED to start; see $LOGFILE"; rm -f "$PIDFILE"; return 1
+    fi
+}
+
+stop() {
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat $PIDFILE)
+        # SIGTERM lets the detector mark the shm channel invalid (has=0) so the
+        # HMI stops drawing the last boxes. SIGKILL would leave them on screen.
+        kill -TERM "$PID" 2>/dev/null
+        # Give it up to 5s to flush and unmap cleanly.
+        i=0
+        while kill -0 "$PID" 2>/dev/null && [ $i -lt 5 ]; do
+            sleep 1; i=$((i+1))
+        done
+        kill -0 "$PID" 2>/dev/null && kill -KILL "$PID" 2>/dev/null
+        rm -f "$PIDFILE"
+        echo "$NAME stopped"
+    else
+        echo "$NAME not running"
+    fi
+}
+
+status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+        echo "$NAME running (pid $(cat $PIDFILE))"
+        tail -1 "$LOGFILE" 2>/dev/null
+    else
+        echo "$NAME not running"
+        return 1
+    fi
+}
+
+# Keep the log bounded: --stats writes ~1 line/s forever.
+rotate() {
+    [ -f "$LOGFILE" ] || return 0
+    KB=$(( $(wc -c < "$LOGFILE") / 1024 ))
+    if [ "$KB" -gt "$RATE" ]; then
+        mv "$LOGFILE" "$LOGFILE.1"
+        echo "[$(date)] rotated at ${KB}KB" >> "$LOGFILE"
+    fi
+}
+
+case "$1" in
+    start)   rotate; start ;;
+    stop)    stop ;;
+    restart) stop; rotate; start ;;
+    status)  status ;;
+    # Called periodically by a watchdog; restarts only if it is NOT running.
+    # (The detector handles its own camera hiccups internally, so a crash-loop
+    #  here means something real is wrong -- hence no silent fast restart.)
+    watchdog)
+        if [ ! -f "$PIDFILE" ] || ! kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
+            echo "[$(date)] $NAME down, restarting" >> "$LOGFILE"
+            start
+        fi
+        ;;
+    *) echo "usage: $0 {start|stop|restart|status|watchdog}"; exit 1 ;;
+esac

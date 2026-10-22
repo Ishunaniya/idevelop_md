@@ -1,0 +1,48 @@
+task: boom_under
+module_id: 0x0006
+camera:
+  video_channel: [2, 3]      # 驾驶室顶长焦 AHD ×2
+
+ground:
+  enabled: true
+  reference: camera_origin   # 有可靠工况方位后可切为 task
+  distance_mode: legacy_forward_y
+  cameras:
+    - id: 2
+      mapper: homography
+      params:
+        matrix: /userdata/matrix_2_1280x720.txt
+        calibration_width: 1280
+        calibration_height: 720
+        strict_matrix: true
+    - id: 3
+      mapper: homography
+      params:
+        matrix: /userdata/matrix_3_1280x720.txt
+        calibration_width: 1280
+        calibration_height: 720
+        strict_matrix: true
+
+backend: mock
+Model_path: models/person.rknn
+output_format: flat6        # 解码器格式：flat6=单类6float；yolov8=[N,4+C] argmax
+person_class_id: -1         # yolov8 时指定 person 类序号；-1=不过滤（单类模型）
+input_width: 640
+input_height: 640
+warmup: true
+init_timeout_s: 60
+npu_core_mask: 1
+
+latency_budget_ms: 200
+min_fps: 5
+
+on_missing_context: log_only
+work_motion_epsilon: 0.1
+
+zone:
+  type: sector
+  half_angle_deg: 40          # 轴线（沿大臂）下方左右各 40°
+  consecutive_frames: 3
+  # 半径取 MachineContext.hoist_radius（≥50m），不写死米数
+
+confidence_threshold: 0.45
