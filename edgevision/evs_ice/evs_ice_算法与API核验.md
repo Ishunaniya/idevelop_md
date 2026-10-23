@@ -1,14 +1,22 @@
 # 卷扬冰雪源码、客户API与demo说明
 
-> 阶段说明：本文记录冰雪算法库、客户 API 和模型核验。“UI继续搁置”、真实相机及当前版本板端回归尚未完成等表述属于本文记录阶段。后续单路 UI 的真实相机、NPU 和界面链路验证见[实现与板端验证](../evs_ice_ui/evs_ice_ui_实现与板端验证.md)及[核验与优化](../evs_ice_ui/evs_ice_ui_核验与优化.md)；定位和冰雪计量精度仍需单独验收。本文历史数据不作改写。
+> 版本说明：2026-10-23将源码及API说明同步到`427a3a6`；第6、8至12节的构建、模型和板端数据保留各自阶段，不能当作最新提交验收。历史UI链路记录见[实现与板端验证](../evs_ice_ui/evs_ice_ui_实现与板端验证.md)及[核验与优化](../evs_ice_ui/evs_ice_ui_核验与优化.md)；定位与计量精度仍需独立验收。本次未复核firmware交付包或重跑设备测试。
 
 > 路径约定：文中的 `src/`、`include/`、`docs/`、`build_ice_delivery/` 等源码及证据路径，均相对于实际源码仓库 `/home/tronlong/lyp/code/edgevision`，不相对于本文所在目录。
 
-更新：2026-10-21。架构基线为`137a845`。第1至5节按架构整改后的源码说明当前接口、流程和文件职责；第6节包含早期接口精简的历史验证，第9至11节保留模型重命名、人工区域及真实单图的阶段记录；第12节列出当前版本的架构和验证范围。原始数据和源码快照保留，历史结果不代表最终版本已完成真机验收。
+更新：2026-10-23。源码基线为`427a3a659603e78da43a4ba3f855667bd73ca99a`，原插件稳定接口基线仍为`137a845`。当前说明与历史记录按下表阅读：
 
-**当前方案：配套RKNN模型定位卷扬，OpenCV计算每个卷扬框内冰雪占比，任一有效对象达到阈值则本帧全局报警。** 宿主每次detect传入一帧，结果只属于该帧，包括重复时间戳；无首次锁定、库内十次重试、缓存返回或跨帧保持。UI继续搁置。模型名为winch_model.rknn，按最新要求不加入安装规则，单独部署。
+| 阅读目的 | 章节 |
+| --- | --- |
+| 接入当前API、理解字段与执行链 | 第1至5节；第2.4节为完整调用示例 |
+| 查构建命令和旧测试结果 | 第6节；其中实测表属于2026-10-21阶段 |
+| 核对待闭合需求 | 第7节 |
+| 回看旧模型、单图与架构整改验证 | 第8至12节，保留当时版本及数据 |
+| 核对候选契约、公共类型迁移、日志及本次检查 | 第13节 |
 
-**客户设计尚有一个实质缺口：snow_detections要求“未经置信度阈值过滤的模型全部冰雪目标”，当前算法没有对应模型冰雪目标，该数组为空。OpenCV占比从objects返回，不冒充模型目标/置信度。用户已同意OpenCV业务路线，但不据此宣称客户影子系统要求已验收。**
+**当前方案：配套RKNN模型定位卷扬，OpenCV计算每个卷扬框内冰雪候选占比，任一有效对象达到阈值则本帧全局报警。** 宿主每次detect传入一帧，结果只属于该帧，包括重复时间戳；无首次锁定、库内十次重试、缓存返回或跨帧保持。独立Qt UI已有历史链路验证，见上方入口。模型名为winch_model.rknn，不加入安装规则，单独部署。
+
+**临时候选契约：snow_detections自d6b63ba起返回同次推理的合法卷扬候选，保留模型顺序、低/零分及重复，不做业务阈值、NMS或Top-K筛减；它仍不是客户最终要求的冰雪模型目标。** OpenCV占比从objects读取，MATCH只表示存在业务对象，每项计量有效性看valid。427a3a6将公共类型统一为`evs::ErrorCode/ResultCode/AlertLevel`，4e193f3增加诊断日志与成功帧窗口；细节见第13节。
 
 ## 1. 当前实现与交付物
 
@@ -34,7 +42,7 @@
 | libevs_core.so.1、开发链接libevs_core.so | 模型注册、RKNN后端、预处理、解码及公共执行链 |
 | libevs_ice.a、libevs.a | 可选静态接入 |
 | include/evs/winch_ice.h | 正式C++17接口，命名空间evs::winch_ice |
-| include/evs/status.h | 错误码说明 |
+| include/evs/status.h | 公共evs::ErrorCode、ResultCode、AlertLevel及EvsStatus；由winch_ice.h包含，须配套保留 |
 | winch_model.rknn、configs/winch_ice.yaml | 必需模型及配套配置 |
 | ice_replay、winch_ice_demo、docs/winch_ice.md | 图片/相机demo与编译、调用、测试说明 |
 
@@ -47,13 +55,13 @@
 ### 2.1 四个方法
 
 ```cpp
-ErrorCode Detector::initialize(const WinchSnowConfig& config);
-ErrorCode Detector::detect(const ImageData& image, WinchSnowResult& result);
-ErrorCode Detector::updateConfig(const DetectConfig& config);
+evs::ErrorCode Detector::initialize(const WinchSnowConfig& config);
+evs::ErrorCode Detector::detect(const ImageData& image, WinchSnowResult& result);
+evs::ErrorCode Detector::updateConfig(const DetectConfig& config);
 void Detector::release();
 ```
 
-与客户原型的返回类型名称、参数类型、const/引用一致；updateConfig形参变量名不同不改变原型。ErrorCode当前为uint32_t，0成功、非0异常；客户该节没有完整定义ErrorCode数值表、公共头文件和ABI，不能仅凭同名宣称二进制兼容。
+参数类型、const/引用及void释放方式保持；updateConfig形参变量名不影响原型。公共evs::ErrorCode为uint32_t别名，0成功、非0异常，错误格式仍为0x0008EEEE。427a3a6已移除冰雪命名空间下三类型的原定义，旧类型引用须迁移到evs，见13.2；不能仅凭名称或底层存储大小宣称任意C++ ABI兼容。
 
 一个实例绑定一路相机，串行调用；同模型实例共享后端，宿主也应串行调度。初始化重复调用不重载；release可重复，释放后允许重新初始化。宿主负责取流、PLC工况、调用时机、重试、报警保持及UI。
 
@@ -61,7 +69,7 @@ void Detector::release();
 
 依据原Word：`/home/tronlong/lyp/perCode/idevelop_md/demand/中控详细设计说明书0921.docx`第3.1.12，直接读取正文及15张表。原文SHA256：`9087dee29adb8bc59d37ce1b00e06c41cd146c9dd0ca8337f3e33eb843cf1e49`。
 
-所有24字段名称、类型及原字段相对顺序保留；两个原枚举保持int32_t及0/1值。配置与结果标注“算法合作供应商定义”，配置表留有“其他字段”，允许补充设计；并不代表客户已批准当前全部扩展。
+24字段的名称及原字段相对顺序保留；427a3a6将两个枚举改为evs命名空间中的公共定义，底层int32_t及0/1值保持，完整类型名发生变化。下表同步当前语义；原Word和历史核验数据保持原样。配置与结果标注“算法合作供应商定义”，配置表留有“其他字段”，允许补充设计；并不代表客户已批准当前全部扩展。
 
 | 结构.字段 | 客户所列类型 | 当前字段核对 | 含义/能力核对 |
 |---|---|---|---|
@@ -78,12 +86,12 @@ void Detector::release();
 | ImageData.height | uint32_t | 保留 | 正尺寸受支持；仍有实现整数/像素总量上限，输入帧小不保证检出有效卷扬 |
 | ImageData.channels | uint32_t | 保留 | 3=紧凑RGB24、1=8位灰度，均支持；NV12/BGR由宿主转RGB |
 | ImageData.timestamp_ms | uint32_t | 保留 | 毫秒时间戳保留，不用于缓存；客户未指定时钟基准，demo单调时钟不是客户已明定的基准 |
-| WinchSnowResult.result_code | ResultCode(int32_t) | 保留，0/1一致 | 仍区分无/有效结果；当前“有效”还包含新增数量/质量规则，须确认 |
-| WinchSnowResult.alert_level | AlertLevel(int32_t) | 保留，0/1一致 | 仍为无报警/报警；当前按有效对象面积阈值汇总，是后续主线的具体算法规则 |
-| WinchSnowResult.snow_detections | std::vector<Detection> | 保留类型和名称 | **不符合原语义：客户要求未经过置信度过滤的全部冰雪目标供影子系统，当前固定为空** |
+| WinchSnowResult.result_code | ResultCode(int32_t) | 当前evs::ResultCode，0/1一致 | 业务objects非空即MATCH，计量全部无效也可MATCH；不是计量有效性或有冰雪的结论 |
+| WinchSnowResult.alert_level | AlertLevel(int32_t) | 当前evs::AlertLevel，0/1一致 | 按本帧有效对象面积阈值汇总，调用失败时先处理返回码 |
+| WinchSnowResult.snow_detections | std::vector<Detection> | 保留类型和名称 | 临时为未经业务阈值/NMS筛减的合法卷扬候选；最终冰雪模型目标仍未实现 |
 | WinchSnowResult.inference_time_ms | uint32_t | 保留 | 单位毫秒一致；包含后端适配阶段，不单指rknn_run；客户未细化边界，统计口径待统一 |
 | WinchSnowResult.camera_channel | uint32_t | 保留 | 普通摄像头通道编号符合本节含义；当前由实例配置绑定，并附加0～254约束 |
-| Detection.class_id | uint32_t | 保留 | 用于模型类别ID；objects.box为卷扬类别，不充当snow_detections冰雪类别 |
+| Detection.class_id | uint32_t | 保留 | objects.box及临时snow_detections均为卷扬模型类别，不代表冰雪类别 |
 | Detection.confidence | float | 保留 | 范围0～1；当前YOLOX为obj×class，不是面积占比；客户未细化obj/类别概率组合，需模型参考确认 |
 | Detection.x | uint32_t | 保留 | 原图bbox左上点x坐标，符合 |
 | Detection.y | uint32_t | 保留 | 原图bbox左上点y坐标，符合 |
@@ -108,7 +116,7 @@ ImageData只读指针在同步调用期间必须有效，宿主保证至少width
 
 框用原图像素表示：例如左上(100,50)、右下边界(300,170)，返回x=100、y=50、width=200、height=120。用户已确认采用宽高；客户表的右下坐标文字仍应修订澄清。
 
-调用返回非0时，结果清空到NO_RESULT/NONE，无旧对象/旧报警。返回0后先看result_code；MATCH表示至少一个有效对象，再读alert_level和objects；NO_RESULT不能当作“确认无雪”。无框、所有对象无效均可能返回0及NO_RESULT。
+调用返回非0时，候选、对象和报警清空到NO_RESULT/NONE。返回0后可读取候选，不以result_code为门槛；MATCH表示至少一个业务对象，读取比例前逐项检查valid。无业务对象为NO_RESULT；所有业务对象计量无效仍可MATCH，此时比例为-1、无有效报警。两种结果均不能当作“确认无雪”。
 
 ### 2.4 完整宿主调用例子
 
@@ -169,7 +177,8 @@ int main(int argc, char** argv) {
             std::cerr << "detect error: " << rc << '\n';
             return 1;
         }
-        if (result.result_code == ResultCode::RESULT_NO_RESULT)
+        std::cout << "candidates=" << result.snow_detections.size() << '\n';
+        if (result.result_code == evs::ResultCode::RESULT_NO_RESULT)
             std::cout << "NO RESULT\n";
         for (size_t i = 0; i < result.objects.size(); ++i) {
             const auto& object = result.objects[i];
@@ -180,7 +189,7 @@ int main(int argc, char** argv) {
             std::cout << '\n';
         }
         std::cout << "alarm="
-                  << (result.alert_level == AlertLevel::ALERT_WARN) << '\n';
+                  << (result.alert_level == evs::AlertLevel::ALERT_WARN) << '\n';
         detector.release();
         return 0;
     } catch (const std::exception& error) {
@@ -240,18 +249,21 @@ flowchart TD
     B --> C[灰度扩展RGB或引用RGB]
     C --> D[640×640 letterbox预处理]
     D --> E[RKNN推理单类YOLOX]
-    E --> F[解码/置信度过滤/原图坐标还原]
-    F --> G[NMS与当前帧卷扬框排序]
+    E --> F[上层零阈值解码/原图坐标还原]
+    F --> CAND[保序合法卷扬候选 含低分零分及重复]
+    F --> G[业务正分与阈值筛选/NMS/最多两个对象/排序]
     G --> H[OpenCV逐框计算占比]
     H --> I{任一有效比例达到阈值?}
     I -->|是| J[本帧WARN]
     I -->|否| K[本帧NONE]
     J --> R[返回本帧objects和结果码]
     K --> R
+    CAND --> R
     B -->|失败| X[清空结果及掩码并返回错误]
     D -->|失败| X
     E -->|失败| X
     F -->|失败| X
+    G -->|对象超限| X
     H -->|调用级失败| X
 ```
 
@@ -274,7 +286,7 @@ flowchart TD
 
 分母是原图框width×height，包含框内背景及支架，属于粗估，不是卷筒精细分割。内部保留像素计数和掩码用于计量/演示，不必通过正式结果公开。
 
-当前仍保留最多两个NMS后候选、交叠框无效、框至少3×3、灰度均值低于12或均值≥250且标准差<3无效等规则；这些不是客户表中明确要求，未在本轮擅自改变，现场仍需确认。最多两个候选超限返回调用错误，其他对象质量无效可返回0及valid=false。
+当前仍保留最多两个NMS后业务对象、交叠框无效、框至少3×3、灰度均值低于12或均值≥250且标准差<3无效等规则；这些不是客户表中明确要求，现场仍需确认。业务对象超限返回调用错误并清空整帧结果；原始临时候选数组无两对象截断。其他对象质量无效可返回0及valid=false，详见13.1。
 
 ## 4. demo怎么实现
 
@@ -297,7 +309,7 @@ flowchart LR
     D --> O[可选原图/叠加图/掩码文件]
 ```
 
-默认相机demo无需PLC；附加--simulate-context或--context-json时由demo检查工况，两者互斥。图片序列工况检查也是宿主示例，不进入库。当前没有实时UI窗口。
+默认相机demo无需PLC；附加--simulate-context或--context-json时由demo检查工况，两者互斥。图片序列工况检查也是宿主示例，不进入库。这两个CLI没有实时UI窗口；独立Qt宿主已有阶段验证，见文首入口。CLI从d6b63ba起序列化完整临时卷扬候选，叠图仍画objects；Qt快照JSON尚未包含候选。
 
 相机首帧等待8秒、后续3秒；实际尺寸以协商结果为准，现有采集管线不保证命令行宽高/帧率。--channel未指定则沿用任务配置，显式指定须一致。紧凑NV12须偶数宽高、字节数width×height×3/2；无法确定行填充时明确报错。
 
@@ -317,11 +329,11 @@ flowchart LR
 | `src/core/config.cpp`、`src/core/config_internal.h` | 公共配置节点与功能适配器登记；按登记传递实例选项，保留未扩展模块的原解析语义。冰雪专属校验不在公共解析器 |
 | `src/core/backend_factory.cpp`、`src/core/backend_contract.h` | 按模型契约分发后端校验和推理，供预热及正式帧复用；不按冰雪模块号选路径 |
 | `include/evs/rknn_backend.h`、`src/backend/rknn/rknn_backend.cpp`、`src/backend/rknn/detection_rows.h` | RKNN模型输入输出检查、显式单输出解析和SDK输出释放。原80类路径保持；单类YOLOX供当前卷扬模型使用 |
-| `include/evs/winch_ice.h`、`src/tasks/winch_ice/winch_ice_api.cpp` | 客户四方法、固定模型配置映射、异常清理、同一插件结果读取；客户头文件在架构整改中未改，路径解析复用冰雪配置适配器 |
-| `src/tasks/winch_ice/winch_ice_plugin.h/.cpp` | 私有配置解析及登记、HSV实例参数、原图模型框裁剪、NMS、逐对象计量、报警和错误清理；均留在功能库 |
-| `src/tasks/winch_ice/ice_measurement.h/.cpp` | 私有`IceConfig`、图像检查与像素计量；像素计量cpp在架构整改中未改 |
+| `include/evs/winch_ice.h`、`src/tasks/winch_ice/winch_ice_api.cpp` | 客户四方法、固定模型配置映射、异常清理及同一插件结果读取；最新头包含公共status.h，API实现补充诊断日志，路径解析仍复用冰雪配置适配器 |
+| `src/tasks/winch_ice/winch_ice_plugin.h/.cpp` | 私有配置登记、候选/业务分流、HSV参数、NMS、计量、报警与清理；4e193f3新增成功帧窗口和诊断，均留在功能库 |
+| `src/tasks/winch_ice/ice_measurement.h/.cpp` | 私有`IceConfig`、图像检查与像素计量；4e193f3增加错误日志，像素规则保持 |
 | `include/evs/testing/ice_replay.h` | 可选只读掩码诊断，供demo展示和测试使用；正式读取比例不需要调用它 |
-| `include/evs/status.h`、`src/core/log.cpp`、`src/core/model_registry.cpp` | 已有结果语义及日志/分配失败恢复修复，架构整改中保留，不属于新增冰雪算法 |
+| `include/evs/status.h`、`src/core/log.cpp`、`src/core/model_registry.cpp` | status.h统一公共错误别名和业务枚举；既有日志与模型清理实现保留，最新两条提交未改后两文件 |
 | `configs/winch_ice.yaml`、`winch_model.rknn` | 相机0、640×640输入、面积阈值0.5及单独部署的卷扬模型；客户默认面积阈值也是0.5 |
 | `CMakeLists.txt` | 独立功能库、OpenCV链接、demo、测试和安装；不安装模型；相机目标须启用GStreamer且依赖可用 |
 | `tools/ice_replay/main.cpp`、`replay_io.h`、`host_gate.h` | 图片/序列演示、JSON和叠加文件、可选宿主工况；正式业务仍调用客户Detector |
@@ -381,9 +393,9 @@ ctest --test-dir build_test --output-on-failure
 
 ## 7. 尚未闭合的事项
 
-- snow_detections的客户影子系统输出要求：占比已通过objects表达，原模型冰雪目标输出仍无对应实现，须客户确认接口设计或提供对应模型。
+- snow_detections临时提供合法卷扬候选，原模型冰雪目标输出仍无对应实现；最终影子系统契约仍须对应模型及客户验收。
 - 客户文档width/height文字与名称/范围矛盾；用户已确认按常规宽高实现，但应同步修订客户设计文字。
-- 最新版本的真实模型精度及相机链路：第11节是架构整改前的RK3588单图推理；当前版本仍需板端回归、真实相机、多场景精度、灰度性能及连续运行验收。
+- 最新版本验收：第11节是架构整改前的RK3588单图推理，后续UI历史验证见文首入口；这些记录不覆盖最新两条提交，本次未重跑设备回归或复核firmware记录。
 - HSV是颜色候选粗估，反光/背景可能误计，暗雪/透明冰可能漏计，分母包括框内背景；质量/最多两个候选等规则仍须现场确认。
 - 客户参考YAML允许按算法增改，当前平铺配置不能宣称可直接读取客户原model.path嵌套示例。camera尺寸、灰度功能发布开关、UI、连续错误策略由宿主处理。
 - 客户release原型为void，而日志段写返回ErrorCode，文档自身矛盾；当前按void实现。
@@ -396,7 +408,7 @@ ctest --test-dir build_test --output-on-failure
 - 早期临时构建及探针：/tmp/ice_api_build、/tmp/ice_api_rknn_build、/tmp/ice_api_sdk；依赖解包到/tmp/ice_api_deps。
 - 更早完整外部归档：/home/tronlong/lyp/code/edgevision_archive_20261020_231720，保留此前清理前资料和历史验证；不将旧日志当作本轮结果。
 - 原Word抽取：/tmp/ice_customer_api_audit，保留15张表、24字段比较及精简前探针，旧探针描述的是精简前行为。
-- 模型内容在上述整改中未改，SHA256：`cff5bb8245653e2fcf6eec66ae7083aa6506fad1d2e4fd89bec933a6afe7d5e8`。
+- 2026-10-21上述整改阶段的旧模型SHA256：`cff5bb8245653e2fcf6eec66ae7083aa6506fad1d2e4fd89bec933a6afe7d5e8`。模型已于d6b63ba替换，最新大小/哈希见13.1，不能用旧单图记录替代新模型验收。
 
 - 当前架构整改归档及验证：`build_ice_delivery/architecture_isolation_20261021/`，含执行前快照、最新主机验证记录及当前主机验证安装目录，范围见第12节。
 
@@ -528,9 +540,9 @@ VisionTask原先只有initialize(string_view路径)、updateConfig(string_view�
 
 模型输出语义在这张图上与当时解析匹配；多图定位鲁棒性、训练区域定义、灰度精度、HSV计量精度和真实摄像头链路仍未因此验收。该次核验没有修改检测源码、API、库名或模型安装规则。
 
-## 12. 当前架构与验证范围（2026-10-21架构整改后）
+## 12. 架构与验证范围（2026-10-21历史记录）
 
-### 12.1 当前约定
+### 12.1 当时约定
 
 - 原`IFunctionPlugin`、`TaskConfig`和`src/evs_register.h`与`137a845`逐字一致；客户`winch_ice.h`在架构整改中未改。
 - `TaskConfig`没有HSV成员，公共面积默认值为0.3；客户`DetectConfig`和正式冰雪YAML的默认面积阈值仍为0.5。
@@ -538,9 +550,9 @@ VisionTask原先只有initialize(string_view路径)、updateConfig(string_view�
 - 公共任务只调用通用接口，后端分发按模型契约，冰雪结果、掩码、框裁剪和业务规则均归功能插件。原插件可以继续只实现原接口。
 - 库和两个demo的主要调用代码已具备。`snow_detections`、真实相机、多场景精度和现场质量规则仍按第7节列为未闭合事项，不能以测试通过替代需求完成。
 
-### 12.2 当前源码对应的既有验证
+### 12.2 当时源码对应的既有验证
 
-本次只同步文档，下面引用文档修改前已完成、且代码未再改变的验证记录，没有重新进行模型或相机测试。
+下面保留2026-10-21架构整改阶段的验证记录；后续源码和模型已经变化，不能将这些通过数用于427a3a6。最新提交的本次检查见第13节。
 
 | 验证 | 结果 | 范围 |
 |---|---|---|
@@ -569,3 +581,31 @@ VisionTask原先只有initialize(string_view路径)、updateConfig(string_view�
 - `文档同步核验.md`、`docs_sync_install_check.json`：本次文档变更、代码未改及安装说明同步核对；早期架构归档内的文件数和哈希仍属于各自阶段。
 
 当前代码仍需针对最终版本重新进行RK3588板端回归、真实相机、连续运行、识别精度和性能验收；第11节的单图结果保留其历史范围。
+
+## 13. 最新源码增量（2026-10-23，427a3a6）
+
+### 13.1 沿用d6b63ba的候选与模型契约
+
+上层`IUnfilteredDetectionInput`使decoder使用零阈值；插件将合法卷扬框先复制为临时候选，再另做业务正分/置信度、NMS及最多两个对象检查。候选保序、保留重复及低/零分，原图裁剪舍入后要求像素宽高非零；业务正分零像素框仍可能成为无效对象，因此objects不保证是候选数组子集。成功帧候选不随三个业务阈值改变；超限等调用错误仍清候选、对象及报警。
+
+result_code只表示objects是否非空；有效比例及报警看valid和area_ratio。小框、交叠、极暗/均匀极白可能随成功调用输出无效对象，比例为-1，MATCH不表示计量有效。最终冰雪模型目标仍待接入。
+
+d6b63ba替换后的模型为10,665,756字节，SHA256为`aa328d06f185bdf126a10b0357a28caa1249246e89e14474eb7669b9237550b7`。最新两条提交未再改模型。模型元数据声明RK3588及输入[1,3,640,640]、输出[1,8400,6]，不等于真实数值或RK3576兼容已验收。详细证据见[分析报告5.6.4](../edgevision分析报告.md#564-d6b63ba的模型替换与验证边界)。
+
+### 13.2 427a3a6的公共类型迁移
+
+`evs/status.h`统一定义`evs::ErrorCode`（uint32_t别名）、`evs::ResultCode`和`evs::AlertLevel`（均为int32_t枚举）。枚举值仍为`RESULT_NO_RESULT/RESULT_MATCH=0/1`、`ALERT_NONE/ALERT_WARN=0/1`，WinchSnowResult成员顺序保持；完整枚举类型名已经改变。原`evs::winch_ice::`定义未保留同名别名，只导入冰雪命名空间也无法再无限定使用三类型。
+
+宿主应使用完整`evs::`类型名，同步头文件并重编；`winch_ice.h`包含`status.h`，两者须配套交付。通用AlarmState仍为0/1/2，调用成功与否仍以返回错误码判断。core和ice继续配套更新；本次没有执行任意旧二进制混用验证。
+
+### 13.3 4e193f3的日志和帧窗口
+
+冰雪API、插件及像素计量增加`winch_ice` tag诊断，覆盖配置、拒帧、数据及异常。私有窗口记录候选筛选、NMS、计量有效性及报警帧等项；只有成功走到插件汇总处的帧计数。首个成功序号和100的倍数输出INFO并清窗口，其他成功帧输出DEBUG，reset输出剩余窗口并清序号；前两个窗口分别为1及99帧，之后通常100帧。
+
+插件汇总之前失败不计入，逐对象无效但处理到汇总处可计入；若随后API复制结果失败，已累计计数不回滚，因此不能按窗口数推算API最终返回0的次数。它没有补齐核心debugStats的错误统计，也未改变inference_time_ms边界。日志使用既有EVS/ALOG路由和同步回调，宿主控制过滤及异步落盘；完整口径见[分析报告6.5.4](../edgevision分析报告.md#654-冰雪诊断日志与成功帧窗口)。
+
+### 13.4 本次检查及历史结果边界
+
+源码分支为`feature/split-core-plugin-libs`，HEAD为427a3a6、工作区干净；`d6b63ba..427a3a6`共15文件、389行增加及89行删除。本次核对两条提交、日志分支和公共头，C++17语法检查确认旧无限定类型写法失败、完整evs写法通过；本文2.4的宿主例子按新头重新进行语法检查，没有链接或运行真实模型。
+
+d6b63ba的主机CTest6/6、8/8、6/6、核心235、冰雪154/337、分配失败75及候选JSON8项断言属于2026-10-22，详见[分析报告8.3](../edgevision分析报告.md#83-固定提交的本次构建验证)。本次未重跑完整构建、CTest、NPU或Qt链路，未复核firmware交付包记录；第6及8至12节的旧构建、模拟器和单图证据保留原有范围。

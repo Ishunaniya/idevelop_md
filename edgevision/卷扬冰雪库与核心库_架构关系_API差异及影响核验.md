@@ -2,14 +2,15 @@
 
 | 项目 | 说明 |
 | --- | --- |
-| 核验日期 | 2026-10-22 |
+| 核验日期 | 2026-10-23增量同步；原构建及混用核验为2026-10-22 |
 | 源码目录 | `/home/tronlong/lyp/code/edgevision` |
-| 当前提交 | `310010d7c5991802599d22268bbfca7b7faa2b5f` |
+| 当前源码提交 | `427a3a659603e78da43a4ba3f855667bd73ca99a` |
+| 原构建及混用证据基线 | `310010d7c5991802599d22268bbfca7b7faa2b5f` |
 | 比较基线 | `137a845`，核心与功能库拆分后的提交 |
-| 核验方式 | 源码与 Git 差异检查、独立构建、主机测试、ELF 检查及新旧库混用探针 |
+| 核验方式 | 最新增量为源码/Git差异与公共类型语法检查；独立构建、主机测试、ELF及混用探针保留原基线 |
 | 本文范围 | 是否符合原架构、库的分工、调用关系、API 差异、公共改动、兼容性及验证边界 |
 
-本文是上述版本的专项核验报告，不是全部 SDK API 手册，也不构成现场精度、性能或长期稳定性验收。后续源码更新时，应重新核对结论。此次文档整理沿用本轮已执行的验证结果，没有重新执行硬件测试，也没有修改产品源码。
+本文按427a3a6同步源码说明，原310010d的专项构建、符号及混用结果保留在第7、8节，不作为最新提交的验收。2026-10-23核对d6b63ba之后两条提交，并同步此前候选语义；未重跑完整构建或硬件测试，未修改产品源码，也未复核firmware交付包的板测记录。最新增量及验证边界见第6.3、6.4、8.4节。
 
 ## 阅读导航
 
@@ -18,7 +19,7 @@
 3. [两个 API 入口如何执行同一条算法链](#3-两个-api-入口如何执行同一条算法链)
 4. [API 与数据契约的具体差异](#4-api-与数据契约的具体差异)
 5. [新增冰雪功能对核心和旧功能的影响](#5-新增冰雪功能对核心和旧功能的影响)
-6. [YOLOv8 与 ALOG 两项增量的特殊边界](#6-yolov8-与-alog-两项增量的特殊边界)
+6. [YOLOv8、日志与公共类型增量的特殊边界](#6-yolov8日志与公共类型增量的特殊边界)
 7. [新旧库能否混用以及如何部署](#7-新旧库能否混用以及如何部署)
 8. [实际验证、证据与未验证范围](#8-实际验证证据与未验证范围)
 9. [后续开发应修改哪里](#9-后续开发应修改哪里)
@@ -58,8 +59,8 @@
 | 新增冰雪功能是否改动了核心？ | 改动了，包括任务扩展、配置适配、RKNN 契约及资源清理。当前版本还有共享解码和日志增量。 |
 | 原人员、高度限位业务是否被改写？ | 对比基线，其业务源码未改；稳定配置与插件接口头文件也保持一致。 |
 | 能否保证其他功能完全不受影响？ | 不能据此保证。公共执行路径发生变化，运行资源也会竞争；应以具体回归和板端验证为准。 |
-| 本轮是否发现旧接口兼容性被破坏？ | 在本机已测范围内未发现；证据不覆盖任意编译器、设备或全部真实模型。 |
-| 能否只换新冰雪库，保留拆库基线的旧核心？ | 不能。本轮实际加载失败，旧核心缺少新冰雪依赖的符号。 |
+| 旧接口是否仍能原样使用？ | 310010d的旧人员/高度插件混用探针通过；427a3a6迁移了公共类型，冰雪宿主的旧类型引用须修改，最新二进制混用尚未验证。 |
+| 能否只换新冰雪库，保留拆库基线的旧核心？ | 310010d的混用探针已记录加载失败；d6b63ba还要求核心识别候选标记，最新版本仍须core/ice配套。 |
 
 基线 `137a845` 已有功能号 `0x0008` 的冰雪占位插件，当时不实际计量，比例恒为 `0`。本轮主要把占位实现完善为“卷扬定位＋框内冰雪候选计量＋专用 API”，并扩展配套公共能力。
 
@@ -90,7 +91,7 @@ flowchart LR
 
 上图表示链接依赖。运行时，核心仍会通过 `IFunctionPlugin` 接口调用具体插件；这种接口调用不表示核心直接链接了冰雪业务实现。
 
-本轮 mock＋OpenCV 构建的 ELF 检查确认：核心不依赖冰雪、人员、高度或 OpenCV；冰雪依赖核心及 OpenCV `core/imgproc`。生产 RKNN 构建还需要推理运行库，不能把 mock 产物的依赖表当作生产环境完整依赖表。
+2026-10-22、310010d的mock＋OpenCV构建曾通过ELF检查确认：核心不依赖冰雪、人员、高度或OpenCV；冰雪依赖核心及OpenCV `core/imgproc`。这是该次产物记录，最新提交未重跑ELF检查；生产RKNN构建还需要推理运行库。
 
 Qt 和 GStreamer 属于相应宿主的依赖。`Detector` 本身不打开摄像头，RKNN 推理则由核心承担。
 
@@ -122,7 +123,7 @@ Qt 和 GStreamer 属于相应宿主的依赖。`Detector` 本身不打开摄像�
 
 两种方式都会经过核心的公共处理链。区别在于宿主传入的数据和读出的结果不同，并非选择了两套独立任务引擎。
 
-冰雪插件仍继承 `IFunctionPlugin`，并额外实现可选 `IFunctionTaskHooks`。原接口保留，新增能力通过独立接口提供。[插件声明](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.h:9)
+冰雪插件仍继承 `IFunctionPlugin`，并额外实现可选 `IFunctionTaskHooks`及d6b63ba新增的独立`IUnfilteredDetectionInput`标记。核心命中标记时将上层decoder阈值设为0；该能力不修改原虚表，也不能撤销后端已有筛选。[插件声明](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.h:9)
 
 ### 3.3 Detector 适配什么，为什么需要专用结果
 
@@ -132,18 +133,18 @@ Qt 和 GStreamer 属于相应宿主的依赖。`Detector` 本身不打开摄像�
 宿主提供当前图像
   → Detector 将 ImageData / WinchSnowConfig 适配为公共帧和任务配置
   → VisionTask：预处理 → 后端推理 → 解码 → 框映回原图
-  → WinchIcePlugin：筛选卷扬 → NMS → 选框与有效性判断
+  → WinchIcePlugin：保序临时卷扬候选；另分流业务置信度 → NMS → 对象与有效性判断
   → OpenCV：HSV 冰雪候选 → 框内像素计数 → 面积比例
   → 本帧报警与逐对象结果
 ```
 
-`Detector::Impl` 内持有一个 `VisionTask`。初始化后，它通过 `functionPlugin()` 借用任务已经创建的冰雪插件，读取该实例的结果和掩码，没有再创建第二个计量插件。该指针由任务拥有，适配层释放任务前清除借用指针。[源码](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:46)
+`Detector::Impl` 内持有一个 `VisionTask`。初始化后，它通过 `functionPlugin()` 借用任务已经创建的冰雪插件，读取该实例的结果和掩码，没有再创建第二个计量插件。该指针由任务拥有，适配层释放任务前清除借用指针。[源码](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:48)
 
 专用结果的原因是：原通用 `Result` 只有一个 `ice_ratio`，无法完整表达“两个卷扬分别对应的框、比例和有效性”。`WinchSnowResult.objects` 承载这些信息，而公共处理链仍继续复用。
 
 ### 3.4 functionPlugin 带来的封装取舍
 
-`functionPlugin()` 返回任务内部插件的可写借用指针。冰雪适配层再通过 `dynamic_cast<WinchIcePlugin*>` 识别具体类型，读取其专用结果。[类型转换位置](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:95)
+`functionPlugin()` 返回任务内部插件的可写借用指针。冰雪适配层再通过 `dynamic_cast<WinchIcePlugin*>` 识别具体类型，读取其专用结果。[类型转换位置](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:110)
 
 这放宽了原来“宿主只通过统一任务 API 和通用结果交互”的封装边界，并让冰雪适配层依赖自己的具体插件实现。因此，不宜把当前设计描述成原接口和封装完全没有变化。
 
@@ -160,7 +161,7 @@ ice_ratio = 框内经 HSV 与形态学处理得到的冰雪候选像素数 / 卷
 本帧报警 = 任一有效对象 ice_ratio >= area_ratio
 ```
 
-模型负责定位卷扬；HSV 负责颜色候选粗估。矩形框中的背景和支架也会影响分母。这不是模型直接输出的精确冰雪分割，也没有在本轮获得现场精度验收。[计量实现](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/ice_measurement.cpp:66)、[报警汇总](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.cpp:214)
+模型负责定位卷扬；HSV 负责颜色候选粗估。矩形框中的背景和支架也会影响分母。这不是模型直接输出的精确冰雪分割，也没有在本轮获得现场精度验收。[计量实现](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/ice_measurement.cpp:86)、[报警汇总](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.cpp:281)
 
 ## 4. API 与数据契约的具体差异
 
@@ -198,10 +199,12 @@ ice_ratio = 框内经 HSV 与形态学处理得到的冰雪候选像素数 / 卷
 - 冰雪插件发布通用结果时会清空 `targets`。
 - 只有恰好一个有效对象时，通用 `ice_ratio` 才是该对象的比例；多个对象、无对象或无效时为 `-1`。
 - 专用 `objects` 保存逐卷扬结果，按本帧从左到右排列，索引不是跨帧跟踪 ID。
-- `snow_detections` 当前为空：卷扬框不是冰雪模型目标，不能把卷扬框填入该字段冒充冰雪检测输出。
-- 调用返回 `0` 后仍须检查 `result_code` 和每个对象的 `valid`；未知比例 `-1` 不能当作正常的 `0%`。
+- `snow_detections`自d6b63ba起临时返回同次推理的卷扬候选：原图裁剪/像素舍入后宽高非零，保留模型顺序、低/零分及重复，不做业务置信度、NMS、Top-K或两对象截断；它仍不是冰雪模型目标。
+- 调用返回 `0` 后可读取候选，不以result_code为门槛。业务objects非空即MATCH，计量全部无效也可MATCH；逐对象检查valid，未知比例 `-1` 不能当作正常的 `0%`。业务对象超过两个仍整帧失败并清空候选、对象及报警。
 
-以上结果语义见 [发布逻辑](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.cpp:224)。
+以上结果语义见 [发布逻辑](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.cpp:290)。
+
+427a3a6将结果枚举统一为`evs::ResultCode`和`evs::AlertLevel`，接口错误返回为`evs::ErrorCode`，均定义在`evs/status.h`；检测结构与Detector仍位于`evs::winch_ice`。枚举值和底层类型保持，但命名空间迁移需要宿主修改类型引用，详见6.4。
 
 ### 4.3 生命周期与宿主分工
 
@@ -222,7 +225,7 @@ ice_ratio = 框内经 HSV 与形态学处理得到的冰雪候选像素数 / 卷
 | `TaskConfig`、`IFunctionPlugin`、`IInferBackend`、`Frame` 头文件 | 完全一致 | 这些稳定接口未因本轮冰雪实现增加成员或修改原虚表 |
 | 人员、高度限位业务目录 | 源码无改动 | 原业务规则未在这些目录被改写 |
 | 公共预处理与上层 decoder 实现 | 源码无改动 | 原实现保留；不等于其上下游公共流程均未变化 |
-| `Result` | 增加相关常量和注释，成员布局未变 | 布局保留，但冰雪结果语义需要按专用规则理解 |
+| `Result`及`status.h` | 通用Result成员布局保持；公共头新增ErrorCode、ResultCode和AlertLevel | 通用结果与冰雪枚举分开理解；新枚举类型定义见6.4 |
 | `VisionTask` | 新增非虚方法、可选扩展分发和内部流程改动 | 公共能力扩展；对象仍使用 pImpl，不因这些新方法新增对象数据成员 |
 | 配置、RKNN、模型清理、日志 | 存在公共实现变化 | 需要把这些变化纳入旧功能回归范围 |
 
@@ -233,13 +236,15 @@ ice_ratio = 框内经 HSV 与形态学处理得到的冰雪候选像素数 / 卷
 | 改动 | 具体内容 | 影响范围 |
 | --- | --- | --- |
 | 统一任务扩展 | 新增 `TaskConfig` 初始化/更新重载及 `functionPlugin()`；增加可选 `IFunctionTaskHooks` | 新核心公共任务；旧插件未实现 hooks 时继续使用原接口 |
+| 未过滤候选输入 | d6b63ba增加独立`IUnfilteredDetectionInput`，核心对选择该能力的插件使用上层零阈值解码 | 原插件阈值保持；旧core配新ice仍可能丢失低/零分候选 |
 | 配置适配 | 公共解析器增加按模块登记的适配器 | 冰雪加载后为 `0x0008` 增加专属规则；人员、高度没有新增冰雪规则 |
 | 初始化与热更新 | 模型租约回滚、先准备下一份状态再提交、可选预热失败与拒帧策略 | 公共流程发生变化，具体策略按插件能力分发 |
 | RKNN 契约 | 非 80 类的指定格式进入显式校验/解析；校验并处理 NCHW/NHWC 输入维序 | 满足条件的 RKNN 任务，不限于冰雪模块 |
 | 模型释放 | `release()` 查找键时避免额外字符串分配 | 共享模型清理路径，便于内存不足时回收 |
 | 当前版本额外增量 | YOLOv8 公共 helper 和 ALOG 桥接 | 公共后端解码及采用新日志路径的模块，详见第 6 节 |
+| 4e193f3及427a3a6 | 冰雪诊断与帧窗口；公共类型归入status.h | 前者增加功能库日志工作，后者影响公共头及宿主类型引用；未改模型或人员/高度业务 |
 
-冰雪的 HSV 键、相对模型路径和默认模型契约在冰雪插件内处理。公共配置解析器只提供登记与分发能力，没有硬编码这些冰雪业务键。[配置分发](/home/tronlong/lyp/code/edgevision/src/core/config.cpp:343)、[冰雪配置适配](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.cpp:25)
+冰雪的 HSV 键、相对模型路径和默认模型契约在冰雪插件内处理。公共配置解析器只提供登记与分发能力，没有硬编码这些冰雪业务键。[配置分发](/home/tronlong/lyp/code/edgevision/src/core/config.cpp:343)、[冰雪配置适配](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_plugin.cpp:27)
 
 `IFunctionTaskHooks` 是与原插件虚表分开的可选接口，用于校验、配置提交、预热策略和错误帧清理。新增功能不需要为了采用原插件接口而实现全部扩展能力。[接口定义](/home/tronlong/lyp/code/edgevision/include/evs/function_task_hooks.h:10)
 
@@ -249,9 +254,9 @@ ice_ratio = 框内经 HSV 与形态学处理得到的冰雪候选像素数 / 卷
 
 但是，新增运行任务会消耗 CPU、NPU、内存和调度时间。即使采用不同模型，也不能据功能分库保证旧任务帧率、延迟完全不变。**本轮没有测量多功能同时运行的板端性能，因此没有“性能零影响”结论。**
 
-## 6. YOLOv8 与 ALOG 两项增量的特殊边界
+## 6. YOLOv8、日志与公共类型增量的特殊边界
 
-这两项来自当前版本后续提交，需要与最初的冰雪业务实现分别理解，不能仅凭提交标题判断接入状态。
+以下增量按提交分别说明，不能仅凭提交标题判断接入状态。6.1、6.2保留原解码和ALOG结论，6.3、6.4补充最新两条提交。
 
 ### 6.1 新增 YOLOv8 helper 不等于正式 Detector 已支持双输出模型
 
@@ -265,9 +270,9 @@ decoder_classes = 1
 
 这会触发 `inferDetectionRows()` 路径。其模型检查要求 `n_output == 1`；显式解析后直接返回，不进入后面的公共 `decode_heads()`。因此，双输出 YOLOv8 模型会在当前正式契约检查时被拒绝，不能因 helper 新增了分支就认定专用 API 已接通。
 
-源码依据：[专用任务配置](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:18)、[公共分派条件](/home/tronlong/lyp/code/edgevision/src/core/backend_factory.cpp:42)、[单输出模型校验](/home/tronlong/lyp/code/edgevision/src/backend/rknn/rknn_backend.cpp:222)、[公共 helper 分支](/home/tronlong/lyp/code/edgevision/src/backend/yolo_decode.h:818)。
+源码依据：[专用任务配置](/home/tronlong/lyp/code/edgevision/src/tasks/winch_ice/winch_ice_api.cpp:20)、[公共分派条件](/home/tronlong/lyp/code/edgevision/src/core/backend_factory.cpp:42)、[单输出模型校验](/home/tronlong/lyp/code/edgevision/src/backend/rknn/rknn_backend.cpp:222)、[公共 helper 分支](/home/tronlong/lyp/code/edgevision/src/backend/yolo_decode.h:818)。
 
-本轮合成探针还复现了共享 helper 的限制：四类 score 与四通道 box 角色冲突；部分合法多类 fused 输入可得到零框；fused 归一化坐标可能被误判为 score。相关观察包含正常行为和缺陷反例，不能把探针的 `12/12` 写成“所有 YOLOv8 功能已验收”。[探针日志](卷扬冰雪库与核心库_核验证据_20261022/decode_probe.log)
+310010d的历史合成探针记录了共享helper的限制：四类score与四通道box角色冲突；部分合法多类fused输入可得到零框；fused归一化坐标可能被误判为score。`12/12`包含缺陷反例的预期观察，不表示所有YOLOv8功能已验收。原日志`decode_probe.log`当前不在所列归档路径，证据状态见8.2；本次未重跑该探针。
 
 ### 6.2 ALOG 是公共日志行为变化
 
@@ -277,7 +282,29 @@ decoder_classes = 1
 
 回调指针的注册/替换没有锁或 atomic；应在日志生产线程启动前完成注册，停止生产线程后再解除。宿主回调应快速返回并自行隔离异常。这里是源码确认，没有执行多线程压力测试。[实现](/home/tronlong/lyp/code/edgevision/src/core/algo.cpp:12)、[EVS 宏桥接](/home/tronlong/lyp/code/edgevision/include/evs/log.h:111)
 
+### 6.3 4e193f3新增冰雪诊断与成功帧窗口
+
+改动位于冰雪API、插件、计量三个实现文件及插件私有头，tag为`winch_ice`，覆盖配置加载/应用、参数、拒帧、模型数据及计量异常；原返回码和结果读取方式保持。新增私有窗口累计输入、候选、阈值/NMS筛选、有效计量、不可观测、小框/交叠及报警帧等项。
+
+成功发布结果并走到汇总处才计数：序号1及100的倍数输出INFO并清窗口，其他成功帧输出DEBUG，reset补输出剩余窗口并清序号。初始窗口分别为1帧、99帧，其后通常100帧。失败提前返回不计入窗口；这不是全部调用/失败统计，也不改变核心debugStats或inference_time_ms的统计边界。同步回调及过滤仍遵循6.2；本次没有测量新增日志的持续开销。完整口径见[分析报告6.5.4](edgevision分析报告.md#654-冰雪诊断日志与成功帧窗口)。
+
+该计数属于插件阶段；若其后API复制结果分配失败，已累计计数不回滚。统计`Detector::detect()`最终成功/失败次数时，宿主应另行记录调用返回值。
+
+### 6.4 427a3a6统一公共类型及源码兼容影响
+
+| 公共类型 | 当前定义 | 保持项 |
+| --- | --- | --- |
+| `evs::ErrorCode` | `status.h`中的uint32_t别名 | 成功0及原0xMMMMEEEE错误码格式 |
+| `evs::ResultCode` | int32_t枚举 | RESULT_NO_RESULT=0、RESULT_MATCH=1 |
+| `evs::AlertLevel` | int32_t枚举 | ALERT_NONE=0、ALERT_WARN=1 |
+
+原`evs::winch_ice::ErrorCode/ResultCode/AlertLevel`定义被移除，未保留同名兼容别名。宿主应使用完整`evs::`名称；仅`using namespace evs::winch_ice;`也不能再取得这些名字。`winch_ice.h`包含公共`status.h`，两头须一起交付。通用`AlarmState`仍为None=0、LogOnly=1、Alarm=2，没有改成冰雪AlertLevel。
+
+枚举底层类型、数值和结果成员顺序保持，但枚举完整类型名已变化，不能表述为“所有字段类型不变”或仅凭结构布局保证任意二进制兼容。宿主须同步头文件和类型引用并重编，core/ice仍配套部署。此次未执行427a3a6的新旧二进制混用；第7节的旧探针仅支持其原基线结论。
+
 ## 7. 新旧库能否混用以及如何部署
+
+本节混用实测属于310010d，未在427a3a6重跑；最新源码迁移要求见6.4。
 
 ### 7.1 兼容性有方向
 
@@ -288,7 +315,7 @@ decoder_classes = 1
 | 新冰雪库＋`137a845` 旧核心 | 动态加载失败，缺少 `VisionTask::functionPlugin() const` | 新冰雪依赖新核心能力，不能只替换冰雪 so |
 | 任意历史过渡版本、任意工具链混用 | 本轮未验证 | 不能根据 `.so.1` 名字相同推导兼容 |
 
-旧插件验证特意只在 `new_core_only` 目录放新核心，再从基线目录加载旧人员/高度插件，并用 `ldd` 逐项断言路径，避免误把“旧宿主＋新插件”当成“旧插件兼容”。原始加载记录见 [verification.json](卷扬冰雪库与核心库_核验证据_20261022/verification.json)。
+310010d历史验证在`new_core_only`只放新核心，再从基线目录加载旧人员/高度插件，并以`ldd`断言路径，区分旧宿主配新插件与旧插件兼容。原始`verification.json`当前不在所列归档路径，见8.2；本次只保留历史结论，没有重新执行混用验证。
 
 反方向加载探针使用不依赖 OpenCV 的 mock 构建，检查的是 ELF 符号兼容性；它没有执行冰雪模型和像素计量。对应未修饰符号为 `_ZNK3evs10VisionTask14functionPluginEv`。
 
@@ -303,6 +330,8 @@ decoder_classes = 1
 同名 SONAME 只提供加载名称，不能替代配套版本检查。新增冰雪应使用同一版本的头文件、核心和冰雪库。
 
 ## 8. 实际验证、证据与未验证范围
+
+8.1至8.3保留2026-10-22、310010d的专项验证；最新提交的本次检查另列8.4。
 
 ### 8.1 已执行的检查
 
@@ -323,18 +352,17 @@ OpenCV 使用已有临时解包依赖。首次链接因 BLAS/LAPACK 不在搜索
 
 ### 8.2 证据归档
 
-关键小文件与本文一起保存到 [核验证据目录](卷扬冰雪库与核心库_核验证据_20261022/README.md)，不要求读者依赖“本文与原始构建树在同一目录”的假设。
+**当前证据状态（2026-10-23复查）**：原文列出的`卷扬冰雪库与核心库_核验证据_20261022/`目录，以及`/tmp/edgevision_core_ice_relation_310010d/`构建树均已不在所列路径。下表仅保留历史文件清单；本文中的旧测试数和混用结果属于既有记录，本次无法从这些路径重新核查原始输出。
 
-| 文件 | 内容 |
+| 历史文件名 | 原记录内容 |
 | --- | --- |
-| [verification.json](卷扬冰雪库与核心库_核验证据_20261022/verification.json) | 提交、文件对比、旧二进制运行、`ldd`、ELF、符号与混用失败记录 |
-| [ctest_off.log](卷扬冰雪库与核心库_核验证据_20261022/ctest_off.log) | OpenCV 关闭的完整 CTest 输出 |
-| [ctest_cv.log](卷扬冰雪库与核心库_核验证据_20261022/ctest_cv.log) | OpenCV 开启的完整 CTest 输出 |
-| [decode_probe.log](卷扬冰雪库与核心库_核验证据_20261022/decode_probe.log) | 解码正常行为和限制反例 |
-| [verify.py](卷扬冰雪库与核心库_核验证据_20261022/verify.py)、[decode_probe.cpp](卷扬冰雪库与核心库_核验证据_20261022/decode_probe.cpp) | 本轮核验脚本和解码探针源码 |
-| [SHA256SUMS](卷扬冰雪库与核心库_核验证据_20261022/SHA256SUMS) | 归档文本、脚本和探针的完整性摘要 |
+| `verification.json` | 提交、文件对比、旧二进制运行、ldd、ELF、符号与混用失败记录 |
+| `ctest_off.log`、`ctest_cv.log` | OpenCV关闭/开启的完整CTest输出 |
+| `decode_probe.log` | 解码正常行为和限制反例 |
+| `verify.py`、`decode_probe.cpp` | 当时的核验脚本和解码探针源码 |
+| `SHA256SUMS` | 当时归档文件的完整性摘要 |
 
-完整构建树仍位于 `/tmp/edgevision_core_ice_relation_310010d/`，可能被系统清理；此次没有复制二进制、SDK 或全部构建依赖。归档脚本保留原始执行路径，重跑前需准备对应源码、基线产物和依赖，不能当作一键自包含测试包。
+重新验收须从对应Git提交准备源码、基线产物和依赖，再生成新构建及原始日志。本次没有恢复缺失归档或执行这些测试。2026-10-23完成的源码与语法检查单列8.4，不依赖上述历史证据目录。
 
 ### 8.3 尚未验证的项目
 
@@ -347,6 +375,13 @@ OpenCV 使用已有临时解包依赖。首次链接因 BLAS/LAPACK 不在搜索
 - 任意编译器、标准库、硬件驱动与历史过渡产物的混用。
 
 这些边界不会否定已经完成的源码和主机核验，但限制了结论可以推广的范围。
+
+### 8.4 2026-10-23增量检查
+
+- 源码HEAD为427a3a6，分支`feature/split-core-plugin-libs`，工作区干净；`d6b63ba..427a3a6`共15文件、389行增加、89行删除。
+- 源码核对确认最新两条提交未改模型、后端解码、人员/高度业务、原插件虚表或TaskConfig布局；同步了冰雪日志、公共类型和工具/测试引用。
+- C++17语法检查确认仅导入冰雪命名空间后无限定使用旧三类型失败，完整`evs::`写法通过；未重跑完整构建、CTest或混库探针，也未在设备上运行新增日志。
+- d6b63ba的候选回归、模型及主机测试记录见[分析报告8、12章](edgevision分析报告.md#八编译构建体系)，不把310010d或d6b63ba的通过数转作427a3a6验收。
 
 ## 9. 后续开发应修改哪里
 
