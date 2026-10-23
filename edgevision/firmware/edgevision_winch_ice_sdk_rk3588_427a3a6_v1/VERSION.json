@@ -1,0 +1,117 @@
+{
+  "sdk": "edgevision_winch_ice_sdk_rk3588",
+  "algorithm_source_commit": "427a3a659603e78da43a4ba3f855667bd73ca99a",
+  "release": "2026-10-23-427a3a6",
+  "demo_is_separate_from_algorithm_source": true,
+  "target": "RK3588",
+  "architecture": "aarch64",
+  "model_sha256": "aa328d06f185bdf126a10b0357a28caa1249246e89e14474eb7669b9237550b7",
+  "sample_source_name": "ice_test1.jpg",
+  "sample_source_sha256": "e9d95b14285dd42fb882272d0af7caf4d56c93abbf10ecc2c66e73f0a5a3bbfe",
+  "sample_width": 704,
+  "sample_height": 576,
+  "sample_has_ground_truth": false,
+  "system_dependencies_bundled": false,
+  "algorithm_source_modified": false,
+  "algorithm_source_tree_sha256": "f65998f196b26b7e1cf71b90094a15f377920b264a8b0b9e6bd311c8a7d33e6e",
+  "source_archive_name": "edgevision_source_427a3a6.tar.gz",
+  "source_archive_sha256": "eacdd120cd398ffa6b57b400b59dd1a9a01e9c2afad2203963b59e49312f2d20",
+  "detections_target": "winch",
+  "detections_stage": "pre_confidence_pre_nms",
+  "candidate_confidence_threshold": null,
+  "result_code_basis": "business_winch_after_confidence_and_nms",
+  "ice_ratio_basis": "HSV_candidate_pixels / winch_bbox_pixels",
+  "package_revision": 6,
+  "source_archive_path": "source/edgevision_source_427a3a6.tar.gz",
+  "source_archive_file_count": 155,
+  "source_archive_policy": "Pinned committed files; verified against the commit and its .gitignore; no untracked or build artifacts.",
+  "minimal_example": "demo/minimal.cpp",
+  "package_directory_name": "edgevision_winch_ice_sdk_rk3588_427a3a6_v1",
+  "created_utc": "2026-10-23T03:33:31.800770+00:00",
+  "build_status": "complete",
+  "public_headers": [
+    "include/evs/winch_ice.h",
+    "include/evs/status.h"
+  ],
+  "demo_private_headers": [
+    "demo/include/evs/alog.h",
+    "demo/include/evs/alg_api.h"
+  ],
+  "header_sha256": {
+    "include/evs/status.h": "f864dee6f210ce7919629bbcec911f073f06ceaf8fda0911c9954c01084decca",
+    "include/evs/winch_ice.h": "bd954d6ffd433468bec54bad872cf060afc4b403871c0ca61eefe23e6c0e8b74"
+  },
+  "algorithm_source_git_tree": "13d7d25f1d5f8841555eba19991aa3b137688266",
+  "api_header_sha256": "bd954d6ffd433468bec54bad872cf060afc4b403871c0ca61eefe23e6c0e8b74",
+  "source_tree_hash_method": "SHA256 of sorted relative path + NUL + binary file SHA256 for each archived file",
+  "compiler": "g++ (Ubuntu 11.4.0-1ubuntu1~22.04.2) 11.4.0",
+  "cmake": "cmake version 3.22.1",
+  "opencv_native": "4.5.4",
+  "glibc": "glibc 2.35",
+  "kernel": "5.10.209-rk3588",
+  "os": "Ubuntu 22.04.5 LTS",
+  "rknn_runtime_sha256": "73993ed4b440460825f21611731564503cc1d5a0c123746477da6cd574f34885",
+  "rknn_api_header_sha256": "340f16c14bc86d41bc5a64251bd1e747dd50899a4438d08707b48d8de384165a",
+  "algorithm_library_sha256": {
+    "libevs_core.so.1": "adb10b309bd296f1ff90ff45259ac48bdf9f43099d3a6614f41640315263e055",
+    "libevs_ice.so.1": "c1fefe6eaff6f565e44bed853ac785835ca447b8a3eb3c255cb6923601d68cf7"
+  },
+  "native_build_directory": "/home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm",
+  "system_dependencies": [
+    {
+      "soname": "libstdc++.so.6",
+      "sha256": "fecb9712229de8d60542811104343135ccc57da0981d35d27ed3997065ed27e8"
+    },
+    {
+      "soname": "libgcc_s.so.1",
+      "sha256": "6ba2d7f4512e1e0635a51561a9587ca0bac140e8627a0fb916b4b2b5657b140d"
+    },
+    {
+      "soname": "libc.so.6",
+      "sha256": "b8b0c12b8010d68f657287963645038257832504d3567d95326b6f98846965df"
+    },
+    {
+      "soname": "libopencv_imgproc.so.4.5d",
+      "sha256": "15b2448af215493a79f4638cad8eefcb9b43f15926724caffbdbd06a9c018261"
+    },
+    {
+      "soname": "libopencv_core.so.4.5d",
+      "sha256": "3abc549967c52f594b2b597db44b0013c55edb2198e11f9110d564277eb00beb"
+    },
+    {
+      "soname": "libm.so.6",
+      "sha256": "86bcb4b5addd2dcfc1df5b42c5ead486daa5fe82ac045c8f222dfec70e576c9d"
+    },
+    {
+      "soname": "librknnrt.so",
+      "sha256": "73993ed4b440460825f21611731564503cc1d5a0c123746477da6cd574f34885"
+    },
+    {
+      "soname": "libz.so.1",
+      "sha256": "8cd4dd1e893bc67102bbe7d2f0e895a98dd142857228c70bef7878a55eb58bb6"
+    },
+    {
+      "soname": "libtbb.so.2",
+      "sha256": "403f46ad40413f5575e35edb33d683c9599a40760eea2ec2f8dd25fbec584cc5"
+    },
+    {
+      "soname": "libpthread.so.0",
+      "sha256": "fef6ee085624b092060920f16e53d8959a894f0337adf749421ee0070a2fdce6"
+    },
+    {
+      "soname": "libdl.so.2",
+      "sha256": "9d1edaf33ad66598615a139f57b73ef535f1ec9d75799966c2b3afa26ae0c618"
+    }
+  ],
+  "packaged_utc": "2026-10-23T03:44:45.923986+00:00",
+  "native_verification": {
+    "full_demo_runs": [
+      "default_run",
+      "update_log_run",
+      "high_confidence_run"
+    ],
+    "minimal_example_compiled_with_public_include_only": true,
+    "all_api_calls_returned_success": true,
+    "full_candidate_list_preserved_under_high_threshold": true
+  }
+}

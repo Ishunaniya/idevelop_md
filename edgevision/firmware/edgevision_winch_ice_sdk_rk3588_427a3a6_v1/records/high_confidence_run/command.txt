@@ -1,0 +1,2 @@
+cd '/home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/edgevision_winch_ice_sdk_rk3588_d6b63ba_v1'
+'./bin/winch_ice_api_demo' 'configs/winch_ice.yaml' 'demo/sample.ppm' '--confidence-threshold' '1' '--out' 'records/high_confidence_run' 

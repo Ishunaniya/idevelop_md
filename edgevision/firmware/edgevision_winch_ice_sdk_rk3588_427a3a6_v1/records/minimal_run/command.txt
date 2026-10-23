@@ -1,0 +1,4 @@
+cd /home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm
+g++ -std=c++17 -O2 -I/home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/edgevision_winch_ice_sdk_rk3588_d6b63ba_v1/include /home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/edgevision_winch_ice_sdk_rk3588_d6b63ba_v1/demo/minimal.cpp -L/home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/minimal_client/lib -levs_ice -levs_core '-Wl,-rpath,$ORIGIN/../lib' -o /home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/minimal_client/bin/my_winch_app
+/home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/minimal_client/bin/my_winch_app /home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/edgevision_winch_ice_sdk_rk3588_d6b63ba_v1/models/winch_model.rknn /home/hytop/l_evs/sdk_rebuild_427a3a6_n2d6sjkm/edgevision_winch_ice_sdk_rk3588_d6b63ba_v1/demo/sample.ppm
+exit_code=0
