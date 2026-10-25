@@ -5,6 +5,7 @@
 > 分析提交：`427a3a659603e78da43a4ba3f855667bd73ca99a`，核对时源码工作区干净。
 > 本文保存于文档仓库 `idevelop_md/edgevision`，章节编排参照 `meari/mpc-base/mpc-base分析报告.md`，聚焦冰雪插件及其必需的核心库、宿主接入链路。
 > 证据分为“当前源码确认”“本次主机实测”“历史记录”。本次未连接 RK3588、运行真实模型或执行相机/UI 验收。
+> 调用链补充：第七章 7.5–7.11 按同一提交展开函数、库边界、数据传递、错误返回与释放顺序；本次补充为源码核对，没有新增板端验收结论。
 
 冰雪插件的当前功能可以概括为：**输入一帧图像，用卷扬模型找出卷扬位置，再按每个卷扬矩形框统计 HSV 冰雪候选像素占比；任一有效对象达到阈值，即返回本帧报警。**当前还没有独立冰雪模型，也没有卷扬表面的精确分割。
 
@@ -29,7 +30,7 @@
 | [四、核心架构设计](#四核心架构设计) | 两个库、Detector、任务和插件是什么关系？ |
 | [五、核心模块深度解析](#五核心模块深度解析) | 框如何筛选，比例如何计算，何时报警？ |
 | [六、工具与辅助能力详解](#六工具与辅助能力详解) | 如何回放、采集、显示、导出和定位问题？ |
-| [七、关键数据流分析](#七关键数据流分析) | 初始化、单帧、异常和热更新如何串起来？ |
+| [七、关键数据流分析](#七关键数据流分析) | 从宿主入口沿函数调用、核心推理、插件判断和返回路线理解运行过程 |
 | [八、编译构建体系](#八编译构建体系) | 如何构建、链接、部署，本次验证了什么？ |
 | [九、接口设计规范与配置契约](#九接口设计规范与配置契约) | 每个方法和字段怎样正确使用？ |
 | [十、可靠性、实现限制与改进方向](#十可靠性实现限制与改进方向) | 当前算法和交付还有哪些实际限制？ |
@@ -571,6 +572,406 @@ flowchart TD
 
 例如将 `area_ratio` 从 0.5 改为 0.7，不会改变同一图像中按 HSV 算出的比例，只会改变报警比较；修改置信度/NMS 会改变业务对象集合，但成功帧候选列表不按这三项业务阈值筛减。
 
+### 7.5 函数调用链的读法与执行边界
+
+前面7.1–7.4用于先看全貌，下面按实际执行顺序追到函数。建议先读7.6初始化，再读7.7单帧主链；需要定位模型交互时查7.8，需要找“结果从哪里回来”时查7.9。
+
+| 阅读目的 | 直接入口 |
+| --- | --- |
+| 看程序怎样从main启动并循环 | [7.11.4 宿主入口](#7114-从宿主main把这些调用串成程序) |
+| 看模型和插件怎样准备好 | [7.6 初始化调用](#76-配置登记与初始化的逐函数调用) |
+| 顺着一帧进入核心与业务插件 | [7.7 单帧函数树](#77-一帧图像的逐函数调用树) |
+| 看返回数据、失败和资源释放 | [7.9 返回路线](#79-成功结果与失败状态分别怎样返回)、[7.10 更新与释放](#710-热更新释放与析构的调用顺序) |
+
+调用树的标记如下：`[宿主]`为产品应用或demo，`[冰雪]`为libevs_ice，`[核心]`为libevs_core，`[SDK]`为RKNN外部调用，`[CV]`为OpenCV外部调用；`[内联]`表示头文件中的实现，实际机器码可落在调用它的编译单元中。缩进表示调用关系，同层从上到下为执行顺序，条件分支会明确写出。
+
+**本文的完整展开范围是正式Detector所经的项目自有调用链，以及其RKNN/OpenCV调用边界。**标准容器、系统加载器、RKNN驱动和OpenCV函数内部实现不在本仓库内；本节列到对外函数边界。逐帧几何和像素规则由第五章解释，下面着重说明它们何时执行、传入什么、结果交给谁。
+
+最容易混淆的运行关系是：宿主先进入冰雪客户API，API调用核心VisionTask；核心完成通用处理后再调用冰雪插件。两者通过普通同步函数调用往返，不通过进程间消息，也没有额外冰雪推理线程。
+
+| 阶段 | 发起者与跨库方向 | 主要交付数据 |
+| --- | --- | --- |
+| 配置 | 宿主→冰雪加载器→核心解析→冰雪配置适配 | WinchSnowConfig |
+| 初始化 | 冰雪Detector→核心任务→冰雪插件配置 | 持久任务、后端引用、decoder和插件 |
+| 每帧前半段 | 冰雪Detector→核心任务→RKNN | 模型输入字节、解码行矩阵、原图Target |
+| 每帧业务 | 核心任务→冰雪插件→OpenCV | 候选、objects、比例、掩码与报警 |
+| 每帧返回 | 插件→核心返回状态；Detector再读取插件报告→宿主 | ErrorCode和WinchSnowResult |
+
+### 7.6 配置、登记与初始化的逐函数调用
+
+#### 7.6.1 库加载时登记，初始化时创建实例
+
+在系统加载器实际加载插件时，静态登记对象先运行：
+
+```text
+[冰雪] kWinchIce：FunctionPluginRegistration构造
+  └─ [核心] register_function_plugin(0x0008, make_winch_ice_plugin)
+       └─ 在功能工厂表保存“模块8 → 创建函数”
+[冰雪] kIceConfig：FunctionConfigRegistration构造
+  └─ [核心] detail::register_function_config_loader(0x0008, load_ice_options)
+       └─ 保存“模块8 → 专属文件配置适配器”
+[核心] decoder静态登记对象
+  └─ register_decoder("yolox", make_yolox) 等
+```
+
+登记只是保存创建入口，没有在此时加载winch_model.rknn，也没有提前创建每个任务的WinchIcePlugin。后面的`create_function_plugin()`才调用创建函数；这是“库已经加载”和“任务已经初始化”的区别。
+
+#### 7.6.2 宿主选择从YAML加载客户配置
+
+```text
+[宿主] evs::winch_ice::load_config(path, out)
+└─ [冰雪] load_config()
+   ├─ make_task_config(默认WinchSnowConfig) → 预置模块8等契约
+   ├─ [核心] detail::load_task_config_with_module(path, TaskConfig, ...)
+   │  ├─ parse_task_config() → 文本节点与通用TaskConfig
+   │  │  └─ trim/strip_comment/split_kv、parse_int_array、to_* 等解析辅助
+   │  ├─ function_config_loader(parsed_module) → 查模块8适配器
+   │  └─ [冰雪] load_ice_options(document, cfg, options)
+   │     ├─ 检查专属键、类型、重复键及别名
+   │     ├─ 补齐RKNN/YOLOX/单类/默认面积阈值与ground关闭
+   │     └─ 按YAML目录归一化模型路径
+   ├─ 检查客户接口允许的模型契约、单相机和默认HSV
+   ├─ valid_public_config() → 相机号小于255
+   └─ 成功后将局部配置提交到out
+```
+
+这一步只得到配置。宿主也可以直接构造WinchSnowConfig，跳过文件解析；因此Detector内部不需要写临时YAML，相对路径规则也不能从文件入口自动带到手工配置入口。
+
+#### 7.6.3 Detector初始化到核心任务装配
+
+```text
+[宿主] detector.initialize(config)
+└─ [冰雪] Detector::initialize()
+   ├─ 已初始化？是 → 返回0，保留已有配置
+   ├─ valid_public_config()，复制配置为next
+   ├─ make_task_config(next) → 固定模块8、RGB、单类YOLOX等
+   ├─ [核心] VisionTask::initialize(const TaskConfig&)
+   │  └─ initializeTask(config, 空FunctionOptions)
+   │     ├─ create_function_plugin(0x0008)
+   │     │  └─ [冰雪] make_winch_ice_plugin() → new WinchIcePlugin
+   │     ├─ dynamic_cast到IFunctionTaskHooks
+   │     ├─ [冰雪] WinchIcePlugin::validate_task(cfg)
+   │     ├─ [核心] create_backend("rknn") → 检查编译支持
+   │     ├─ global_registry().acquire(backend, model, timeout)
+   │     │  ├─ 已有同键后端 → 引用数增加，返回shared_ptr
+   │     │  └─ 无同键后端 → create_backend() → backend->load()
+   │     ├─ 建立局部ModelLease，保护后续失败的模型引用回滚
+   │     ├─ detail::validate_backend_contract() → 7.8中的模型校验
+   │     ├─ backend->configure_input(w,h) → RKNN使用接口默认空实现
+   │     ├─ create_decoder("yolox",0,1,w,h)
+   │     │  └─ make_yolox() → YoloV11Decoder，format_name="yolox"
+   │     ├─ [冰雪] configure_task(cfg, options) → 校验并保存阈值/HSV
+   │     ├─ [核心] build_ground_mappers() → ground关闭，直接成功
+   │     ├─ warn_missing_ground_mappers() → ground关闭，无映射告警
+   │     ├─ 将cfg/backend/decoder/plugin/hooks等转存到VisionTask::Impl
+   │     ├─ Preprocessor::configure() → RGB、尺寸、居中letterbox
+   │     ├─ warmup开启且预处理就绪？→ infer_backend_contract(全零输入)
+   │     │  └─ 失败且require_warmup_success()为true → 初始化回滚
+   │     ├─ TaskDebug::configure()，置initialized=true
+   │     └─ ModelLease.committed=true，返回0
+   ├─ task.functionPlugin() → dynamic_cast为WinchIcePlugin借用指针
+   ├─ 检查确实取得冰雪插件，保存next和initialized
+   └─ 返回0给宿主
+```
+
+`create_backend()`在支持检查和注册表真正创建时可能各执行一次，但前者不调用load，不是加载了两份模型。RKNN的实际`configure_input()`沿用基类空实现，实际尺寸在load时从模型属性读取，再由契约函数比对配置。
+
+ModelLease未提交时会调用任务release并撤销该次注册表引用；正常初始化不会每帧重新获取模型。配置、推理后端、decoder、插件和预处理器在任务存活期间持续复用。
+
+源码定位：`winch_ice_api.cpp:97/162`、`vision_task.cpp:124`、`model_registry.cpp:10`、`detection_decoder.cpp::make_yolox()`。直接调用`VisionTask::initialize(path)`时，会先走文件解析和模块配置适配，再进入同一个initializeTask；没有Detector最后借用插件指针这一层。
+
+### 7.7 一帧图像的逐函数调用树
+
+下面沿正式`Detector::detect()`入口展开。`→`后的类型或名称表示该步产生、修改的主要数据。
+
+```text
+[宿主] detector.detect(image, result)
+└─ [冰雪] Detector::detect()                         外层异常边界
+   └─ Detector::Impl::detect()
+      ├─ 检查initialized；失败走Impl::reject()
+      ├─ [内联] winch_ice::detail::make_frame(image, camera, frame, gray_rgb)
+      │  ├─ 检查data、尺寸、channels
+      │  ├─ channels=1 → gray_rgb扩为三通道
+      │  └─ 填Frame：RGB、紧凑stride、相机号、timestamp_us
+      ├─ task.debugStats().frames → 保存调用前计数
+      ├─ [核心] VisionTask::detect(frame, context, generic)
+      │  ├─ acceptFrame() → 初始化、data、尺寸、相机白名单
+      │  ├─ camera_blind分支 → 当前布尔常量false，不执行真实致盲识别
+      │  ├─ Preprocessor::run(frame, input, pre_map)
+      │  │  ├─ RGB/BGR复制换色；通用NV12路径调用nv12_to_target()
+      │  │  ├─ 定点双线性缩放，letterbox填114
+      │  │  └─ input：NHWC uint8；pre_map：scale/pad及模型尺寸
+      │  └─ finishDetect(frame, ctx, input, pre_map, pre_ms, generic)
+      │     ├─ debug.enabled时缓存模型输入副本
+      │     ├─ detail::infer_backend_contract() → 7.8展开RKNN与行解码
+      │     ├─ decoder->decode(output, 0.f, targets)
+      │     │  └─ YoloV11Decoder::decode()，按单类行构造Target
+      │     ├─ 对每个Target调用map_target_to_original()
+      │     ├─ 清ground标记；ground关闭，没有mapper投影
+      │     ├─ clear_ground_metrics(targets) → 距离保持unknown
+      │     ├─ 清generic，调用plugin->decide(...)
+      │     │  └─ [冰雪] WinchIcePlugin::decide() → 下面的业务子树
+      │     ├─ [核心] pack_camera_channel() → 通用相机号
+      │     ├─ 延迟超预算？→ TaskDebug::note_budget(true)，记录警告
+      │     ├─ TaskDebug::note() → 成功帧耗时/报警等统计
+      │     ├─ TaskDebug::maybe_dump() → 按策略保存模型输入与元数据
+      │     └─ 返回0
+      ├─ [冰雪] plugin->winch_result() → 读取任务中唯一插件的report
+      ├─ result = *current → 复制候选、对象及专用状态
+      ├─ 统计计数发生变化？→ 从infer.last_ms填写inference_time_ms
+      └─ 返回VisionTask的状态码，退出同步调用
+```
+
+decoder阈值为0的原因是核心检测到冰雪实现了`IUnfilteredDetectionInput`。这里的YoloV11Decoder是实际复用的类名，它接收已解码行，不是此刻又把模型当YOLO11原始头处理。
+
+冰雪业务子树：
+
+```text
+[冰雪] WinchIcePlugin::decide(frame, ctx, targets, generic)
+├─ 清report、measurement_timestamp_ms和上帧measurements
+├─ 检查插件配置与相机号；定义fail()和log_frame_summary()局部函数
+├─ 逐Target验证数值并裁剪原图归一化边界
+│  ├─ pixel_box() → 原图像素Detection
+│  ├─ 非零像素面积 → push到report.snow_detections
+│  └─ 正分且达到业务阈值 → push到selected
+├─ selected按分数降序，overlap()计算IoU并执行NMS
+├─ 保留超过2个？→ fail(OutOfRange)并结束本帧
+├─ 保留框按中心x、再y排序
+├─ prepare_ice_pixels(frame, ice_, pixels)
+│  ├─ valid_ice_config()与图像布局校验
+│  └─ [CV] cvtColor到BGR/gray/HSV，inRange()生成整帧candidate
+├─ 记录计量时间戳；selected为空？→ publish + log_frame_summary，返回0
+├─ 为每个业务对象分配report.objects及measurements
+│  ├─ pixel_box()填对象框；宽或高小于3？→ 留invalid并继续
+│  ├─ intersects()判断与其他框交叠；交叠？→ 留invalid并继续
+│  └─ measure_ice_pixels(pixels, rect, measurement)
+│     ├─ [CV] 创建surface掩码，meanStdDev()检查可观测性
+│     ├─ 不可观测？→ 返回kIceUnobservable，当前对象保持invalid
+│     ├─ [CV] bitwise_and、3×3核、开运算、闭运算、再次限界
+│     ├─ [CV] countNonZero() → snow_pixels，计算ratio
+│     └─ 返回0 → 当前对象valid=true并保存ratio
+├─ publish(generic)
+│  ├─ summarize() → objects是否非空、任一有效对象是否达面积阈值
+│  └─ 写通用status/ice_ratio/alarm/camera，清generic.targets
+├─ log_frame_summary() → 更新成功窗口并输出INFO或DEBUG
+└─ 返回0给VisionTask::finishDetect()
+```
+
+**执行上的两个细节**：无业务框仍先生成整帧HSV等像素数据；模型框和HSV处理用的是两个分辨率层次，前者在模型输入上推理，后者在原图上计量。原图Frame一直传到插件，因此核心不会把宿主原图指针替换成640×640张量。
+
+### 7.8 从核心进入RKNN：加载、推理与输出释放
+
+#### 7.8.1 仅首次获得该模型后端时load
+
+```text
+[核心] ModelRegistry::acquire() → 新建RknnBackend时
+└─ RknnBackend::load(model_path, init_timeout_s)
+   ├─ read_file() → model_bytes
+   ├─ [SDK] rknn_init(model_bytes) → ctx
+   ├─ 读取EVS_NPU_CORE_MASK；大于0时rknn_set_core_mask(to_rknn_core(...))
+   ├─ [SDK] rknn_query(IN_OUT_NUM) → 输入/输出数量
+   ├─ [SDK] rknn_query(INPUT_ATTR) → 输入形状、布局、类型
+   ├─ 读取EVS_RKNN_INPUT_SCALE及head_mode相关环境参数
+   ├─ [SDK] 对输出query(OUTPUT_ATTR)，记录形状日志
+   └─ loaded=true，返回0
+```
+
+`load()`的`init_timeout_s`参数在RKNN实现中未实际使用，不产生超时线程或中断。NPU核选择实际读取环境变量，并未由同名YAML字段直接透传。
+
+随后`detail::validate_backend_contract()`识别RKNN非80类单输出路径，调用`validateDetectionModel()`，后者query输出属性并调用`rknn_detection_shape()`验证单类YOLOX行数、列数和元素数。
+
+模型加载阶段的错误并非所有原码都直接返回宿主：例如read_file失败时load返回StorageRead，注册表将加载失败表示为nullptr，initializeTask再统一返回ModelLoadFailed。后续契约校验失败则可返回ModelInvalidFormat并加模块8前缀，定位加载问题应同时看具体后端日志。
+
+#### 7.8.2 每帧实际推理函数
+
+```text
+[核心] detail::infer_backend_contract(backend, cfg, input, output)
+├─ explicit_detection_rows(cfg) → 当前RKNN+单类YOLOX为true
+└─ RknnBackend::inferDetectionRows()
+   ├─ validateDetectionModel() → 每帧仍会query并校验输出属性
+   └─ inferImpl(input, output, "yolox", 1)
+      ├─ 检查loaded、ctx和输入字节长度
+      ├─ 准备NHWC rknn_input，pass_through=0
+      │  ├─ 模型FLOAT32 → 转float并乘in_scale
+      │  └─ 其他输入类型分支 → 传uint8缓冲，由SDK转换
+      ├─ [SDK] rknn_inputs_set()
+      ├─ [SDK] rknn_run()
+      ├─ [SDK] rknn_outputs_get(want_float=1)
+      ├─ 成功取出输出后建立OutputGuard
+      ├─ [SDK] rknn_query(OUTPUT_ATTR)并校验输出字节数
+      ├─ rknn_detection_rows()
+      │  ├─ rknn_detection_shape()验证布局
+      │  ├─ 检查raw有限性与概率范围
+      │  └─ stride8/16/32网格还原几何、obj×class → [N,5]行矩阵
+      ├─ 更新last_run_us，准备返回0
+      └─ OutputGuard析构 → [SDK] rknn_outputs_release()
+```
+
+成功取得SDK输出后，正常返回、格式错误早退及C++异常栈展开都会经过OutputGuard释放该批SDK缓冲。返回给核心的是自有`std::vector<float>`，后面的decoder不再借用已归还的SDK输出指针。
+
+这条路径不调用`RknnBackend::infer()`的共享多头默认链，也不经过`yolo::decode_heads()`。mock测试则进入后端的`infer()`占位实现，不会调用上述SDK函数；不能把mock调用图当作正式NPU已执行的证据。
+
+源码定位：`rknn_backend.cpp:124/222/244/253`、`backend_factory.cpp:42/66`、`detection_rows.h:47`。
+
+### 7.9 成功结果与失败状态分别怎样返回
+
+#### 7.9.1 两条返回线路在Detector汇合
+
+```mermaid
+sequenceDiagram
+    participant H as 宿主
+    participant D as Detector（冰雪库）
+    participant T as VisionTask（核心库）
+    participant P as WinchIcePlugin（冰雪库）
+    H->>D: detect(image,result)
+    D->>T: detect(frame,ctx,generic)
+    T->>P: decide(frame,ctx,targets,generic)
+    P->>P: 保存report与掩码；publish通用摘要
+    P-->>T: 状态码与generic
+    T->>T: 成功时统计和按策略取证
+    T-->>D: 状态码
+    D->>P: winch_result()
+    P-->>D: report借用指针
+    D->>D: 复制report，补推理耗时
+    D-->>H: 返回状态码，同时填专用result
+```
+
+完整候选与逐对象比例不依赖generic.targets回传，该字段被插件清空。generic承担公共状态和摘要，专用数据来自插件report；这是为何Detector在核心返回后还要读一次插件。
+
+#### 7.9.2 错误在哪里截断后续调用
+
+| 失败位置 | 清理与返回路线 | 不会继续执行的步骤 |
+| --- | --- | --- |
+| 未初始化或make_frame失败 | Impl::reject → plugin存在则reject_call；清客户result并返回 | 核心预处理、模型与HSV |
+| acceptFrame、预处理或后端返回错误 | VisionTask::rejectFrame → hooks->reject_frame → 冰雪reject_call → publish | 后续decoder或插件正常计量 |
+| 框数超过2、框数据非法 | 插件fail → reject_call → 返回非0 → finishDetect设置status并返回 | 剩余像素处理、成功统计与maybe_dump |
+| 像素准备失败、计量内存/后处理失败 | reject_call清report/掩码，状态逐层返回 | 当前帧后续对象及成功返回 |
+| 小框、交叠、kIceUnobservable | 对象保留invalid；处理其他对象并最终返回0 | 只跳过该对象的有效比例写入 |
+| std::bad_alloc或其他std::exception进入Detector外层catch | Impl::reject，分别映射MemoryAllocation/PostprocessFailed | 正常结果交付 |
+
+`reject_frame()`先重置通用Result，再调用`reject_call()`；后者清候选、对象、计量掩码和报警并publish。核心在错误时仍可通过hook清掉插件上一帧结果，所以Detector即使在rc非0时读取report，也不会把旧有效对象作为本帧交付。
+
+统计也有返回分支：预处理失败和推理失败会调用`TaskDebug::note()`记录错误；acceptFrame失败、插件decide失败会提前返回，不走成功收尾。Detector是根据统计计数是否变化来决定补填infer.last_ms，因此失败结果里的耗时不能作为有效识别依据。
+
+### 7.10 热更新、释放与析构的调用顺序
+
+#### 7.10.1 客户三阈值更新
+
+```text
+[宿主] Detector::updateConfig(DetectConfig)
+└─ [冰雪] 检查initialized，复制当前WinchSnowConfig为next
+   ├─ next.detect_config替换为完整新值
+   ├─ make_task_config(next)
+   ├─ [核心] VisionTask::updateConfig(const TaskConfig&)
+   │  └─ updateTask(newcfg, 当前FunctionOptions)
+   │     ├─ 拒绝backend/model/output/classes/class_id/module变更
+   │     ├─ build_ground_mappers() → 冰雪ground关闭
+   │     ├─ [冰雪] hooks->validate_task(newcfg)
+   │     ├─ [核心] 预先复制下一配置、options和debug，准备提交
+   │     ├─ [冰雪] hooks->configure_task(newcfg,next_options)
+   │     │  └─ 范围校验成功后保存插件阈值与私有HSV
+   │     ├─ [核心] swap提交cfg/options/debug/mappers
+   │     └─ 返回状态
+   └─ 成功才保存Detector自己的next，否则保留原客户配置
+```
+
+此更新不重新调用模型load，也不重新推理上一帧。直接使用`VisionTask::updateConfig(path)`还会先重新解析完整YAML及冰雪专属选项，再进入updateTask。
+
+#### 7.10.2 release与共享模型最终销毁
+
+```text
+[宿主] Detector::release()
+└─ [冰雪] 先将借用plugin指针置空
+   ├─ [核心] VisionTask::release()
+   │  ├─ 已初始化且有backend → ModelRegistry::release()减少登记引用
+   │  ├─ hooks置空，options清理
+   │  ├─ [冰雪] plugin->reset()
+   │  │  ├─ 输出剩余日志窗口
+   │  │  └─ 清configured、计量时间、帧计数、report、measurements
+   │  ├─ [核心] 销毁plugin、mappers、decoder，initialized=false
+   │  └─ backend.reset() → 释放本任务shared_ptr
+   └─ [冰雪] Detector initialized=false
+
+最后一个后端shared_ptr释放时
+└─ [核心] ~RknnBackend() → release()
+   ├─ [SDK] rknn_destroy(ctx)
+   └─ 清模型字节、输出头等后端资源
+```
+
+注册表引用归零时删除的是表项；如果当前任务或其他持有者仍有shared_ptr，后端析构会等到最后一个指针释放，并非在删除表项时无条件立即销毁SDK上下文。其他任务仍引用同模型时不应销毁其后端。
+
+没有显式release时，`~Detector → Impl销毁 → ~VisionTask → release`形成资源释放路线。release不主动修改宿主已取得的结果副本；通用VisionTask的调试统计和缓存也不是在release中统一调用reset清空，不能把仍可读取的历史调试数据当新会话保证。
+
+### 7.11 数据生命周期、替代入口与源码索引
+
+#### 7.11.1 一次detect中各对象存活到哪里
+
+| 对象 | 拥有者与存活期 | 后续用途 |
+| --- | --- | --- |
+| ImageData.data原图 | 宿主，至少到detect返回 | 预处理与原图HSV都会读 |
+| gray_rgb | Detector::Impl::detect局部变量 | 灰度输入临时RGB；直到核心返回后才销毁 |
+| input/pre_map/output/targets | 核心单帧局部变量 | 模型输入、行矩阵、坐标映射；调用结束释放 |
+| RKNN输出缓冲 | SDK分配、OutputGuard归还 | 转成自有float向量后不再依赖 |
+| plugin.report_/measurements_ | 当前任务的冰雪插件 | 保留最近一次业务报告与掩码，下一帧/失败/reset覆盖 |
+| 调用方WinchSnowResult | 宿主自己的值对象 | 复制后可保留，需由宿主标记时效 |
+| backend/decoder/plugin/pre | VisionTask实例 | 跨帧复用，release/析构时结束相应资源 |
+
+原图到输入张量发生颜色/缩放复制，输出float和结果向量也有复制或分配，因此当前流程不是从采集到报告的全链路零拷贝。
+
+#### 7.11.2 detectPrepared和诊断不在客户主链中自动发生
+
+`VisionTask::detectPrepared()`允许通用宿主提供已准备的张量与PreprocessMap：`acceptFrame → 校验tensor.size与map输入尺寸 → finishDetect`，跳过Preprocessor::run。原图Frame仍要有效，冰雪插件仍在原图上计量。客户Detector没有暴露此入口，其detect不会自动调用它。
+
+掩码诊断由宿主在需要时调用：`IceReplayAccess::copyMasks(detector,out) → WinchIcePlugin::copy_ice_masks()`，复制surface/snow与计量时间戳；它不触发新的推理或计量。demo随后序列化JSON、保存叠图、掩码，属于detect返回后的宿主调用，不是核心每帧一定落盘。
+
+TaskDebug::note在正常核心收尾时即使debug未启用也会更新统计；maybe_dump则按enabled、dump_input、间隔/告警与数量上限判断。保存失败通常返回false并记录日志，不自动将成功检测改成错误码。
+
+核心调试侧车保存的是传给maybe_dump的解码Target集合，冰雪业务候选/置信度/NMS分流发生在插件内部，不能把调试侧车targets等同于最终objects。模型输入PPM也不是宿主原图；demo保存原图和掩码是另一条宿主产物链。
+
+#### 7.11.3 沿源码继续跟踪的入口
+
+| 查什么 | 固定427a3a6的源码位置 |
+| --- | --- |
+| 客户配置/初始化/检测/更新/释放 | winch_ice_api.cpp:162 / 97 / 126及62 / 138 / 156 |
+| 核心装配与失败回滚 | vision_task.cpp:124–228 |
+| 核心帧校验/预处理/Prepared/拒绝帧 | vision_task.cpp:231 / 246 / 285 / 309 |
+| 推理、decoder、插件与统计收尾 | vision_task.cpp:327–416 |
+| 核心热更新与资源释放 | vision_task.cpp:438 / 515 |
+| 注册表共享与引用减少 | model_registry.cpp:10 / 36 |
+| 后端分派与SDK边界 | backend_factory.cpp:52 / 66；rknn_backend.cpp:124 / 244 / 253 / 381 |
+| 业务筛选/发布/错误清理/reset | winch_ice_plugin.cpp:312 / 290 / 302 / 543 |
+| 原图像素准备与逐框计量 | ice_measurement.cpp:27 / 86 |
+
+本补充依据固定提交源码逐段核对；既有主机测试范围仍按8.4解释，没有由调用树推导出新的真实模型或硬件验收结论。
+
+#### 7.11.4 从宿主main把这些调用串成程序
+
+图片程序`tools/ice_replay/main.cpp`的入口顺序：
+
+```text
+[宿主] main(argc,argv)
+├─ 检查参数数量
+├─ load_config(task.yaml,cfg) → 7.6.2
+├─ 构造Detector并initialize(cfg) → 7.6.3，只在循环外一次
+├─ 可选FileStorage读取sequence.frames
+├─ 逐条输入：
+│  ├─ PpmImage(path) → token()/parse_int()校验并读取P6像素
+│  ├─ PpmImage::frame() → ImageData，fresh_time()填写时间戳
+│  ├─ 根据序列条目构造HostWorkingCondition
+│  ├─ host_decision() → 判断宿主是否允许检测
+│  ├─ 允许 → detector.detect()，进入7.7；否则清当前显示结果
+│  ├─ artifacts(detector,image,result,...)
+│  │  ├─ IceReplayAccess::copyMasks() → 只读复制插件掩码
+│  │  └─ artifacts(image,result,...,masks) → 写JSON、按状态保存图像
+│  └─ json(result,decision,status) → stdout
+├─ 按累计API错误返回0或1；外层异常返回2
+└─ 作用域结束，Detector析构释放任务
+```
+
+相机CLI`tools/winch_ice_demo/main.cpp`复用同一Detector，宿主前半段改为：参数解析 → load_config → 可选`cap::load_capture_config/select_entry`选择设备 → Detector初始化 → `GstCapture::open()` → 循环`grab_for()` → 检查紧凑NV12并`cvtColor()`到RGB → 可选host_decision → Detector检测 → JSON与可选artifacts → 正常结束camera.close。相机抓帧循环与工况门控在宿主，不是核心每次detect替宿主重新打开设备。
+
+Qt宿主也在采集后调用相同Detector，线程和界面交付属于独立宿主层；相关UI专项报告负责其线程生命周期。本节的插件调用树不会因使用Qt而换成另一套算法。
+
 ---
 
 ## 八、编译构建体系
@@ -1008,6 +1409,8 @@ if (rc == 0) config.detect_config = next;
 | 颜色转换、质量检查、掩码、形态学、分子和分母 | 5.2、5.7–5.8 |
 | MATCH、valid、报警、通用 Result、错误清理与 reset | 5.9–5.10、6.5、7.3、9.3–9.4 |
 | 配置默认值、路径、约束、热更新、模型共享与串行调用 | 4.4、7.4、9.5–9.6 |
+| 函数级初始化、核心/插件往返、SDK及结果返回 | 7.5–7.9 |
+| 更新、释放、数据生命周期、替代入口和main宿主循环 | 7.10–7.11 |
 | 图片/序列回放、相机门控、诊断产物及 Qt 宿主边界 | 第六章、11.3–11.5 |
 | 构建开关、静动态链接、安装、模型部署及验证范围 | 第八章 |
 | 精度、性能、兼容限制及当前版本变化 | 第十章、12.3 |

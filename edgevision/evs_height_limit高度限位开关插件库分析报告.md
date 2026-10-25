@@ -6,6 +6,7 @@
 > 分支名称核对：本地已有记录中没有 `feature/cha-apps`，包含本报告所述高度限位功能的是 `feature/chs-apps`。本次查询远端时 DNS 解析失败，无法确认远端后续是否有新提交。
 > 本文沿用 `meari/mpc-base/mpc-base分析报告.md` 与冰雪插件报告的十二章组织方式，聚焦高度限位功能及其必需的核心库和宿主链路。
 > 原源码工作区保持在 `feature/split-core-plugin-libs`，没有切换或修改。分析从 Git 提取固定分支快照；下文源码路径、行号均指 `3dec8e4`，不能按当前工作分支的同名文件解释。
+> 调用链补充：第七章7.6–7.13展开宿主、客户封装、核心、插件、OpenCV和RKNN之间的函数调用与返回；核对提交保持3dec8e4，未新增板端验证结论。
 
 当前高度限位功能的主线是：**宿主输入图像和大臂根部角度；角度落在配置窗口内时，用模型定位重锤，取最高置信度框；再在原图框内用 OpenCV 搜索穿过预设孔区的连续带状结构，将证据映射成安装状态与报警。**
 
@@ -33,7 +34,7 @@
 | [四、核心架构设计](#四核心架构设计) | 客户封装、通用任务、插件和穿线检测器 |
 | [五、核心模块深度解析](#五核心模块深度解析) | 角度门控、模型框、ROI、穿线评分和状态映射 |
 | [六、工具与辅助能力详解](#六工具与辅助能力详解) | 图片 demo、日志、图像与 JSON 产物 |
-| [七、关键数据流分析](#七关键数据流分析) | 生命周期、单帧处理、热更新与状态表 |
+| [七、关键数据流分析](#七关键数据流分析) | 从宿主入口沿函数追踪初始化、核心推理、穿线判断、返回、更新与释放 |
 | [八、编译构建体系](#八编译构建体系) | 实际可用入口、构建脚本、链接、部署和本次验证 |
 | [九、接口设计规范与配置契约](#九接口设计规范与配置契约) | 公开方法、字段、默认值、配置及错误码 |
 | [十、可靠性、需求差异与实现限制](#十可靠性需求差异与实现限制) | 未实现状态机、边界问题和现场验收事项 |
@@ -687,6 +688,460 @@ flowchart TD
 
 本次探针：初次配置相机0、窗口5–75；再次initialize相机1、窗口10–80后，80°已进入检测，但相机1仍返回InvalidCameraIndex，证明底层仍保留相机0。产品不要用重复initialize实现切配置，应使用支持范围内的updateConfig，或release后重建。
 
+### 7.6 函数级运行路线与阅读约定
+
+前面7.1–7.5建立业务全貌，下面展开真正的项目自有函数调用。建议按7.7初始化 → 7.8逐帧 → 7.9穿线内部 → 7.11返回读取；需要看硬件调用时查7.10，需要看配置与资源管理时查7.12。
+
+| 阅读目的 | 直接入口 |
+| --- | --- |
+| 看demo从main开始怎样运行 | [7.13.4 程序入口](#7134-demo怎样组织整个检测程序) |
+| 看库和模型怎样初始化 | [7.7 初始化函数树](#77-从加载插件到初始化完成的逐函数调用) |
+| 追一帧图像进入核心和插件 | [7.8 单帧函数树](#78-一帧从客户入口到高度插件的函数树) |
+| 查穿线判定内部每一步 | [7.9 内部辅助函数](#79-threadingdetector内部辅助函数的调用顺序) |
+| 查返回、失败、热更新和释放 | [7.11 返回与退出](#711-结果怎样逐层返回错误从哪里退出)、[7.12 更新与释放](#712-配置更新释放与析构的逐函数调用) |
+
+标记约定：`[宿主]`是产品应用或图片demo，`[高度]`是libevs_height_limit，`[核心]`是libevs_core，`[CV]`是OpenCV接口，`[SDK]`是RKNN接口。缩进表示谁调用谁，同一层从上到下表示执行顺序。标准容器、操作系统加载器以及OpenCV/RKNN内部实现不属于本仓库，展开至其外部函数边界；数值判定含义在第五章已有说明。
+
+高度功能的调用会在两份库之间往返：
+
+```text
+宿主 → [高度] HeightLimitTask
+         → [核心] VisionTask与模型后端
+             → [高度] HeightLimitPlugin与ThreadingDetector
+             ← 通用Result和返回码
+         ← [高度] 将通用状态转换成客户结果与报警
+     ← 宿主得到HeightLimitResult
+```
+
+这一过程同步执行。封装、插件和穿线检测器不通过独立服务交换消息；返回的`limit_state`和`alarm_level`也不是同时在同一个函数内产生，下面分开追踪。
+
+### 7.7 从加载插件到初始化完成的逐函数调用
+
+#### 7.7.1 库加载时登记创建入口
+
+```text
+[高度] kHeightLimit静态对象：FunctionPluginRegistration(0x0007,...)
+└─ [核心] register_function_plugin(0x0007, make_height_limit_plugin)
+   └─ 在工厂表保存模块7的创建函数
+[核心] decoder静态登记
+└─ register_decoder("yolox", make_yolox)等
+```
+
+静态登记没有加载重锤模型。只有后面`create_function_plugin()`调用创建函数时，才创建任务的插件实例。高度没有登记自己的文件配置适配器，因此不能套用冰雪“加载YAML时补齐单类RKNN契约与相对路径”的行为。
+
+#### 7.7.2 一次成功初始化的调用树
+
+```text
+[宿主] task.initialize(yaml_path)
+└─ [高度] HeightLimitTask::initialize()
+   ├─ load_angle_window(path,start,stop)                 第一次读配置
+   │  └─ [核心] load_task_config()
+   │     └─ detail::load_task_config_with_module()
+   │        ├─ parse_task_config()
+   │        │  └─ trim/strip_comment/split_kv、数组与to_*转换
+   │        └─ 模块7无专属loader，返回通用TaskConfig
+   │  返回后检查stop>start；保存到局部start/stop
+   ├─ [核心] VisionTask::initialize(path)               第二次读配置
+   │  ├─ 已初始化？是 → 返回0，不重读底层配置
+   │  ├─ detail::load_task_config_with_module() → cfg/options
+   │  └─ initializeTask(cfg,options)
+   │     ├─ create_function_plugin(cfg.module_id)
+   │     │  └─ [高度] make_height_limit_plugin() → new HeightLimitPlugin
+   │     ├─ dynamic_cast到IFunctionTaskHooks → 高度没有此接口
+   │     ├─ [核心] create_backend(cfg.backend)检查是否编入
+   │     ├─ global_registry().acquire(backend,model,timeout)
+   │     │  ├─ 已有同键后端 → 增引用并复用
+   │     │  └─ 无同键后端 → create_backend() → backend->load()
+   │     ├─ 建立局部ModelLease用于后续失败回滚
+   │     ├─ detail::validate_backend_contract() → 正式单类RKNN形状校验
+   │     ├─ backend->configure_input(w,h)
+   │     ├─ create_decoder("yolox",-1,1,640,640)
+   │     │  └─ make_yolox() → YoloV11Decoder，format_name="yolox"
+   │     ├─ [高度] HeightLimitPlugin::configure(cfg)
+   │     │  └─ 检查stop>start与min_frames>=1，再保存配置
+   │     ├─ [核心] build_ground_mappers()/warn_missing_ground_mappers()
+   │     │  └─ 正式样例ground=false，直接跳过实际mapper创建
+   │     ├─ 将cfg/backend/decoder/plugin等存到VisionTask::Impl
+   │     ├─ Preprocessor::configure()
+   │     │  └─ BGR、640×640、letterbox=true、top_left=true
+   │     ├─ 若warmup=true → infer_backend_contract(全零张量)
+   │     │  └─ 高度无严格hook，明确返回的预热错误仅记录警告
+   │     ├─ TaskDebug::configure()，initialized=true
+   │     └─ ModelLease提交，返回0
+   ├─ [高度] 保存第一次读取的start/stop，initialized=true
+   └─ 返回0给宿主
+```
+
+树中decoder参数采用正式`height_limit_zch.yaml`；其它配置会改变后端和decoder，不能把mock样例看成已执行正式RKNN。复用的类名YoloV11Decoder在此接收YOLOX已解码行，不在这里再次处理YOLO11原始头。
+
+这里确实会读取同一配置两次；调用期间应保持文件内容稳定，否则外层窗口与底层完整配置存在不一致机会。首次角度读取也没有强制检查module7，故正确模块号仍由宿主保证。
+
+初始化失败分层返回：配置/角度错误在外层结束；底层模型、decoder或插件错误逐层返回；ModelLease未提交时撤销模型引用并清理已装配资源。后端共享键为backend和模型路径，正常每帧不会重新load模型。
+
+源码定位：`height_limit_api.cpp:16/45`、`vision_task.cpp:101/124`、`height_limit_plugin.cpp:21`、`model_registry.cpp:10`。
+
+### 7.8 一帧从客户入口到高度插件的函数树
+
+#### 7.8.1 外层先决定是否进入核心
+
+```text
+[宿主] HeightLimitTask::detect(frame, height_ctx, out)
+└─ [高度] out = HeightLimitResult{}                     每次先清输出
+   ├─ 未初始化？→ 返回0x00071007
+   ├─ boom_angle不属于[0,90]，含NaN/Inf？→ 返回0x00071003
+   ├─ boom_angle在配置窗外？→ 返回0，不调用任何核心推理步骤
+   ├─ 创建MachineContext，context_valid=true，复制boom_length/angle
+   ├─ 创建局部Result raw{}
+   ├─ [核心] VisionTask::detect(frame,machine,raw)         见下面子树
+   ├─ 非0？→ 原样返回，out仍为默认空结果
+   ├─ out.limit_state = raw.limit_state
+   ├─ out.targets = std::move(raw.targets)
+   ├─ switch(limit_state) → 写result_code和alarm_level
+   └─ 返回0
+```
+
+因此单次返回0可能完全没进入核心；外层只复制臂长，不检查基本臂长、运行工况或数据时效。图像所有权仍由宿主持有，直到本次调用返回。
+
+#### 7.8.2 核心逐帧处理的实际顺序
+
+```text
+[核心] VisionTask::detect(frame,ctx,raw)
+├─ acceptFrame() → 初始化、data、宽高、相机白名单检查
+├─ camera_blind分支 → 当前false占位，没有实际运行致盲检测
+├─ Preprocessor::run(frame,input,pre_map)
+│  ├─ BGR/RGB复制或换色；通用NV12路径调用nv12_to_target()
+│  ├─ 定点双线性缩放；正式样例贴左上、其余填114
+│  └─ 交付input(NHWC uint8)和PreprocessMap(scale/pad)
+└─ finishDetect(frame,ctx,input,pre_map,pre_ms,raw)
+   ├─ debug.enabled时缓存一份模型输入
+   ├─ detail::infer_backend_contract() → 7.10展开RKNN调用
+   ├─ decoder->decode(output,cfg.confidence_threshold,targets)
+   │  └─ YoloV11Decoder::decode() → 取类别/分数并构造Target
+   ├─ 对每个目标调用map_target_to_original()
+   ├─ 清ground标记，按相机查mapper；正式ground=false，无投影
+   ├─ clear_ground_metrics(targets) → 无需地面距离参与高度判断
+   ├─ raw = Result{}，raw.status=0
+   ├─ plugin->decide(frame,ctx,targets,raw)
+   │  └─ [高度] HeightLimitPlugin::decide()，见下一个子树
+   ├─ [核心] pack_camera_channel(frame.camera_id)
+   ├─ 超延迟预算？→ TaskDebug::note_budget(true)与警告
+   ├─ TaskDebug::note() → 用通用raw.alarm记录耗时/计数
+   ├─ TaskDebug::maybe_dump() → 按策略保存模型输入与元数据
+   └─ 返回0给HeightLimitTask
+```
+
+高度没有`IUnfilteredDetectionInput`，核心decoder用配置阈值；当前显式单输出路径在此链上也没有独立NMS调用。decoder之后还原原图坐标，再送插件，不应把模型640×640坐标直接裁到原图。
+
+#### 7.8.3 核心如何调用插件和安装判断
+
+```text
+[高度] HeightLimitPlugin::decide(frame,ctx,targets,raw)
+├─ raw.alarm=None，ice_ratio=0，清raw.targets
+├─ best_switch(targets)
+│  └─ 线性比较confidence，仅严格大于时替换最佳目标
+├─ 无最佳目标？→ raw.limit_state=1，返回0，不调用OpenCV
+├─ raw.targets.push_back(最高分框)
+├─ judge_switch_mount(frame,最高分框)
+│  ├─ 未启用OpenCV？→ 直接返回0 unknown
+│  ├─ 检查data、宽高、框w/h为正
+│  ├─ [CV] 原图转BGR：RGB→cvtColor，NV12→cvtColorTwoPlane
+│  │  └─ BGR直接借用原图Mat视图
+│  ├─ lround原图端点，Rect与图像边界求交
+│  ├─ ROI为空？→ 返回0 unknown
+│  └─ try范围内：
+│     ├─ 构造ThreadingDetector(默认DetectorConfig)
+│     │  └─ validate(config)检查几何与数值范围
+│     ├─ detector.detect(bgr(roi)) → 7.9展开
+│     ├─ stateName()与OPENCV日志输出诊断
+│     └─ Threaded→3；NotThreaded→2；Uncertain→0
+│     catch std::exception → 记录日志，返回0 unknown
+├─ raw.limit_state = 安装判断返回的整数
+└─ 返回0给VisionTask::finishDetect()
+```
+
+模型没有框时，安装检测器根本不构造；有框时，每次调用都构造默认ThreadingDetector，没有在这个对象内累计跨帧证据。该插件当前也不通过min_frames建立观察窗口。
+
+### 7.9 ThreadingDetector内部辅助函数的调用顺序
+
+```text
+[高度] ThreadingDetector::ThreadingDetector(config)
+└─ validate(config)
+   └─ finite()检查浮点值，校验孔区、尺度、带宽与阈值关系
+
+[高度] ThreadingDetector::detect(roi)
+├─ 建立默认DetectionResult：Uncertain、score=0、hasCandidate=false
+├─ 空图？→ reason=empty_input，直接返回
+├─ toGray(roi)
+│  ├─ 检查2D、8位、1/3/4通道
+│  └─ [CV] BGR/BGRA→cvtColor；灰度借用视图
+├─ 计算原ROI坐标中的holeRegion矩形
+├─ 原ROI短边不足minInputSide？→ input_too_small，返回
+├─ [CV] resize() → 长边归一化到256
+├─ percentiles(gray8)
+│  ├─ 遍历像素建立256级直方图
+│  └─ 局部percentile()累计分布，取得p05/p95
+├─ contrast不足？→ low_contrast，返回
+├─ [CV] Laplacian + meanStdDev → sharpness
+├─ sharpness不足？→ blurred，返回
+├─ [CV] convertTo/max/min → 灰度拉伸并截断；GaussianBlur
+├─ [CV] createLineSegmentDetector(LSD_REFINE_STD)->detect()
+├─ lengthSquared()作为排序辅助，线段按长度降序
+├─ 遍历足够长、方向合格的线段，最多80条
+│  └─ evaluateBoundary(gray,direction,boundaryOffset,config,result)
+│     ├─ 建立normal、孔区中心、椭圆inEllipse()判定
+│     ├─ 求图像角点在方向轴上的范围，确定采样起止
+│     ├─ 遍历候选width及sign=-1/+1
+│     ├─ 孔区最近点未通过0.85约束？→ 跳过该候选
+│     ├─ 沿方向采样每个t，产生7条法向位置
+│     │  ├─ 贴近图边界？→ 跳过该采样位置
+│     │  ├─ interpolate() → 浮点灰度双线性插值
+│     │  ├─ clamp01() → 两侧边缘强度
+│     │  └─ 更新Prefix前缀和、内部灰度矩和孔区计数
+│     ├─ 遍历3种窗口长度，起点每次推进4个采样位置
+│     │  ├─ 采样数或孔区覆盖不足？→ 跳过窗口
+│     │  ├─ 从Prefix差分求edge、paired、variance和score
+│     │  └─ score严格提高最佳值？→ 保存指标、band、hasCandidate
+│     └─ 返回当前最优result，继续下一条线段
+├─ 将result.band四角分别按实际sx/sy映回原ROI
+├─ 对最佳score做0.60/0.65分界，写state与reason
+└─ 返回DetectionResult给judge_switch_mount()
+```
+
+quality提前返回时state仍为Uncertain；质量通过而没有候选时，初始score=0会在末尾形成NotThreaded。`hasCandidate`不额外控制最终状态，这个标志不能替代score判断。
+
+Prefix只是evaluateBoundary内的临时累计结构，DetectionResult保存本次最优证据；两者都不表示跨帧累计。完整公式、参数和数值例子参见5.8–5.11。
+
+### 7.10 从核心进入RKNN的加载与逐帧函数
+
+#### 7.10.1 首次加载后端与初始化校验
+
+```text
+[核心] ModelRegistry::acquire(backend,model,timeout)
+├─ 已有同键后端？→ 增引用并复用，跳过模型load
+└─ create_backend("rknn") → RknnBackend::load()
+   ├─ read_file() → model_bytes
+   ├─ [SDK] rknn_init() → ctx
+   ├─ 可选EVS_NPU_CORE_MASK → to_rknn_core() → rknn_set_core_mask()
+   ├─ [SDK] rknn_query(IN_OUT_NUM/INPUT_ATTR) → 模型布局和类型
+   ├─ 读取输入scale与head_mode等环境设置
+   ├─ [SDK] query各OUTPUT_ATTR并记录输出形状
+   └─ loaded=true
+
+[核心] detail::validate_backend_contract(backend,cfg)
+└─ explicit_detection_rows(cfg)为true
+   └─ RknnBackend::validateDetectionModel()
+      ├─ 检查实际输入宽高、3通道、单输出
+      ├─ [SDK] query(OUTPUT_ATTR)
+      └─ rknn_detection_shape()检查YOLOX行列、stride和元素数量
+```
+
+支持检查的create_backend与注册表新建可能分别构造后端，但只有注册表路径调用load，不等于重复加载模型。`backend->configure_input()`对RKNN沿用基类默认空实现，不能用它替换模型真实尺寸。
+
+RKNN load并未真正使用传入init_timeout_s控制超时；NPU核设置来自环境变量，不是YAML值直接生效。匹配模型及SDK成功返回仍是正式检测必要条件。
+
+加载错误存在一层归并：load内部读文件失败可返回StorageRead，但ModelRegistry::acquire以nullptr表示失败，initializeTask向宿主给出ModelLoadFailed；模型加载后的显式形状校验失败则可以ModelInvalidFormat返回。需要对照后端日志确认更具体原因。
+
+#### 7.10.2 每帧输入、推理、行矩阵和释放
+
+```text
+[核心] detail::infer_backend_contract(backend,cfg,input,output)
+└─ RKNN + decoder_classes=1 + yolox → inferDetectionRows()
+   ├─ validateDetectionModel() → 每帧再次校验输出契约
+   └─ RknnBackend::inferImpl(input,output,"yolox",1)
+      ├─ 校验loaded、ctx、input长度
+      ├─ 准备rknn_input：NHWC、pass_through=0
+      │  ├─ 模型FLOAT32 → uint8转float并乘in_scale
+      │  └─ 其他分支 → uint8缓冲交SDK转换
+      ├─ [SDK] rknn_inputs_set()
+      ├─ [SDK] rknn_run()
+      ├─ [SDK] rknn_outputs_get(want_float=1)
+      ├─ 成功取得输出后建立OutputGuard
+      ├─ [SDK] query(OUTPUT_ATTR)，校验输出大小
+      ├─ rknn_detection_rows(raw_float,...)
+      │  ├─ rknn_detection_shape()检查布局
+      │  ├─ 原始值有限性与概率范围校验
+      │  └─ stride8/16/32解码：网格+exp、obj×class → [N,5]
+      ├─ 更新后端last_run_us，准备返回
+      └─ OutputGuard析构 → [SDK] rknn_outputs_release()
+```
+
+格式错误或异常发生在成功get之后，也通过OutputGuard归还该批SDK输出。核心随后处理的是自有float向量，不保存已释放的SDK输出指针。
+
+正式单类路径直接进入inferDetectionRows，不调用默认`RknnBackend::infer() → yolo::decode_heads()`多头路线。该分支对共享helper新增的YOLOX自动类数推断位于默认多头路线，不应误认成当前正式样例实际调用了该helper。mock测试走mock后端infer，不执行SDK。
+
+### 7.11 结果怎样逐层返回，错误从哪里退出
+
+#### 7.11.1 成功返回：先安装状态，后客户报警
+
+```mermaid
+sequenceDiagram
+    participant H as 宿主
+    participant W as HeightLimitTask（高度库）
+    participant T as VisionTask（核心库）
+    participant P as HeightLimitPlugin（高度库）
+    participant M as mount与ThreadingDetector（高度库）
+    H->>W: detect(frame,context,out)
+    W->>W: 清out，检查臂角
+    W->>T: detect(frame,machine,raw)
+    T->>P: decide(frame,machine,targets,raw)
+    P->>M: judge_switch_mount(frame,best)
+    M-->>P: 0/2/3安装状态
+    P-->>T: raw.limit_state和最高分框，raw.alarm=None
+    T->>T: 通用统计和按策略取证
+    T-->>W: 返回0与raw
+    W->>W: move目标，按limit_state映射result_code/alarm_level
+    W-->>H: 返回0，填专用out
+```
+
+无框时插件直接写state1，不进入M。最终WARN是HeightLimitTask在核心返回之后产生；核心统计和取证看到的通用raw.alarm仍是None，因此核心“只按报警取证”的策略不会因这个外层WARN自动触发。
+
+与冰雪不同，这里没有额外调用`functionPlugin()`或`winch_result()`读取插件私有报告：状态和目标通过普通raw直接返回，目标向量再move给客户结果。内部穿线DetectionResult在mount局部使用，score、reason、band等没有一起进入公共结果。
+
+#### 7.11.2 各种退出的后续调用是否发生
+
+| 退出位置 | 返回与输出 | 被跳过的后续步骤 |
+| --- | --- | --- |
+| 外层未初始化/臂角非法 | 模块7错误，客户out已清 | 核心校验、预处理、模型、插件 |
+| 外层合法但窗外 | 返回0，客户out为unknown空目标 | 整个核心链，包含统计和取证 |
+| acceptFrame返回错误 | VisionTask::rejectFrame后逐层返回非0，客户out仍清空 | 预处理与模型 |
+| Preprocessor或后端返回错误 | note记录相应错误，rejectFrame后返回 | 后续decoder/安装判断 |
+| 无模型框 | 插件state1并返回0，核心正常收尾 | mount和ThreadingDetector |
+| 未启用CV、ROI不合法、质量拒绝或灰区 | state0、保留模型框、返回0 | 相应尚未到达的安装判断后续阶段 |
+| ThreadingDetector阶段抛std::exception且被mount捕获 | 降为state0并记录日志，整体仍可返回0 | 剩余内部计算 |
+| mount的颜色转换/建ROI或上层其他阶段抛异常 | 包装层没有统一catch，可能向宿主传播 | 常规返回路线未必完成 |
+
+`VisionTask::rejectFrame()`只在插件实现IFunctionTaskHooks时调用其reject_frame。高度没有这个hook，故直接使用VisionTask的调用方不能依靠它保证清除上一帧Result；HeightLimitTask因每次先清out且raw为局部新对象，避免把旧客户结果带出。
+
+明确返回的错误码与异常传播是两种控制流，不能把所有异常都画成“返回PostprocessFailed”。相应日志、异常边界和普通错误码需分别检查。
+
+### 7.12 配置更新、释放与析构的逐函数调用
+
+#### 7.12.1 配置更新到内外两层提交
+
+```text
+[宿主] HeightLimitTask::updateConfig(path)
+└─ [高度] 检查initialized
+   ├─ load_angle_window(path,start,stop) → 通用解析，检查窗口
+   ├─ [核心] VisionTask::updateConfig(path)
+   │  ├─ detail::load_task_config_with_module() → 第二次读完整配置
+   │  └─ updateTask(newcfg,options)
+   │     ├─ 拒绝backend/model/output/classes/class_id/module改变
+   │     ├─ build_ground_mappers()/warn_missing_ground_mappers()
+   │     ├─ 检查plugin；高度无hooks->validate_task步骤
+   │     ├─ 复制下一cfg/options/debug并configure调试策略
+   │     ├─ [高度] HeightLimitPlugin::configure(newcfg)
+   │     │  └─ stop>start、min_frames>=1后保存配置
+   │     ├─ [核心] swap提交cfg/options/debug/mappers
+   │     └─ 返回0
+   ├─ [高度] 仅底层成功后提交外层start/stop
+   └─ 返回0
+```
+
+正常校验失败保留旧窗口与策略；更新期间同样应保持文件稳定。此链没有重新调用Preprocessor::configure或后端load，因此不能用更新文件实现输入尺寸、色序、补边锚点或模型切换。重复initialize造成内外不一致的原因已在7.5说明。
+
+#### 7.12.2 释放顺序与共享后端
+
+```text
+[宿主] HeightLimitTask::release()
+└─ [核心] VisionTask::release()
+   ├─ 已初始化且有backend → ModelRegistry::release()减少登记引用
+   ├─ 清hooks指针和FunctionOptions
+   ├─ [高度] plugin->reset() → h_frames_=0
+   ├─ [核心] 销毁plugin、ground_mappers和decoder
+   ├─ initialized=false
+   └─ backend.reset()释放本任务shared_ptr
+[高度] 外层initialized=false
+
+若最后一个后端shared_ptr结束
+└─ [核心] ~RknnBackend() → release()
+   ├─ [SDK] rknn_destroy(ctx)
+   └─ 清模型字节和后端输出头等
+```
+
+注册表引用归零只表示表项删除；任务自身及其他持有者的shared_ptr也结束后，后端才最终析构。存在其他共享任务时不会因当前任务release而无条件销毁其模型上下文。
+
+不显式release时，`~HeightLimitTask → Impl销毁 → ~VisionTask → release`释放资源。宿主应先停止调用线程，再销毁实例；release不清宿主旧结果副本，也没有为调用者提供“设备已经物理安全”的确认。
+
+### 7.13 数据对象、执行频率与源码索引
+
+#### 7.13.1 一帧数据在哪里生成、在哪里结束
+
+| 数据 | 生成或拥有位置 | 存活和返回方式 |
+| --- | --- | --- |
+| Frame原图、HeightLimitMachineContext | 宿主 | 原图至少活到detect返回，角度在外层先使用 |
+| MachineContext、Result raw | HeightLimitTask::detect局部 | raw承接核心结果；成功时targets移交客户 |
+| input、PreprocessMap、float output、Target集合 | 核心单帧局部 | 分别用于模型、解码和插件；收尾后释放 |
+| RKNN输出内存 | SDK，OutputGuard归还 | 已复制/解码到float向量后才供后续处理 |
+| bgr/ROI视图、ThreadingDetector、DetectionResult | judge_switch_mount局部 | 只在本次安装判断内存在，诊断写日志 |
+| normalized gray、lines、Prefix、临时候选 | ThreadingDetector内部 | 逐ROI计算，不保存上一帧证据 |
+| HeightLimitResult.targets | 宿主输出对象 | 由raw.targets移动取得，可在返回后保留 |
+| backend/decoder/plugin/preprocessor | VisionTask实例 | 跨帧复用，直到释放或析构 |
+
+#### 7.13.2 哪些调用一次，哪些调用每帧
+
+| 调用 | 频率和条件 |
+| --- | --- |
+| 静态功能/decoder登记 | 每次相应库被实际加载时 |
+| 模型load | 注册表没有同键模型时，非每帧 |
+| 配置文件解析 | initialize/updateConfig时；外层与核心分别读 |
+| 外层角度校验 | 每次HeightLimitTask::detect |
+| 核心预处理、推理、解码 | 只有角度窗内且前置检查通过 |
+| ThreadingDetector构造与ROI算法 | 只有有模型框、启用CV且原图ROI有效 |
+| TaskDebug::note | 核心正常收尾；部分预处理/推理错误也记录，窗外不记录 |
+| TaskDebug::maybe_dump | 核心成功收尾才调用，内部再判断策略；不保证每帧生成文件 |
+| demo画框、JPEG和JSON | detect返回后由宿主执行，不包含在库内识别链 |
+
+`detectPrepared()`是VisionTask的替代入口：`acceptFrame → 检查张量字节数和map模型尺寸 → finishDetect`，跳过CPU预处理。HeightLimitTask没有暴露它；直接用通用Prepared入口的宿主需自行执行臂角策略及专用报警映射，不能借此自动获得外层封装逻辑。
+
+调试计数即使debug.enabled为false也能更新，图像落盘则需满足enabled/dump_input等策略。VisionTask::release没有统一调用dbg.reset，也未主动清last_input缓存；历史调试信息与新一轮业务输出应分开解释。
+
+核心maybe_dump收到的是解码后的Target集合，不是插件只保留的最高分raw.targets；侧车里多个框与客户结果一个框并不矛盾。核心输入PPM与demo的原图框图也分属不同阶段。
+
+#### 7.13.3 从报告跳回源码的入口
+
+| 跟踪内容 | 固定3dec8e4的源码位置 |
+| --- | --- |
+| 客户窗口加载、初始化、更新、释放、检测 | height_limit_api.cpp:16 / 45 / 61 / 80 / 85 |
+| 核心装配、ModelLease和预处理设置 | vision_task.cpp:124–229 |
+| 原图detect、Prepared、拒绝帧与单帧主体 | vision_task.cpp:247 / 286 / 310 / 328 |
+| 通用热更新与资源释放 | vision_task.cpp:439 / 516 |
+| 模型注册、SDKload/推理/释放 | model_registry.cpp:10/36；rknn_backend.cpp:126/246/255/388 |
+| 插件选择最高分框、配置与判定 | height_limit_plugin.cpp:10 / 21 / 34 |
+| 原图ROI、调用内部算法和返回整数状态 | height_limit_mount.cpp:19 |
+| 参数、灰度、分位数、插值、候选搜索与主算法 | height_limit_threading.cpp:31 / 56 / 70 / 93 / 115 / 257 |
+
+本补充按以上固定提交核对函数关系，既有255项主机检查和16项探针仍按8.6的范围解释，没有因调用树展开就增加真实模型、OpenCV像素或设备验证结论。
+
+#### 7.13.4 demo怎样组织整个检测程序
+
+`demo/height_limit_detect_demo/main.cpp`把上面的接口组织为一次进程运行：
+
+```text
+[宿主] main(argc,argv)
+├─ parse_args() → Options；帮助或参数错误按约定退出
+├─ 检查out目录不存在并创建
+├─ collect_images(image,limit) → 单图或排序后的目录图像列表
+├─ 有model/threshold覆盖？
+│  └─ read_text() → replace_yaml_value() → write_text(_runtime.yaml)
+├─ 构造HeightLimitTask，initialize(task_path) → 7.7，循环外一次
+├─ 逐张图片：
+│  ├─ [CV] imread(IMREAD_COLOR) → BGR原图
+│  ├─ 填Frame：相机0、尺寸、stride、data、now_us()
+│  ├─ 填HeightLimitMachineContext：臂长0、Options指定的臂角
+│  ├─ steady_clock计时 → task.detect() → 7.8
+│  ├─ 返回非0？→ 退出4；否则继续处理结果
+│  ├─ target_json()生成原图像素xyxy与归一化xywh
+│  ├─ [CV] 画框/标签 → write_jpeg() → imencode并写文件
+│  └─ 按limit_state累计分类数，输出本图JSON并保存record
+├─ write_text(results.json)写全部成功records
+├─ 打印汇总，返回0；捕获的文件/其它异常返回2
+└─ 作用域结束，HeightLimitTask析构释放内部任务
+```
+
+模型初始化失败返回3，读图失败返回2；有框/无框/正确/错误都不是进程退出码本身，需读取每图结果。窗外detect成功也会继续画unknown标签并计入unknown数量，因此最终统计的images不是“完成模型推理次数”。
+
+demo使用task析构释放资源，没有在每张图后release；因此同一进程的图片复用同一模型。产品接摄像头时可替换输入循环，保留“外部取图与工况 → 同一HeightLimitTask.detect → 状态输出”的调用结构。
+
 ---
 
 ## 八、编译构建体系
@@ -1190,6 +1645,8 @@ if (rc != 0u) {
 | 图像质量、默认参数、配置验证与孔区先验 | 5.7–5.8 |
 | 线段、带宽、采样、前缀和与评分公式 | 5.9–5.10 |
 | 三态/四态、报警映射与完整状态表 | 5.11–5.12、第七章 |
+| 函数级初始化、核心推理、插件与穿线辅助函数 | 7.6–7.10 |
+| 结果返回、错误退出、配置提交、释放与数据生命周期 | 7.11–7.13 |
 | demo参数、配置覆盖、格式、JSON、日志和退出码 | 第六章 |
 | 实际构建入口、脚本、交付和兼容边界 | 第八章 |
 | 默认值、无效参数、错误码和异常 | 第九章 |
